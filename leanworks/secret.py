@@ -10,7 +10,7 @@ class GCPSecretLoader:
         self.client = secretmanager.SecretManagerServiceClient(credentials=credentials)
 
     def get(self, name):
-        if self.client_name != "leanworks" and name not in ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"]:
+        if self.client_name != "leanworks":
             name = f"{self.client_name.upper()}_{name}"
         with open(self.key_path, "r") as f_in:
             credential = json.load(f_in)

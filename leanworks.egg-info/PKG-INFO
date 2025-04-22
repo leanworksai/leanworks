@@ -2,8 +2,13 @@ Metadata-Version: 2.4
 Name: leanworks
 Version: 0.1.0
 Summary: Internal LeanWorks package
+Home-page: https://github.com/LeanWorks-ai/leanworks
 Author: Yanfu Zhu
 Author-email: yanfu@leanworks.ai
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
 Requires-Python: >=3.10
 Requires-Dist: pinecone-client==5.0.1
 Requires-Dist: google-cloud-storage==2.19.0
@@ -20,6 +25,8 @@ Requires-Dist: numpy==1.26.0
 Requires-Dist: tiktoken==0.9.0
 Dynamic: author
 Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
 Dynamic: requires-dist
 Dynamic: requires-python
 Dynamic: summary
