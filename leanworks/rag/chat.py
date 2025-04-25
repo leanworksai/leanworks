@@ -1,22 +1,23 @@
 from pinecone import Pinecone
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any
 import numpy as np
-import json
 from leanworks.rag.filters import FilterExtractor
 from leanworks.rag.memory import MemoryManager
-from leanworks.rag.query import QueryParser
-from leanworks.rag.reranker import CrossEncoderReranker, HybridReranker
+from leanworks.rag.reranker import CrossEncoderReranker
+from leanworks.rag.setting import GENERATION_MODEL, RETRIEVE_TOP_K, RERANK_TOP_K, SIMILARITY_CUTOFF
 import datetime
 import logging
 from functools import lru_cache
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+from google.genai import types
+import json
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class Chat(FilterExtractor, MemoryManager, QueryParser):
+class Chat(FilterExtractor, MemoryManager):
     """
     Chat class for retrieving context from Pinecone and generating responses using OpenAI.
     """
@@ -30,7 +31,6 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         user_id: str | None = None,
         session_id: str | None = None,
         use_reranker: bool = True,
-        reranker_type: str = "cross_encoder"
     ):
         """
         Initialize Chat with Pinecone vector store and memory management.
@@ -44,7 +44,6 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
             user_id: ID of the user
             session_id: ID of the current conversation session
             use_reranker: Whether to use the reranker for improved precision
-            reranker_type: Type of reranker to use ("cross_encoder" or "hybrid")
         """
         # Initialize Pinecone
         pc = Pinecone(api_key=pinecone_api_key)
@@ -62,18 +61,11 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         # Initialize the FilterExtractor part
         FilterExtractor.__init__(self)
         
-        # Initialize the QueryParser part
-        QueryParser.__init__(self, model_client)
-        
         # Initialize the Reranker if enabled
         self.use_reranker = use_reranker
         if self.use_reranker:
-            if reranker_type == "hybrid":
-                self.reranker = HybridReranker(model_client)
-                logger.info("Hybrid reranker initialized")
-            else:
-                self.reranker = CrossEncoderReranker(model_client)
-                logger.info("Cross-encoder reranker initialized")
+            self.reranker = CrossEncoderReranker(model_client)
+            logger.info("Cross-encoder reranker initialized")
             
         logger.info("RAG system initialized successfully")
 
@@ -87,7 +79,8 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 future = executor.submit(
                     self.embedding_model_client.models.embed_content,
                     model="text-embedding-004",
-                    contents=text
+                    contents=text,
+                    config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
                 )
                 # Wait for result with 30 second timeout
                 result = future.result(timeout=30)
@@ -95,15 +88,15 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         except (concurrent.futures.TimeoutError, Exception) as e:
             logger.error(f"Error generating embedding: {str(e)}")
             # Return a zero embedding as fallback
-            return np.zeros(1536)  # Standard embedding dimension
+            return np.zeros(768)  # Standard embedding dimension
 
-    def retrieve_nodes(self, query: str, top_k: int = 20) -> Tuple[List[dict], List[str]]:
+    def retrieve_nodes(self, query: str, top_k: int = RETRIEVE_TOP_K) -> Tuple[List[dict], List[str]]:
         """
         Retrieve relevant context from Pinecone.
         
         Args:
             query: The user query
-            top_k: Number of context chunks to retrieve (default 20 for reranking)
+            top_k: Number of context chunks to retrieve (default from settings)
             
         Returns:
             Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
@@ -128,16 +121,23 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
             logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
         
         # Query Pinecone with time filter if available
-        nodes = self.index.query(
-            vector=query_embedding.tolist(),
-            top_k=top_k,
-            include_metadata=True,
-            filter=filter_dict if filter_dict else None
-        )
-        logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes from Pinecone")
-        return nodes
+        try:
+            nodes = self.index.query(
+                vector=query_embedding.tolist(),
+                top_k=top_k,
+                include_metadata=True,
+                filter=filter_dict if filter_dict else None
+            )
+            logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes from Pinecone")
+            return nodes
+        except Exception as e:
+            logger.error(f"Error querying Pinecone: {str(e)}")
+            # Return an empty result structure with similar interface as Pinecone response
+            from types import SimpleNamespace
+            empty_response = SimpleNamespace(matches=[])
+            return empty_response
     
-    def postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = 5) -> Tuple[List[dict], List[str]]:
+    def postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = RERANK_TOP_K) -> Tuple[List[dict], List[str]]:
         """
         Process retrieved nodes from Pinecone and extract context information.
         
@@ -150,9 +150,10 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
         """
         logger.info(f"Postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
+        logger.debug("Initial documents", nodes.matches)
         # Filter results by relevance score
-        filtered_results = [match for match in nodes.matches if match.score >= 0.4]
-        
+        filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
+        logger.debug("Score filtered documents", filtered_results)
         # Apply reranking if enabled and needed (directly on the filtered results)
         if self.use_reranker and filtered_results:
             # Check if reranking should be applied based on result quality
@@ -171,7 +172,8 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
                 filtered_results = filtered_results[:rerank_top_k]
-        
+        logger.debug("Reranked documents", filtered_results)
+
         # Extract user filters from query
         user_filters = self.extract_user_filters(query)
         
@@ -240,10 +242,10 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 "timestamp": timestamp,
                 "data_source": data_source
             })
-        logger.info(f"Filtered contexts: {contexts}")
+        logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
     
-    async def async_postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = 5) -> Tuple[List[dict], List[str]]:
+    async def async_postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = RERANK_TOP_K) -> Tuple[List[dict], List[str]]:
         """
         Asynchronous version of postprocess_nodes that uses async reranking for better performance.
         
@@ -257,7 +259,7 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         """
         logger.info(f"Async postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
         # Filter results by relevance score
-        filtered_results = [match for match in nodes.matches if match.score >= 0.4]
+        filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
         
         # Apply reranking if enabled and needed (directly on the filtered results)
         if self.use_reranker and filtered_results:
@@ -346,12 +348,12 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 "timestamp": timestamp,
                 "data_source": data_source
             })
-        logger.info(f"Filtered contexts: {contexts}")
+        logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
     
     async def async_get_response(
             self, query: str, 
-            model: str = "claude-3-5-haiku-20241022", 
+            model: str = GENERATION_MODEL, 
             include_memory: bool = True, 
             cited_context: dict = None
             ) -> Dict[str, any]:
@@ -368,6 +370,9 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
             Dictionary with 'content' (the answer) and 'data_sources' (list of unique links)
         """
         logger.info(f"Asynchronously generating response for query: '{query}' using model: {model}")
+
+        # Fallback models if the specified model is unavailable
+        fallback_models = ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4o", "claude-3-haiku-20240307"]
 
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -429,48 +434,58 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 source_str = f" - Source: {ctx['data_source']}"
             
             # Add recency indicator - earlier items are more recent
-            recency_indicator = f"[RECENT DOCUMENT - Date: {timestamp_str}{source_str}]: "
+            recency_indicator = f"[DOCUMENT - Date: {timestamp_str}{source_str}]: "
             formatted_context += recency_indicator + ctx["context"] + "\n\n"
         
-        prompt = f"Context information (ordered by recency, most recent first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
+        prompt = f"Context information (ordered by relevance, most relevant first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
         system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
-        Pay special attention to more recent information as it's more likely to be relevant and up-to-date. When recent conversations are provided, 
-        use them to maintain consistency with previous responses. When the user has cited specific context, prioritize that information in your response.
-        
-        If the user's question is vague or lacks sufficient context, you may ask at most one clarifying question to better understand their needs.
+        When recent conversations are provided, use them to maintain consistency with previous responses. 
+        User cited context serves as reference for the user query if it is provided.
         '''
+        
         
         # Log the prompt being sent to the model
         logger.info(f"System prompt: {system_prompt}")
         logger.info(f"User prompt: {prompt}")
 
-        try:
-            # Call the model asynchronously
-            loop = asyncio.get_event_loop()
-            response_future = loop.run_in_executor(
-                None,
-                lambda: self.model_client.chat.completions.create(
-                    model=model,
-                    max_tokens=4096,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                        ]
+        # Try primary model first, then fallback models if there's an error
+        models_to_try = [model] + fallback_models
+        answer = None
+
+        for current_model in models_to_try:
+            try:
+                # Call the model asynchronously
+                loop = asyncio.get_event_loop()
+                response_future = loop.run_in_executor(
+                    None,
+                    lambda: self.model_client.chat.completions.create(
+                        model=current_model,
+                        max_tokens=4096,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt}
+                            ]
+                    )
                 )
-            )
-            
-            # Wait for result with timeout
-            response = await asyncio.wait_for(response_future, timeout=90)
-            answer = response.choices[0].message.content
-            
-            # Log a preview of the model's response
-            logger.info(f"Model response: {answer}")
-        except asyncio.TimeoutError:
-            logger.error("Model response generation timed out after 90 seconds")
-            answer = "I apologize, but I'm currently experiencing high load and couldn't generate a response in time. Please try again with a simpler query or try again later."
-        except Exception as e:
-            logger.error(f"Error generating model response: {str(e)}")
-            answer = f"I encountered an error processing your request: {str(e)[:100]}... Please try again."
+                
+                # Wait for result with timeout
+                response = await asyncio.wait_for(response_future, timeout=90)
+                answer = response.choices[0].message.content
+                
+                # Log a preview of the model's response
+                logger.info(f"Model {current_model} response: {answer}")
+                # Break the loop if response was successful
+                break
+            except asyncio.TimeoutError:
+                logger.error(f"Model {current_model} response generation timed out after 90 seconds")
+                continue
+            except Exception as e:
+                logger.error(f"Error generating model {current_model} response: {str(e)}")
+                continue
+        
+        # If all models failed, return a generic error message
+        if answer is None:
+            answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled
         if self.memory_enabled:
@@ -484,21 +499,31 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
             "data_sources": data_sources
         }
     
-    def _retrieve_and_process_context(self, query_with_date, top_k=20, rerank_top_k=5):
+    def _retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K):
         """Helper method to retrieve and process context in parallel"""
-        nodes = self.retrieve_nodes(query_with_date, top_k=top_k)
-        context, data_sources = self.postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
-        return context, data_sources
+        try:
+            nodes = self.retrieve_nodes(query_with_date, top_k=top_k)
+            context, data_sources = self.postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
+            return context, data_sources
+        except Exception as e:
+            logger.error(f"Error in context retrieval: {str(e)}")
+            # Return empty results in case of any error
+            return [], []
     
-    async def _async_retrieve_and_process_context(self, query_with_date, top_k=20, rerank_top_k=5):
+    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K):
         """Asynchronous helper method to retrieve and process context"""
         # Retrieve nodes (this is I/O bound, so we'll run it in the executor)
         loop = asyncio.get_event_loop()
-        nodes = await loop.run_in_executor(None, self.retrieve_nodes, query_with_date, top_k)
-        
-        # Use async postprocessing with non-blocking reranking
-        context, data_sources = await self.async_postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
-        return context, data_sources
+        try:
+            nodes = await loop.run_in_executor(None, self.retrieve_nodes, query_with_date, top_k)
+            
+            # Use async postprocessing with non-blocking reranking
+            context, data_sources = await self.async_postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
+            return context, data_sources
+        except Exception as e:
+            logger.error(f"Error in async context retrieval: {str(e)}")
+            # Return empty results in case of any error
+            return [], []
     
     def _retrieve_memory(self):
         """Helper method to retrieve memory in parallel"""
@@ -519,55 +544,10 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         """Asynchronous reranking to improve response time"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.reranker.rerank, query, documents)
-
+    
     def get_response(
             self, query: str, 
-            model: str = "claude-3-5-haiku-20241022", 
-            include_memory: bool = True, 
-            cited_context: dict = None
-            ) -> Dict[str, any]:
-        """
-        Generate a response using RAG approach with OpenAI.
-        This is a synchronous wrapper around the async version.
-        
-        Args:
-            query: The user query
-            model: The model to use for generation
-            include_memory: Whether to include recent conversation history
-            cited_context: Specific context cited by the user, a dictionary
-            
-        Returns:
-            Dictionary with 'content' (the answer) and 'data_sources' (list of unique links)
-        """
-        logger.info(f"Generating response for query: '{query}' using model: {model}")
-        
-        # Use asyncio.run to run the async version from synchronous code
-        try:
-            import nest_asyncio
-            # Apply nest_asyncio to allow running asyncio inside Jupyter/IPython
-            nest_asyncio.apply()
-        except ImportError:
-            logger.info("nest_asyncio not available, skipping")
-        
-        # Run the async version in the default event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Create a new event loop if the current one is running
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            return loop.run_until_complete(
-                self.async_get_response(query, model, include_memory, cited_context)
-            )
-        except Exception as e:
-            logger.error(f"Error executing async response: {str(e)}")
-            # Fallback to the original implementation in case of issues with async
-            return self._sync_get_response(query, model, include_memory, cited_context)
-    
-    def _sync_get_response(
-            self, query: str, 
-            model: str = "claude-3-5-haiku-20241022", 
+            model: str = GENERATION_MODEL, 
             include_memory: bool = True, 
             cited_context: dict = None
             ) -> Dict[str, any]:
@@ -576,6 +556,9 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
         Used as a fallback if async version fails.
         """
         logger.info(f"Using synchronous fallback for query: '{query}'")
+
+        # Fallback models if the specified model is unavailable
+        fallback_models = ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4o", "claude-3-haiku-20240307"]
 
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -641,45 +624,54 @@ class Chat(FilterExtractor, MemoryManager, QueryParser):
                 source_str = f" - Source: {ctx['data_source']}"
             
             # Add recency indicator - earlier items are more recent
-            recency_indicator = f"[RECENT DOCUMENT - Date: {timestamp_str}{source_str}]: "
+            recency_indicator = f"[DOCUMENT - Date: {timestamp_str}{source_str}]: "
             formatted_context += recency_indicator + ctx["context"] + "\n\n"
         
-        prompt = f"Context information (ordered by recency, most recent first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
+        prompt = f"Context information (ordered by relevance, most relevant first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
         system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
-        Pay special attention to more recent information as it's more likely to be relevant and up-to-date. When recent conversations are provided, 
-        use them to maintain consistency with previous responses. When the user has cited specific context, prioritize that information in your response.
-        
-        If the user's question is vague or lacks sufficient context, you may ask at most one clarifying question to better understand their needs.
+        When recent conversations are provided, use them to maintain consistency with previous responses. 
+        User cited context serves as reference for the user query if it is provided.
         '''
         
         # Log the prompt being sent to the model
         logger.info(f"System prompt: {system_prompt}")
         logger.info(f"User prompt: {prompt}")
 
-        try:
-            # Add timeout handling for model response generation
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    self.model_client.chat.completions.create,
-                    model=model,
-                    max_tokens=4096,  # Allow for longer responses
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                # Wait for result with 90 second timeout
-                response = future.result(timeout=90)
-                answer = response.choices[0].message.content
-            
-            # Log a preview of the model's response
-            logger.info(f"Model response: {answer}")
-        except concurrent.futures.TimeoutError:
-            logger.error("Model response generation timed out after 90 seconds")
-            answer = "I apologize, but I'm currently experiencing high load and couldn't generate a response in time. Please try again with a simpler query or try again later."
-        except Exception as e:
-            logger.error(f"Error generating model response: {str(e)}")
-            answer = f"I encountered an error processing your request: {str(e)[:100]}... Please try again."
+        # Try primary model first, then fallback models if there's an error
+        models_to_try = [model] + fallback_models
+        answer = None
+
+        for current_model in models_to_try:
+            try:
+                # Add timeout handling for model response generation
+                with ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        self.model_client.chat.completions.create,
+                        model=current_model,
+                        max_tokens=4096,  # Allow for longer responses
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    # Wait for result with 90 second timeout
+                    response = future.result(timeout=90)
+                    answer = response.choices[0].message.content
+                
+                # Log a preview of the model's response
+                logger.info(f"Model {current_model} response: {answer}")
+                # Break the loop if response was successful
+                break
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Model {current_model} response generation timed out after 90 seconds")
+                continue
+            except Exception as e:
+                logger.error(f"Error generating model {current_model} response: {str(e)}")
+                continue
+        
+        # If all models failed, return a generic error message
+        if answer is None:
+            answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled
         if self.memory_enabled:

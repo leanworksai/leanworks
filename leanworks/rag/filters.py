@@ -2,6 +2,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, timezone
 import json
 import re
+from leanworks.rag.setting import OTHER_MODEL
 
 class FilterExtractor:
     """
@@ -44,7 +45,7 @@ class FilterExtractor:
         
         try:
             response = model_client.chat.completions.create(
-                model="claude-3-haiku-20240307",
+                model=OTHER_MODEL,
                 max_tokens=1024,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone."},
@@ -52,12 +53,32 @@ class FilterExtractor:
                 ]
             )
             
-            result = json.loads(response.choices[0].message.content)
+            content = response.choices[0].message.content
+            
+            # Extract JSON object using regex pattern
+            json_pattern = r'\{[\s\S]*?\}'
+            json_matches = re.findall(json_pattern, content)
+            
+            if not json_matches:
+                raise ValueError("No valid JSON found in response")
+                
+            # Take the first valid JSON match
+            for potential_json in json_matches:
+                try:
+                    result = json.loads(potential_json)
+                    # Check if it has the expected keys
+                    if "start_datetime" in result and "end_datetime" in result:
+                        break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                raise ValueError("No valid JSON with expected keys found")
+                
             start_datetime = result.get("start_datetime")
             end_datetime = result.get("end_datetime")
             # Convert ISO dates to Unix timestamps (in UTC)
-            start_timestamp = int(datetime.fromisoformat(start_datetime.replace("Z", "+00:00")).timestamp()) if start_datetime else None
-            end_timestamp = int(datetime.fromisoformat(end_datetime.replace("Z", "+00:00")).timestamp()) if end_datetime else None
+            start_timestamp = int(datetime.fromisoformat(start_datetime.replace("Z", "+00:00")).timestamp()) if start_datetime and start_datetime != "null" else 0
+            end_timestamp = int(datetime.fromisoformat(end_datetime.replace("Z", "+00:00")).timestamp()) if end_datetime and end_datetime != "null" else current_timestamp
                     
             start_diff = abs(start_timestamp - current_timestamp) if start_timestamp else 0
             end_diff = abs(end_timestamp - current_timestamp) if end_timestamp else 0
@@ -83,10 +104,10 @@ class FilterExtractor:
                 }
         except Exception as e:
             print(f"Error extracting time filters: {e}")
-            # Return None values if parsing fails
+            # Return 0 for start_timestamp and current_timestamp for end_timestamp if parsing fails
             return {
-                "start_timestamp": None,
-                "end_timestamp": None
+                "start_timestamp": 0,
+                "end_timestamp": current_timestamp
             }
     def extract_user_filters(self, query: str) -> List[str]:
         """

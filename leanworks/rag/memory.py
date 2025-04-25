@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Dict
 import json
 import tiktoken
+from leanworks.rag.setting import OTHER_MODEL
 
 @dataclass
 class Memory:
@@ -171,7 +172,7 @@ class MemoryManager:
                 try:
                     
                     response = self.model_client.chat.completions.create(
-                        model="claude-3-haiku-20240307",
+                        model=OTHER_MODEL,
                         max_tokens=1024,
                         messages=[
                             {"role": "system", "content": "Summarize the following conversation history concisely, preserving key information and context:"},
@@ -186,7 +187,7 @@ class MemoryManager:
                         # Check if combined summary is too large and summarize again if needed
                         if self._count_tokens(combined_summary) > token_budget:
                             response = self.model_client.chat.completions.create(
-                                model="claude-3-haiku-20240307",
+                                model=OTHER_MODEL,
                                 max_tokens=1024,
                                 messages=[
                                     {"role": "system", "content": "Condense these two summaries into a single concise summary:"},
