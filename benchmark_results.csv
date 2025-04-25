@@ -1,0 +1,336 @@
+category,query,response,data_sources,time_taken,status
+Project Tracking,What tasks have delays in this project?,"Based on the context provided, I'll analyze the potential task delays in the project:
+
+1. Project Management Challenges:
+- The project manager mentioned significant challenges in tracking task progress, specifically noting that team members are not updating user stories in a timely manner.
+- Onboarding team members to tools like Jira is time-consuming and has a poor experience, which could be causing delays.
+
+2. Potential Delayed/Pending Tasks:
+From the meeting notes and Slack conversations, several tasks appear to have potential delays:
+
+Backend/Development Tasks:
+- Data Pipeline Integration: Backend for project screen and database query optimization is not yet finalized
+- Backend Tasks: Yanfu Zhu mentioned creating a Leanworks Python SDK and updating updates/tasks generation jobs
+- Updates/Tasks Screen: Needs to include priority and deadline features
+
+Frontend/UI Tasks:
+- UI Completion: Dark mode issues not yet resolved
+- Project screen design and implementation
+- Adding emoji/icons for project categorization
+
+Hiring/Team-Related Tasks:
+- iOS Developer Identification and Onboarding: Noted as needing immediate attention, with a target of 1-2 weeks (which may be at risk)
+
+3. Risk Areas:
+- The project manager wants better tracking of:
+  - Blocking tasks
+  - Milestone tracking
+  - Task completion rates
+  - Burn rate of tasks
+
+Recommendation: The team should immediately review the task board, update all pending user stories, and conduct a sprint retrospective to address these potential delays.","['slack/product-collab', 'slack/go-to-market', 'gs://leanworks/meeting_recordings/meeting_notes/notes_audio1742039987.m4a.txt']",14.875838279724121,success
+Project Tracking,What is the current burn down rate?,"Based on the provided context, there isn't a specific current burn down rate mentioned. However, the context reveals that tracking burn down rate is a key interest for the project team, particularly from a project management perspective.
+
+In the Slack conversation, Vijay mentioned wanting to track burn down rate as one of the key project tracking features. Specifically, he asked:
+- ""Can the app track what is the burn rate of tasks""
+
+Additionally, a project manager from Amazon (mentioned in Yanfu's notes) specifically expressed interest in knowing the burn down rate as one of her primary questions for a project management tool.
+
+To get the current burn down rate, I would recommend:
+1. Checking the project management tool (like Jira, which was mentioned)
+2. Getting updates from team members about completed and remaining tasks
+3. Calculating the rate of task completion versus total project tasks
+
+The context suggests that getting timely updates from team members has been challenging, with one project manager noting that ""no one in the team updates user story on a timely basis"" and she has to ""chase around people to get updates and write stories.""
+
+To accurately determine the current burn down rate, you would need to gather the most recent project task completion data from your team.","['slack/product-collab', 'slack/go-to-market']",14.800916194915771,success
+Project Tracking,How much budget is left for this project?,"I apologize, but I cannot definitively determine the exact budget remaining for the project based on the provided context. The Slack messages do not provide a clear breakdown of the total project budget or expenditures.
+
+However, I can share some relevant budget-related insights from the context:
+
+1. There's a mention of potential costs for a developer named Raj:
+- Vijay calculated that if Raj works 15 days at 8 hours per day, the cost would be at least $2,160
+- Raj's initial estimate for the app was 10 days of work
+
+2. Vijay was discussing hiring candidates for the project, considering budget implications:
+- He mentioned checking if increasing the budget could attract a better candidate
+- There was a question about the budget for an iOS developer, but no specific amount was provided
+
+To get a precise answer about the remaining project budget, I recommend:
+- Reviewing the project's financial documentation
+- Consulting with the project's financial manager
+- Checking the original budget allocation documents
+
+Would you like me to help you gather more specific budget information?",['slack/product-collab'],12.294354915618896,success
+Project Tracking,Who are the teams involved in this project?,"Based on the context provided, the teams/collaborators involved in this product development project are:
+
+1. Vijay S (vijay.sailappan@gmail.com) - Appears to be leading the project and involved in multiple aspects
+2. Yanfu Zhu (zhuyanfu0712@gmail.com) - A collaborator who seems involved in strategic discussions
+3. Qianwen Dong (qianwendongdesign@gmail.com) - Appears to be involved, potentially in a design role
+
+Additionally, there are some external team members/contractors being considered or already engaged:
+
+4. Raj - A developer recently contracted through Upwork, currently working on the app development (specifically the ""ask screen"")
+5. iOS Developer candidates - Vijay has been looking for an iOS engineer, with at least one candidate named Denis being reviewed
+
+The project spans multiple domains:
+- Mobile app development
+- Backend functionalities
+- AI integration
+- Data pipelines
+- Database management
+- APIs
+- UI/UX design
+
+The team seems to be working collaboratively, with members contributing to different aspects of the product development process.",['slack/product-collab'],22.008525609970093,success
+Project Tracking,What have different teams contributed to the project?,"Based on the provided context, here's a breakdown of team contributions to the project:
+
+1. Frontend Team:
+- Added two-row scrolling UI in the Updates screen
+- Added selecting a project and project detail screen UI
+- Working on resolving dark mode issues
+- Tasked with matching design specs by next week
+- Planned to add emoji/icons for project categorization
+
+2. Backend/Data Pipeline Team:
+- Working on finalizing backend for project screen
+- Optimizing database queries (e.g., denormalizing user names)
+- Developing backend functionalities for AI and data pipelines
+
+3. Design Team (Qianwen Dong):
+- Involved in UI/UX design
+- Collaborating on product and design specifications
+
+4. Development Team:
+- Hired Raj for specific development tasks (currently working on the ""ask screen"")
+- Preparing for iOS developer recruitment
+- Working on implementing various app features
+
+5. Product Team:
+- Conducting user research
+- Planning to interview users about documentation workflows
+- Validating AI-assisted use cases
+
+6. Marketing Team:
+- Preparing draft promotional content
+- Planning demo videos
+- Preparing for influencer outreach
+
+Key ongoing activities include:
+- Finalizing UI design
+- Developing mobile app functionalities
+- Integrating AI features
+- Preparing for product launch
+
+The project appears to be a mobile app with a focus on AI-assisted documentation and project management features, currently in active development across multiple teams.",['slack/product-collab'],31.794246912002563,success
+Project Insights,What is the current user journey?,"Based on the recent context and available information, I can provide insights about the current user journey:
+
+1. User Journey Stages:
+While a complete user journey map isn't explicitly detailed, the context reveals some key aspects:
+
+App Features in Development:
+- Ask Feature: Currently being developed by Raj
+- User Chat Functionality: Supports user-typed chat (excluding cited context chat)
+- Project Screen: In progress of design and implementation
+- User Type Segmentation: Vijay suggested listing expected user types and performance expectations
+
+2. User Interaction Points:
+- Chatbot Interaction: 
+  - Users can describe project details
+  - System will help identify:
+    a) Teams involved in a project
+    b) Team activities
+    c) Current user journey
+    d) Technology stacks used
+
+3. Ongoing Development Focus:
+- Implementing user-friendly UI/UX
+- Adding features like:
+  - Dark mode
+  - Project categorization with emojis/icons
+  - Priority and deadline tracking
+  - Task management capabilities
+
+Recommendation: To get a more precise user journey map, I suggest conducting a detailed user research session or reviewing the latest design documentation with Qianwen Dong, who seems to be involved in the UI/UX design.
+
+Would you like me to help you gather more specific details about the current user journey?","['slack/product-collab', 'slack/go-to-market']",27.266340732574463,success
+Project Insights,What tech stacks are being used to build the product?,"Based on the past conversations and the current context, here are the tech stacks being used to build the product:
+
+Backend:
+- Python (specifically mentioned for Leanworks SDK and backend jobs)
+- Likely using data pipeline technologies
+- Backend database query optimization in progress
+
+Frontend:
+- Mobile app development (iOS mentioned specifically)
+- Dark mode implementation is ongoing
+- Potential use of cross-platform or native development frameworks
+
+Development Tools:
+- Jira (for project management and task tracking)
+- Upwork (for contractor hiring)
+
+Specific Technical Components Mentioned:
+- AI integration
+- Database management
+- API development
+- SDK development
+
+Specific Technologies Not Explicitly Defined:
+- Exact mobile development framework (Swift/iOS native, React Native, Flutter not specified)
+- Specific backend framework
+- Database technology
+
+Recommendation:
+To get a more precise understanding of the tech stack, I suggest:
+1. Consulting directly with Vijay Sailappan
+2. Reviewing the project's technical documentation
+3. Checking with Yanfu Zhu about specific backend implementation details
+
+Would you like me to help you gather more specific information about the tech stack?",[],28.232223987579346,success
+Status Updates,Show me the latest updates,"Based on the recent Slack conversations, here are the latest updates for the project:
+
+1. Personalized Updates/Tasks Feature:
+- Yanfu Zhu has implemented personalized updates and tasks through direct messages
+- The goal is to make the Home Screen more personalized by showing:
+  * Tasks specific to the logged-in user
+  * Updates relevant to the user
+
+2. API and Environment Status:
+- The API is currently back online
+- Yanfu Zhu removed the production environment because the test environment is now local
+- All current deployments are in Google Kubernetes Engine (GKE)
+
+3. Development Progress:
+- Raj (contractor) is working on the ""ask screen""
+  * ETA for the ask screen was set for ""tomorrow his time""
+  * Currently implementing user-typed chat (excluding cited context chat)
+- Vijay is focusing on:
+  * Fixing home page and updates pages this week
+  * Planning to move to Azure next (for SBNA client)
+
+4. Ongoing Development Focus:
+- Personalizing Home Screen content
+- Implementing more context-aware capabilities for the chatbot
+- Enhancing update/task generation jobs
+- Improving response quality and context retrieval
+
+5. Next Steps:
+- Verify personalized updates/tasks implementation
+- Continue refining the app's user experience
+- Prepare for Azure integration
+
+Would you like me to elaborate on any of these updates?",['slack/product-collab'],30.416213989257812,success
+Status Updates,Give me an update on the client onboarding task,"Thanks for checking in on the client onboarding task. Based on the context you provided about the product development project, it looks like the team is currently focused on developing core app features and functionalities. The context mentions tasks related to:
+
+- Frontend UI/UX design and implementation 
+- Backend development for AI capabilities, data pipelines, databases, APIs
+- Hiring an iOS developer to expand the app to that platform
+- Integrating specific features like a user chat screen being developed by a contractor named Raj
+
+However, I did not see any explicit mentions of a client onboarding task or flow in the provided context. Client onboarding could refer to:
+
+1) Onboarding new clients to use the app once it is ready 
+2) Collaborating with a specific client to gather their requirements during the development process
+
+To give you an accurate update, could you please clarify:
+
+- What does the ""client onboarding"" task entail in this case? Is it defining how new users will be onboarded into the app experience, or something else?
+
+- Which team member is responsible for this task? Is it part of the UX design scope, product management, or another function?
+
+- What is the expected timeline or milestone for completing this onboarding task?
+
+I'd be happy to dig into this further once I understand a bit more about how the client onboarding piece fits into the overall project. The collaborators seem very responsive on Slack, so I can follow up there for more context if needed. Just let me know how I can assist further!",['slack/product-collab'],44.311598777770996,success
+Status Updates,What are our most recent action items?,"Based on the most recent Slack conversations and context, here are the most recent action items for the project:
+
+Yanfu Zhu's Backend Tasks for the Upcoming Week:
+1. Create a Leanworks Python SDK
+   - Ensure function consistency across different jobs and services
+   - Avoid creating duplicate functions
+
+2. Update Updates/Tasks Generation Jobs
+   - Include priority and deadline features
+   - Update Slack bot to send direct messages instead of group messages
+   - Simulate Home Page experience
+
+3. Task Management Improvements
+   - Explore solutions for checking previous tasks against updates
+   - Identify project risks
+   - Prevent task duplication
+   - Prefer updating existing tasks over creating new ones
+
+Raj's Development Tasks:
+- Complete the ""ask screen"" by tomorrow (his time)
+- Implement user-typed chat functionality (excluding cited context chat)
+
+Design and UI Tasks (Qianwen Dong):
+- Finalize UI design matching specs by next week
+- Resolve dark mode issues
+- Add emoji/icons for project categorization
+
+Upcoming Discussions/Decisions:
+- Personalization of Home Page content
+- Determining how to handle action items when the AI model is uncertain
+- Onboarding experience improvements
+
+Key Focus Areas:
+- Mobile app development
+- Backend functionality
+- AI-assisted task generation
+- Personalized user experience
+
+Would you like me to elaborate on any of these action items?","['slack/product-collab', 'slack/go-to-market', 'slack/product-testing']",35.042051792144775,success
+Status Updates,Who is responsible for the frontend development task?,"Based on the provided context about the product development project, the frontend development tasks appear to be primarily owned by Vijay S (vijay.sailappan@gmail.com). A few key points:
+
+1. Vijay recently posted an update that he is focusing on ""Fixing home page and updates pages this week"" before moving to Azure integration next. The home page and updates pages are frontend components.
+
+2. Earlier conversations mentioned Vijay working on UI elements like:
+- Adding two-row scrolling UI in the Updates screen 
+- Adding project selection and detail screen UI
+- Resolving dark mode issues
+- Planning to add emoji/icons for project categorization
+
+3. Vijay also seems to be managing the iOS developer hiring process, indicating his leadership on the mobile app frontend.
+
+4. While Qianwen Dong (qianwendongdesign@gmail.com) is involved in UI/UX design collaboration, the actual frontend implementation responsibility falls under Vijay based on the context.
+
+So in summary, Vijay S appears to be the primary person responsible for leading and executing the frontend development tasks for this product development project, especially on the mobile app side.",['slack/product-collab'],34.373509883880615,success
+Go to Market,list all learnings from our customer interviews,"Based on the provided context and recent Slack conversations, I did not find a comprehensive list of customer interview learnings. However, I did find an interesting insight about potential customer interview interests from a recent Slack message.
+
+Yanfu Zhu shared an interaction with a Project Manager from JPMC who described what she would ask in a chatbot scenario. The PM's key interests were:
+
+1. Team Involvement
+- Identifying teams involved in a specific project
+- Understanding what those teams did for the project
+
+2. User Journey
+- Wanting to know the current user journey for a project
+
+3. Technical Details
+- Understanding tech stacks used to build a product
+
+Additionally, Vijay Sailappan mentioned some customer interview preparation strategies:
+
+1. User Type Documentation
+- List expected user types
+- Document performance expectations for each user type
+
+2. Query Documentation
+- Document key queries expected from users
+- Prepare corresponding responses
+- Note: Currently, there are no evaluations of model quality
+
+Recommendation for Customer Interviews:
+- Develop a structured interview template covering:
+  * Team composition
+  * Project workflows
+  * Technical implementation
+  * User experience expectations
+
+To get a more comprehensive list of customer interview learnings, I recommend:
+1. Reviewing full interview transcripts
+2. Consulting directly with Vijay or Yanfu
+3. Checking any documented interview notes
+
+Would you like me to help you gather more specific customer interview insights?","['slack/product-collab', 'slack/go-to-market']",23.736353874206543,success

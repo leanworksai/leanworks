@@ -6,6 +6,8 @@ import math
 import concurrent.futures
 from functools import lru_cache
 import threading
+import re
+from leanworks.rag.setting import OTHER_MODEL, MIN_SCORE_THRESHOLD, RECENCY_WEIGHT, RERANK_MODEL
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -31,13 +33,12 @@ class CrossEncoderReranker:
         self._max_batch_size = 5
         logger.info("CrossEncoderReranker initialized")
     
-    def _extract_text(self, doc, max_length: int = 1000) -> str:
+    def _extract_text(self, doc) -> str:
         """
-        Optimized text extraction from document.
+        Extract text from document without complex parsing.
         
         Args:
             doc: Document object with metadata
-            max_length: Maximum text length to extract
             
         Returns:
             Extracted text from document
@@ -46,24 +47,78 @@ class CrossEncoderReranker:
             return ""
         
         metadata = doc.metadata
-        text = metadata.get("text", "")
-        
-        if not text:
-            # Try context first before parsing JSON (faster)
-            text = metadata.get("context", "")
-            
-        if not text and "_node_content" in metadata:
-            try:
-                node_content = json.loads(metadata.get("_node_content", ""))
-                text = node_content.get("text", "")
-            except Exception:
-                # Avoid logging here for speed - already logged in main rerank method
-                pass
-                
-        return text[:max_length]
+        text = json.loads(metadata.get("_node_content", "")).get("text", "")
+        return text
     
-    def rerank(self, query: str, documents: List[Any], top_k: int = 5, 
-               min_score_threshold: float = 0.3, recency_weight: float = 0.7) -> List[Any]:
+    def _extract_query_focused_text(self, doc, query: str) -> str:
+        """
+        Extract text focused around sections most relevant to the query.
+        
+        Args:
+            doc: Document object with metadata
+            query: The user query
+            window_size: Number of characters to include around matches
+            
+        Returns:
+            Query-relevant text from document
+        """
+        # Extract base text using existing method
+        text = self._extract_text(doc)
+        # If text is short enough, just return it
+        if len(text) <= 1000:
+            return text
+        
+        # Split text into 1000-character buckets
+        bucket_size = 500
+        buckets = []
+        for i in range(0, len(text), bucket_size):
+            buckets.append(text[i:i+bucket_size])
+        
+        # Calculate simple relevance score for each bucket
+        query_terms = set(query.lower().split())
+
+        scored_buckets = []
+        
+        for i, bucket in enumerate(buckets):
+            # Simple term overlap scoring
+            bucket_lower = bucket.lower()
+            overlap = sum(1 for term in query_terms if term in bucket_lower)
+            
+            # Boost exact phrase matches
+            if query.lower() in bucket_lower:
+                overlap += 2
+                
+            scored_buckets.append((i, overlap))
+        
+        # Get indices of top matching buckets
+        top_matches = sorted(scored_buckets, key=lambda x: x[1], reverse=True)[:3]
+        
+        # If we didn't find relevant matches, fall back to first portion
+        if not top_matches or all(score == 0 for _, score in top_matches):
+            return text[:1000]
+        
+        # Extract windows around matches to maintain context
+        selected_text_parts = []
+        for idx, _ in top_matches:
+            # Add 250 characters from previous bucket if it exists
+            if idx > 0:
+                prev_bucket = buckets[idx-1]
+                selected_text_parts.append("..."+prev_bucket[-250:])
+
+            # Add the matched bucket
+            selected_text_parts.append(buckets[idx])
+            
+            # Add 250 characters from next bucket if it exists
+            if idx < len(buckets) - 1:
+                next_bucket = buckets[idx+1]
+                selected_text_parts.append(next_bucket[:250]+"...")
+        
+        # Rebuild text with selected parts
+        result = " ".join(selected_text_parts)
+        return result
+    
+    def rerank(self, query: str, documents: List[Any], top_k: int = 8, 
+               min_score_threshold: float = MIN_SCORE_THRESHOLD, recency_weight: float = RECENCY_WEIGHT) -> List[Any]:
         """
         Rerank documents based on their relevance to the query and recency.
         
@@ -83,8 +138,8 @@ class CrossEncoderReranker:
         
         logger.info(f"Reranking {len(documents)} documents for query: '{query}'")
         
-        # Extract document texts for reranking (using optimized extraction)
-        doc_texts = [self._extract_text(doc) for doc in documents]
+        # Extract document texts using query-focused extraction
+        doc_texts = [self._extract_query_focused_text(doc, query) for doc in documents]
         
         # Score documents using the model
         try:
@@ -97,6 +152,10 @@ class CrossEncoderReranker:
             for i, doc in enumerate(documents):
                 semantic_score = scores[i]
                 
+                # Print document text and score for debugging
+                print(f"Document {i} text: {doc_texts[i]}")
+                print(f"Document {i} semantic score: {semantic_score}")
+                
                 # Calculate recency score (normalized between 0-1)
                 recency_score = 0.0
                 if hasattr(doc, "metadata") and "timestamp" in doc.metadata:
@@ -106,11 +165,13 @@ class CrossEncoderReranker:
                         # Use exponential decay based on days difference
                         days_diff = (current_time - doc_timestamp) / (60 * 60 * 24)  # Convert to days
                         recency_score = max(0.0, min(1.0, math.exp(-0.1 * days_diff)))
+                        print(f"Document {i} recency score: {recency_score}")
                     except (ValueError, TypeError):
                         logger.warning(f"Invalid timestamp format in document metadata")
                 
                 # Combine semantic score with recency score
                 combined_score = (1 - recency_weight) * semantic_score + recency_weight * recency_score
+                print(f"Document {i} combined score: {combined_score}")
                 
                 setattr(doc, "semantic_score", semantic_score)
                 setattr(doc, "recency_score", recency_score)
@@ -202,14 +263,13 @@ class CrossEncoderReranker:
         
         return scores
     
-    def _batch_score_documents(self, query: str, documents: List[str], max_chars: int = 1000) -> List[float]:
+    def _batch_score_documents(self, query: str, documents: List[str]) -> List[float]:
         """
         Score a batch of documents using the model.
         
         Args:
             query: The user query
             documents: List of document texts
-            max_chars: Maximum characters per document to include in prompt
             
         Returns:
             List of relevance scores for the batch
@@ -248,14 +308,12 @@ class CrossEncoderReranker:
         prompt += f"Query: {query}\n\n"
         
         for i, doc in enumerate(uncached_docs):
-            # Truncate long documents
-            doc_text = doc[:max_chars] + ("..." if len(doc) > max_chars else "")
-            prompt += f"Document {i+1}: {doc_text}\n\n"
+            prompt += f"Document {i+1}: {doc}\n\n"
         
         # Get model response for uncached documents
         try:      
             response = self.model_client.chat.completions.create(
-                model="claude-3-5-haiku-20241022",
+                model=RERANK_MODEL,
                 max_tokens=1024,
                 temperature=0.0,  # Use deterministic output
                 messages=[
@@ -319,7 +377,7 @@ class HybridReranker(CrossEncoderReranker):
     Hybrid reranker that combines semantic, lexical matching scores, and recency.
     This can be more effective for technical or specialized queries.
     """
-    def __init__(self, model_client, lexical_weight: float = 0.2, recency_weight: float = 0.3, cache_size: int = 1000):
+    def __init__(self, model_client, lexical_weight: float = 0.2, recency_weight: float = RECENCY_WEIGHT, cache_size: int = 1000):
         """
         Initialize the hybrid reranker.
         
@@ -333,8 +391,8 @@ class HybridReranker(CrossEncoderReranker):
         self.lexical_weight = lexical_weight
         self.recency_weight = recency_weight
         
-    def rerank(self, query: str, documents: List[Any], top_k: int = 5, 
-               min_score_threshold: float = 0.3) -> List[Any]:
+    def rerank(self, query: str, documents: List[Any], top_k: int = 8, 
+               min_score_threshold: float = MIN_SCORE_THRESHOLD) -> List[Any]:
         """
         Rerank using semantic, lexical matching, and recency.
         Optimized implementation that calculates lexical scores first and
@@ -367,8 +425,8 @@ class HybridReranker(CrossEncoderReranker):
         # Calculate lexical and recency scores for all documents
         doc_scores = []
         for doc in documents:
-            # Extract text
-            text = self._extract_text(doc, max_length=500)
+            # Extract text using query-focused extraction for better lexical matching
+            text = self._extract_query_focused_text(doc, query)
             
             # Calculate lexical score
             lexical_score = 0.0
@@ -400,13 +458,17 @@ class HybridReranker(CrossEncoderReranker):
         
         # Sort by preliminary score to prioritize promising documents
         doc_scores.sort(key=lambda x: x[1], reverse=True)
-        
+
+        # Debug: Print number of documents before semantic processing
+        logger.info(f"Documents before semantic filtering: {len(doc_scores)}")
+        print(f"Documents before semantic filtering: {len(doc_scores)}")
+
         # For small document sets, process all; for larger sets, focus on promising ones
         semantic_candidate_count = min(len(documents), max(top_k * 3, 20))
-        
+
         # Get promising documents for semantic scoring
         semantic_candidates = [item[0] for item in doc_scores[:semantic_candidate_count]]
-        
+
         # Get semantic scores only for promising documents
         semantic_reranked = super().rerank(
             query, 
@@ -415,10 +477,14 @@ class HybridReranker(CrossEncoderReranker):
             min_score_threshold=0,  # No filtering yet
             recency_weight=0  # We'll handle recency ourselves
         )
-        
+
+        # Debug: Print number of documents after semantic reranking
+        logger.info(f"Documents after semantic reranking: {len(semantic_reranked)}")
+        print(f"Documents after semantic reranking: {len(semantic_reranked)}")
+
         # Create a map from document back to its lexical and recency scores
         score_map = {doc: (ls, rs) for doc, _, ls, rs in doc_scores}
-        
+
         # Calculate final combined scores
         for doc in semantic_reranked:
             semantic_score = getattr(doc, "semantic_score", 0.5)
@@ -435,14 +501,22 @@ class HybridReranker(CrossEncoderReranker):
             setattr(doc, "lexical_score", lexical_score)
             setattr(doc, "recency_score", recency_score)
             setattr(doc, "rerank_score", combined_score)
-        
+
         # Sort by combined score
         reranked_docs = sorted(semantic_reranked, key=lambda x: getattr(x, "rerank_score", 0), reverse=True)
-        
+
+        # Debug: Print rerank scores before threshold filtering
+        print("Rerank scores before filtering:")
+        for i, doc in enumerate(reranked_docs[:min(10, len(reranked_docs))]):
+            print(f"  Doc {i}: score={getattr(doc, 'rerank_score', 0):.3f}, semantic={getattr(doc, 'semantic_score', 0):.3f}, lexical={getattr(doc, 'lexical_score', 0):.3f}, recency={getattr(doc, 'recency_score', 0):.3f}")
+
         # Filter by threshold
         if min_score_threshold > 0:
+            before_count = len(reranked_docs)
             reranked_docs = [doc for doc in reranked_docs if getattr(doc, "rerank_score", 0) >= min_score_threshold]
-        
+            logger.info(f"Filtered by threshold {min_score_threshold}: {before_count} -> {len(reranked_docs)} docs")
+            print(f"Filtered by threshold {min_score_threshold}: {before_count} -> {len(reranked_docs)} docs")
+
         # If we didn't find enough documents with semantic scoring, add some from lexical matching
         if len(reranked_docs) < top_k and len(doc_scores) > semantic_candidate_count:
             # Get additional documents that weren't semantically scored
@@ -459,9 +533,16 @@ class HybridReranker(CrossEncoderReranker):
             all_docs = reranked_docs + additional_docs
             reranked_docs = sorted(all_docs, key=lambda x: getattr(x, "rerank_score", 0), reverse=True)
             
+            # Debug: Print count after adding lexical matches
+            print(f"After adding lexical matches: {len(reranked_docs)} docs")
+            
             # Apply threshold again
             if min_score_threshold > 0:
+                before_count = len(reranked_docs)
                 reranked_docs = [doc for doc in reranked_docs if getattr(doc, "rerank_score", 0) >= min_score_threshold]
-        
+                logger.info(f"Filtered again by threshold {min_score_threshold}: {before_count} -> {len(reranked_docs)} docs")
+                print(f"Filtered again by threshold {min_score_threshold}: {before_count} -> {len(reranked_docs)} docs")
+
         logger.info(f"Hybrid reranking complete. Returning top {min(top_k, len(reranked_docs))} results")
+        print("reranked_docs", reranked_docs)
         return reranked_docs[:top_k]

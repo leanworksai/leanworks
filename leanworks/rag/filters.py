@@ -2,6 +2,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, timezone
 import json
 import re
+from leanworks.rag.setting import OTHER_MODEL
 
 class FilterExtractor:
     """
@@ -44,7 +45,7 @@ class FilterExtractor:
         
         try:
             response = model_client.chat.completions.create(
-                model="claude-3-haiku-20240307",
+                model=OTHER_MODEL,
                 max_tokens=1024,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone."},
