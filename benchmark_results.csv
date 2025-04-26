@@ -1,0 +1,13 @@
+category,query,response,data_sources,time_taken,status
+Project Tracking,What tasks have delays in this project?,'Chat' object has no attribute 'async_get_response',[],4.0531158447265625e-06,error
+Project Tracking,What is the current burn down rate?,'Chat' object has no attribute 'async_get_response',[],1.9073486328125e-06,error
+Project Tracking,How much budget is left for this project?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Project Tracking,Who are the teams involved in this project?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Project Tracking,What have different teams contributed to the project?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Project Insights,What is the current user journey?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Project Insights,What tech stacks are being used to build the product?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Status Updates,Show me the latest updates,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Status Updates,Give me an update on the client onboarding task,'Chat' object has no attribute 'async_get_response',[],1.1920928955078125e-06,error
+Status Updates,What are our most recent action items?,'Chat' object has no attribute 'async_get_response',[],9.5367431640625e-07,error
+Status Updates,Who is responsible for the frontend development task?,'Chat' object has no attribute 'async_get_response',[],1.1920928955078125e-06,error
+Go to Market,list all learnings from our customer interviews,'Chat' object has no attribute 'async_get_response',[],1.1920928955078125e-06,error

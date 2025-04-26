@@ -13,7 +13,7 @@ leanworks/rag/__init__.py
 leanworks/rag/chat.py
 leanworks/rag/filters.py
 leanworks/rag/memory.py
-leanworks/rag/query.py
 leanworks/rag/reranker.py
+leanworks/rag/setting.py
 leanworks/storage/__init__.py
 leanworks/storage/gcs.py
