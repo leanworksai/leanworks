@@ -383,7 +383,7 @@ class Chat(FilterExtractor, MemoryManager):
                     future = executor.submit(
                         self.model_client.chat.completions.create,
                         model=current_model,
-                        max_tokens=4096,  # Allow for longer responses
+                        max_tokens=1024,  # Allow for longer responses
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt}
@@ -682,7 +682,7 @@ class AsyncChat(Chat):
                     None,
                     lambda: self.model_client.chat.completions.create(
                         model=current_model,
-                        max_tokens=4096,
+                        max_tokens=1024,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt}

@@ -46,7 +46,7 @@ class FilterExtractor:
         try:
             response = model_client.chat.completions.create(
                 model=OTHER_MODEL,
-                max_tokens=1024,
+                max_tokens=512,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone."},
                     {"role": "user", "content": prompt}

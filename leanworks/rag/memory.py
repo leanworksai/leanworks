@@ -173,7 +173,7 @@ class MemoryManager:
                     
                     response = self.model_client.chat.completions.create(
                         model=OTHER_MODEL,
-                        max_tokens=1024,
+                        max_tokens=512,
                         messages=[
                             {"role": "system", "content": "Summarize the following conversation history concisely, preserving key information and context:"},
                             {"role": "user", "content": older_memory_text}
@@ -188,7 +188,7 @@ class MemoryManager:
                         if self._count_tokens(combined_summary) > token_budget:
                             response = self.model_client.chat.completions.create(
                                 model=OTHER_MODEL,
-                                max_tokens=1024,
+                                max_tokens=512,
                                 messages=[
                                     {"role": "system", "content": "Condense these two summaries into a single concise summary:"},
                                     {"role": "user", "content": combined_summary}

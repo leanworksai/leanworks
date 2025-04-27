@@ -324,7 +324,7 @@ class CrossEncoderReranker:
             logger.info(f"Requesting scores for {len(uncached_docs)} documents")
             response = self.model_client.chat.completions.create(
                 model=RERANK_MODEL,
-                max_tokens=1024,
+                max_tokens=512,
                 temperature=0.0,  # Use deterministic output
                 messages=[
                     {"role": "system", "content": "You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response."},
