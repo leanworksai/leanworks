@@ -1,0 +1,52 @@
+import numpy as np
+import logging
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from google.genai import types
+from google import genai
+# Set up logging
+logger = logging.getLogger(__name__)
+
+class GoogleEmbedding:
+    """
+    Class to handle embedding generation using Google's embedding models.
+    """
+    def __init__(self, api_key: str):
+        """
+        Initialize the GoogleEmbedding class.
+        
+        Args:
+            embedding_model_client: Initialized Google embedding model client
+        """
+        self.embedding_model_client = genai.Client(api_key=api_key)
+        logger.info("GoogleEmbedding initialized successfully")
+    
+    @lru_cache(maxsize=1000)
+    def get_embedding(self, text: str) -> np.ndarray:
+        """
+        Generate embedding for input text using Google embedding model with caching.
+        
+        Args:
+            text: The text to generate an embedding for
+            
+        Returns:
+            numpy array containing the embedding vector
+        """
+        logger.debug(f"Generating embedding for text of length: {len(text)}")
+        try:
+            # Add timeout handling for embedding generation
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    self.embedding_model_client.models.embed_content,
+                    model="text-embedding-004",
+                    contents=text,
+                    config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+                )
+                # Wait for result with 30 second timeout
+                result = future.result(timeout=30)
+                return np.array(result.embeddings[0].values)
+        except (concurrent.futures.TimeoutError, Exception) as e:
+            logger.error(f"Error generating embedding: {str(e)}")
+            # Return a zero embedding as fallback
+            return np.zeros(768)  # Standard embedding dimension

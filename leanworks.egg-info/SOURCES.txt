@@ -11,6 +11,7 @@ leanworks.egg-info/requires.txt
 leanworks.egg-info/top_level.txt
 leanworks/rag/__init__.py
 leanworks/rag/chat.py
+leanworks/rag/embedding.py
 leanworks/rag/filters.py
 leanworks/rag/memory.py
 leanworks/rag/reranker.py

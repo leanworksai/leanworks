@@ -5,6 +5,7 @@ from leanworks.rag.filters import FilterExtractor
 from leanworks.rag.memory import MemoryManager
 from leanworks.rag.reranker import CrossEncoderReranker
 from leanworks.rag.setting import GENERATION_MODEL, RETRIEVE_TOP_K, RERANK_TOP_K, SIMILARITY_CUTOFF
+from leanworks.rag.embedding import GoogleEmbedding
 import datetime
 import logging
 from functools import lru_cache
@@ -27,7 +28,7 @@ class Chat(FilterExtractor, MemoryManager):
         pinecone_api_key: str,
         index_host: str,
         storage_client,
-        embedding_model_client,
+        embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None,
@@ -40,7 +41,7 @@ class Chat(FilterExtractor, MemoryManager):
             pinecone_api_key: API key for Pinecone
             index_host: Host URL for the Pinecone index
             storage_client: Initialized CloudStorage client for memory persistence
-            embedding_model_client: Embedding model client
+            embedding_model_api_key: API key for the embedding model
             model_client: Initialized OpenAI client for LLM generation
             user_id: ID of the user
             session_id: ID of the current conversation session
@@ -50,7 +51,8 @@ class Chat(FilterExtractor, MemoryManager):
         pc = Pinecone(api_key=pinecone_api_key)
         self.index = pc.Index(host=index_host)
         self.model_client = model_client
-        self.embedding_model_client = embedding_model_client
+        # Initialize embedding model
+        self.embedding_model = GoogleEmbedding(embedding_model_api_key)
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
         if self.memory_enabled:
@@ -70,27 +72,6 @@ class Chat(FilterExtractor, MemoryManager):
             
         logger.info("RAG system initialized successfully")
 
-    @lru_cache(maxsize=1000)
-    def _get_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding for input text using OpenAI with caching."""
-        logger.debug(f"Generating embedding for text of length: {len(text)}")
-        try:
-            # Add timeout handling for embedding generation
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    self.embedding_model_client.models.embed_content,
-                    model="text-embedding-004",
-                    contents=text,
-                    config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-                )
-                # Wait for result with 30 second timeout
-                result = future.result(timeout=30)
-                return np.array(result.embeddings[0].values)
-        except (concurrent.futures.TimeoutError, Exception) as e:
-            logger.error(f"Error generating embedding: {str(e)}")
-            # Return a zero embedding as fallback
-            return np.zeros(768)  # Standard embedding dimension
-
     def retrieve_nodes(self, query: str, top_k: int = RETRIEVE_TOP_K) -> Tuple[List[dict], List[str]]:
         """
         Retrieve relevant context from Pinecone.
@@ -103,7 +84,7 @@ class Chat(FilterExtractor, MemoryManager):
             Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
         """
         logger.info(f"Retrieving nodes for query: '{query}' with top_k={top_k}")
-        query_embedding = self._get_embedding(query)
+        query_embedding = self.embedding_model.get_embedding(query)
         
         # Extract filters from query
         time_filters = self.extract_time_filters(query, self.model_client)
@@ -428,7 +409,7 @@ class AsyncChat(Chat):
         pinecone_api_key: str,
         index_host: str,
         storage_client,
-        embedding_model_client,
+        embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None,
@@ -439,7 +420,7 @@ class AsyncChat(Chat):
             pinecone_api_key=pinecone_api_key,
             index_host=index_host,
             storage_client=storage_client,
-            embedding_model_client=embedding_model_client,
+            embedding_model_api_key=embedding_model_api_key,
             model_client=model_client,
             user_id=user_id,
             session_id=session_id,
