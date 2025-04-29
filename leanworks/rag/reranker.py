@@ -31,23 +31,6 @@ class CrossEncoderReranker:
         self._max_batch_size = 5
         logger.info("CrossEncoderReranker initialized")
     
-    def _extract_text(self, doc) -> str:
-        """
-        Extract text from document without complex parsing.
-        
-        Args:
-            doc: Document object with metadata
-            
-        Returns:
-            Extracted text from document
-        """
-        if not hasattr(doc, "metadata"):
-            return ""
-        
-        metadata = doc.metadata
-        text = json.loads(metadata.get("_node_content", "")).get("text", "")
-        return text
-    
     def _extract_query_focused_text(self, doc, query: str) -> str:
         """
         Extract text focused around sections most relevant to the query.
@@ -61,7 +44,7 @@ class CrossEncoderReranker:
             Query-relevant text from document
         """
         # Extract base text using existing method
-        text = self._extract_text(doc)
+        text = json.loads(doc.metadata.get("_node_content", "")).get("text", "")
         # If text is short enough, just return it
         if len(text) <= 1000:
             return text

@@ -201,16 +201,7 @@ class Chat(FilterExtractor, MemoryManager):
             timestamp = match.metadata.get("timestamp")
             
             # Extract context text using various fallback methods
-            context_text = ""
-            if "text" in match.metadata:
-                context_text = match.metadata["text"]
-            elif "_node_content" in match.metadata:
-                try:
-                    node_content = json.loads(match.metadata.get("_node_content", ""))
-                    context_text = node_content.get("text", "") or match.metadata.get("context", "")
-                except:
-                    logger.warning("Failed to parse _node_content JSON, falling back to context field")
-                    context_text = match.metadata.get("context", "")
+            context_text = json.loads(match.metadata.get("_node_content", "")).get("text", "")
             
             # Skip duplicates
             if not context_text or context_text in seen_contexts:
