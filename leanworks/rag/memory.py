@@ -15,7 +15,7 @@ class Memory:
 class MemoryManager:
     """Class for managing conversation memory with persistence to cloud storage."""
     
-    MAX_TOKENS = 4000  # Maximum number of tokens to keep in memory
+    MAX_TOKENS = 1024  # Maximum number of tokens to keep in memory
     
     def __init__(self, model_client, storage_client, user_id: str, session_id: str):
         """
@@ -173,7 +173,7 @@ class MemoryManager:
                     
                     response = self.model_client.chat.completions.create(
                         model=OTHER_MODEL,
-                        max_tokens=512,
+                        max_tokens=256,
                         messages=[
                             {"role": "system", "content": "Summarize the following conversation history concisely, preserving key information and context:"},
                             {"role": "user", "content": older_memory_text}
@@ -188,7 +188,7 @@ class MemoryManager:
                         if self._count_tokens(combined_summary) > token_budget:
                             response = self.model_client.chat.completions.create(
                                 model=OTHER_MODEL,
-                                max_tokens=512,
+                                max_tokens=256,
                                 messages=[
                                     {"role": "system", "content": "Condense these two summaries into a single concise summary:"},
                                     {"role": "user", "content": combined_summary}

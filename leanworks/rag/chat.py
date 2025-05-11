@@ -435,6 +435,7 @@ class Chat(FilterExtractor, MemoryManager):
         system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
         When recent conversations are provided, use them to maintain consistency with previous responses. 
         User cited context serves as reference for the user query if it is provided.
+        The answer should be concise (< 120 words) and to the point.
         '''
         
         # Log the prompt being sent to the model
@@ -444,7 +445,7 @@ class Chat(FilterExtractor, MemoryManager):
         try:
             response = self.model_client.chat.completions.create(
                 model=model,
-                max_tokens=1024,  # Allow for longer responses
+                max_tokens=256,  # Allow for longer responses
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
