@@ -9,7 +9,7 @@ import datetime
 import logging
 import asyncio
 import json
-
+from types import SimpleNamespace
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -59,28 +59,107 @@ class Chat(FilterExtractor, MemoryManager):
             
         logger.info("RAG system initialized successfully")
 
-    def retrieve_nodes(self, query: str, top_k: int, apply_filters: bool = False) -> Tuple[List[dict], List[str]]:
+    def rewrite_query(self, query: str, num_rewrites: int = 3, model: str = OTHER_MODEL) -> List[str]:
         """
-        Retrieve relevant context from Pinecone.
+        Rewrite the original query into multiple diverse variants to improve retrieval recall.
         
         Args:
-            query: The user query
+            query: The original user query
+            num_rewrites: Number of query rewrites to generate
+            model: The model to use for generating rewrites
+            
+        Returns:
+            List of rewritten queries
+        """
+        logger.info(f"Generating {num_rewrites} rewrites for query: '{query}'")
+        
+        system_prompt = '''You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that creates
+        *diverse, high‑recall* rewrites of a user's information‑seeking query.
+
+        ## Instructions
+        1. Read the **Original Query**.
+        2. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
+        3. Follow these rewriting strategies *at least once each*  
+        a. **Equality** – preserve all meaning; just de‑chatify the wording.  
+        b. **Expansion** – add missing context a domain expert would expect  
+            (e.g., synonyms, acronyms, date ranges, entity types).  
+        c. **Reduction** – strip to the absolute core keywords.  
+        d. *(Optional if N > 2)* Other creative perspectives that could surface
+            different documents (e.g., broader background, comparison terms).
+        4. **Constraints**  
+        • ≤ 20 tokens per rewrite.  
+        • Remove pronouns/ellipsis; name all entities explicitly.  
+        • Avoid stop‑words unless essential (e.g., "of", "in").  
+        • No duplicate semantic meaning across rewrites.
+        5. Return a **valid JSON** object ONLY without any other text:
+
+        ```json
+        { "rewrites": [" ... ", " ... ", ...] }
+        ```'''
+        
+        user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
+        
+        try:
+            response = self.model_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,  # Use some temperature for diversity
+                response_format={"type": "json_object"}
+            )
+            
+            result = response.choices[0].message.content
+            logger.debug(f"MQR response: {result}")
+            
+            # Parse JSON response
+            try:
+                rewrites_data = json.loads(result)
+                rewrites = rewrites_data.get("rewrites", [])
+                
+                # Ensure we have at least one rewrite
+                if not rewrites:
+                    logger.warning("No rewrites received from model, using original query")
+                    return [query]
+                
+                return rewrites
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON response: {e}")
+                return [query]
+                
+        except Exception as e:
+            logger.error(f"Error generating query rewrites: {str(e)}")
+            # Return original query if rewriting fails
+            return [query]
+
+    def retrieve_nodes(self, query: str | List[str], top_k: int, apply_filters: bool = False) -> Tuple[List[dict], List[str]]:
+        """
+        Retrieve relevant context from Pinecone for one or multiple queries.
+        
+        Args:
+            query: The user query or list of queries. If a list is provided, time filters are 
+                  extracted from the first query and applied to all retrievals.
             top_k: Number of context chunks to retrieve (default from settings)
-            apply_filters: Whether to apply time filters extracted from the query (default True)
+            apply_filters: Whether to apply time filters extracted from the query (default False)
             
         Returns:
             Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
         """
-        logger.info(f"Retrieving nodes for query: '{query}' with top_k={top_k}")
-        query_embedding = self.embedding_model.get_embedding(query)
+        # Handle single query case by converting to list
+        queries = [query] if isinstance(query, str) else query
+        if not queries:
+            logger.warning("No queries provided to retrieve_nodes")
+            return SimpleNamespace(matches=[])
+            
+        logger.info(f"Retrieving nodes for {len(queries)} queries with top_k={top_k}")
         
         filter_dict = {}
-        
-        # Extract filters from query only if apply_filters is True
+        # Extract filters from the first query only if apply_filters is True
         if apply_filters:
-            logger.info("Applying time filters")
-            # Extract filters from query
-            time_filters = self.extract_time_filters(query, self.model_client)
+            logger.info("Applying time filters from first query")
+            # Extract filters from the first query
+            time_filters = self.extract_time_filters(queries[0], self.model_client)
             
             # Prepare filter dict for Pinecone
             if time_filters["start_timestamp"]:
@@ -93,20 +172,44 @@ class Chat(FilterExtractor, MemoryManager):
                     filter_dict["timestamp"] = {"$lte": time_filters["end_timestamp"]}
                 logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
         
-        # Query Pinecone with time filter if available
+        # Results container
+        all_matches = []
+        
+        # Query Pinecone for each query
         try:
-            nodes = self.index.query(
-                vector=query_embedding.tolist(),
-                top_k=top_k,
-                include_metadata=True,
-                filter=filter_dict if filter_dict else None
+            for q in queries:
+                query_embedding = self.embedding_model.get_embedding(q)
+                nodes = self.index.query(
+                    vector=query_embedding.tolist(),
+                    top_k=top_k,
+                    include_metadata=True,
+                    filter=filter_dict if filter_dict else None
+                )
+                
+                # Add matches to combined results
+                if hasattr(nodes, 'matches'):
+                    all_matches.extend(nodes.matches)
+                    logger.info(f"Retrieved {len(nodes.matches)} nodes for query: '{q}'")
+                
+            # Deduplicate matches by ID
+            seen_ids = set()
+            unique_matches = []
+            for match in all_matches:
+                if match.id not in seen_ids:
+                    seen_ids.add(match.id)
+                    unique_matches.append(match)
+            
+            # Create a new response object with deduplicated matches
+            combined_response = SimpleNamespace(
+                matches=unique_matches[:top_k]  # Limit to top_k after deduplication
             )
-            logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes from Pinecone")
-            return nodes
+            
+            logger.info(f"Combined and deduplicated to {len(combined_response.matches)} nodes")
+            return combined_response
+            
         except Exception as e:
             logger.error(f"Error querying Pinecone: {str(e)}")
             # Return an empty result structure with similar interface as Pinecone response
-            from types import SimpleNamespace
             empty_response = SimpleNamespace(matches=[])
             return empty_response
     
@@ -243,6 +346,7 @@ class Chat(FilterExtractor, MemoryManager):
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
             apply_filters: bool = APPLY_FILTERS,
+            query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
             **kwargs
             ) -> Dict[str, any]:
@@ -273,7 +377,13 @@ class Chat(FilterExtractor, MemoryManager):
         context, data_sources = [], []
         rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
         try:
-            nodes = self.retrieve_nodes(full_query, top_k=top_k, apply_filters=apply_filters)
+            if query_rewrites:
+                query_rewrites = self.rewrite_query(query)
+                all_queries = [full_query] + query_rewrites
+                print(all_queries)
+            else:
+                all_queries = [full_query]
+            nodes = self.retrieve_nodes(all_queries, top_k=top_k, apply_filters=apply_filters)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
@@ -386,6 +496,85 @@ class AsyncChat(Chat):
         )
         logger.info("AsyncChat initialized successfully")
     
+    async def async_rewrite_query(self, query: str, num_rewrites: int = 3, model: str = OTHER_MODEL) -> List[str]:
+        """
+        Asynchronous version of rewrite_query that generates query rewrites without blocking.
+        
+        Args:
+            query: The original user query
+            num_rewrites: Number of query rewrites to generate
+            model: The model to use for generating rewrites
+            
+        Returns:
+            List of rewritten queries
+        """
+        logger.info(f"Asynchronously generating {num_rewrites} rewrites for query: '{query}'")
+        
+        system_prompt = '''You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that creates
+        *diverse, high‑recall* rewrites of a user's information‑seeking query.
+
+        ## Instructions
+        1. Read the **Original Query**.
+        2. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
+        3. Follow these rewriting strategies *at least once each*  
+        a. **Equality** – preserve all meaning; just de‑chatify the wording.  
+        b. **Expansion** – add missing context a domain expert would expect  
+            (e.g., synonyms, acronyms, date ranges, entity types).  
+        c. **Reduction** – strip to the absolute core keywords.  
+        d. *(Optional if N > 2)* Other creative perspectives that could surface
+            different documents (e.g., broader background, comparison terms).
+        4. **Constraints**  
+        • ≤ 20 tokens per rewrite.  
+        • Remove pronouns/ellipsis; name all entities explicitly.  
+        • Avoid stop‑words unless essential (e.g., "of", "in").  
+        • No duplicate semantic meaning across rewrites.
+        5. Return a **valid JSON** object ONLY without any other text:
+
+        ```json
+        { "rewrites": [" ... ", " ... ", ...] }
+        ```'''
+        
+        user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
+        
+        try:
+            # Run the model call in executor to make it non-blocking
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.model_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.7,  # Use some temperature for diversity
+                    response_format={"type": "json_object"}
+                )
+            )
+            
+            result = response.choices[0].message.content
+            logger.debug(f"MQR response: {result}")
+            
+            # Parse JSON response
+            try:
+                rewrites_data = json.loads(result)
+                rewrites = rewrites_data.get("rewrites", [])
+                
+                # Ensure we have at least one rewrite
+                if not rewrites:
+                    logger.warning("No rewrites received from model, using original query")
+                    return [query]
+                
+                return rewrites
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON response: {e}")
+                return [query]
+                
+        except Exception as e:
+            logger.error(f"Error generating query rewrites: {str(e)}")
+            # Return original query if rewriting fails
+            return [query]
+    
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
@@ -496,14 +685,22 @@ class AsyncChat(Chat):
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
         
-    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=None, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER):
+    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=None, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER, query_rewrites=QUERY_REWRITES):
         """Asynchronous helper method to retrieve and process context"""
         # Retrieve nodes (this is I/O bound, so we'll run it in the executor)
         loop = asyncio.get_event_loop()
         try:
+            # Generate query rewrites if needed
+            all_queries = [query_with_date]
+            if query_rewrites:
+                rewrites = await self.async_rewrite_query(query_with_date)
+                all_queries.extend(rewrites)
+                logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
+            
+            # Use run_in_executor for the blocking retrieve_nodes operation
             nodes = await loop.run_in_executor(
                 None, 
-                lambda: self.retrieve_nodes(query_with_date, top_k, apply_filters)
+                lambda: self.retrieve_nodes(all_queries, top_k, apply_filters)
             )
             
             # Use async postprocessing with non-blocking reranking
@@ -532,6 +729,7 @@ class AsyncChat(Chat):
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
             apply_filters: bool = APPLY_FILTERS,
+            query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
             **kwargs
             ) -> Dict[str, any]:
@@ -545,6 +743,7 @@ class AsyncChat(Chat):
             include_memory: Whether to include recent conversation history
             use_reranker: Whether to apply reranking
             apply_filters: Whether to apply time filters extracted from the query
+            query_rewrites: Whether to use query rewriting for better recall
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -568,7 +767,8 @@ class AsyncChat(Chat):
             top_k=top_k, 
             rerank_top_k=rerank_top_k,
             apply_filters=apply_filters,
-            use_reranker=use_reranker
+            use_reranker=use_reranker,
+            query_rewrites=query_rewrites
         ))
         
         # Get memory in parallel if needed

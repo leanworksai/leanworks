@@ -9,10 +9,11 @@ import pandas as pd
 import asyncio
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
-query = "who are our current clients? who are potential clients we are talking to?"
-
+query = "based on our customer interviews, who has the most potential to be our customer?"
+# query = "how was the interview with Alan"
+# query = "show me the recent progress for IOS app"
 def test_sync_chat():
     storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
     secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
@@ -56,17 +57,17 @@ async def test_async_chat():
         session_id=session_id
     )
     start_time = time.time()
-    response = await async_chat.async_get_response(query, apply_filters=True, use_reranker=True, include_memory=True)
+    response = await async_chat.async_get_response(query)
     elapsed_time = time.time() - start_time
     print(f"Async Chat Response (took {elapsed_time:.2f} seconds):")
     print(response["content"])
 
 async def main():
     # Run synchronous test
-    test_sync_chat()
+    # test_sync_chat()
     
     # Run asynchronous test
-    # await test_async_chat()
+    await test_async_chat()
 
 if __name__ == "__main__":
     asyncio.run(main())
