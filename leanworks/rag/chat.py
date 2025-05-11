@@ -78,6 +78,7 @@ class Chat(FilterExtractor, MemoryManager):
         
         # Extract filters from query only if apply_filters is True
         if apply_filters:
+            logger.info("Applying time filters")
             # Extract filters from query
             time_filters = self.extract_time_filters(query, self.model_client)
             
@@ -136,6 +137,7 @@ class Chat(FilterExtractor, MemoryManager):
 
         # Extract user filters from query only if apply_filters is True
         if apply_filters:
+            logger.info("Applying user filters")
             user_filters = self.extract_user_filters(query)
             if user_filters:
                 # Filter results by user access
@@ -271,7 +273,7 @@ class Chat(FilterExtractor, MemoryManager):
         context, data_sources = [], []
         rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
         try:
-            nodes = self.retrieve_nodes(full_query, top_k=top_k)
+            nodes = self.retrieve_nodes(full_query, top_k=top_k, apply_filters=apply_filters)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
@@ -336,7 +338,8 @@ class Chat(FilterExtractor, MemoryManager):
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                temperature=0.0
             )
             answer = response.choices[0].message.content
             
@@ -641,7 +644,8 @@ class AsyncChat(Chat):
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
-                        ]
+                        ],
+                    temperature=0.0
                 )
             )
             

@@ -11,14 +11,15 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+query = "who are our current clients? who are potential clients we are talking to?"
 
 def test_sync_chat():
     storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
     secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
-    # session_id = str(uuid.uuid4())
-    session_id = "123"
+    session_id = str(uuid.uuid4())
+    # session_id = "hxsd2973"
 
     # Initialize RAG
     chat = Chat(
@@ -30,9 +31,8 @@ def test_sync_chat():
         user_id="zhuyanfu0712@gmail.com",
         session_id=session_id
     )
-    query = "list all learnings from our customer interviews"
     start_time = time.time()
-    response = chat.get_response(query, apply_filters=True, use_reranker=True, include_memory=False)
+    response = chat.get_response(query)
     elapsed_time = time.time() - start_time
     print(f"Sync Chat Response (took {elapsed_time:.2f} seconds):")
     print(response["content"])
@@ -55,7 +55,6 @@ async def test_async_chat():
         user_id="zhuyanfu0712@gmail.com",
         session_id=session_id
     )
-    query = "which interviewee is more likely to be our customer?"
     start_time = time.time()
     response = await async_chat.async_get_response(query, apply_filters=True, use_reranker=True, include_memory=True)
     elapsed_time = time.time() - start_time
@@ -64,10 +63,10 @@ async def test_async_chat():
 
 async def main():
     # Run synchronous test
-    # test_sync_chat()
+    test_sync_chat()
     
     # Run asynchronous test
-    await test_async_chat()
+    # await test_async_chat()
 
 if __name__ == "__main__":
     asyncio.run(main())
