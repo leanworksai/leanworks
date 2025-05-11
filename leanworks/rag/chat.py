@@ -403,32 +403,12 @@ class AsyncChat(Chat):
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
         """
         logger.info(f"Async postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
+        logger.debug("Initial documents", nodes.matches)
         # Filter results by relevance score
         filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
-        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
-        
-        # Apply reranking if enabled and needed (directly on the filtered results)
-        if use_reranker and filtered_results:
-            # Check if reranking should be applied based on result quality
-            if self._should_apply_reranking(filtered_results):
-                logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
-                try:
-                    # Use async reranker to improve precision without blocking
-                    self.reranker = CrossEncoderReranker(self.model_client)
-                    reranked_results = await self.async_rerank(query, filtered_results)
-                    filtered_results = reranked_results[:rerank_top_k]
-                    logger.info(f"Successfully reranked results to {len(filtered_results)} documents")
-                except Exception as e:
-                    logger.error(f"Error during async reranking: {str(e)}, falling back to vector rankings")
-                    # In case of error, limit to top_k based on vector similarity
-                    filtered_results = filtered_results[:rerank_top_k]
-            else:
-                logger.info("Skipping reranking due to high quality initial results")
-                # Just take the top results without reranking
-                filtered_results = filtered_results[:rerank_top_k]
-        
+        logger.debug("Score filtered documents", filtered_results)
+
         # Extract user filters from query only if apply_filters is True
-        user_filtered_results = filtered_results
         if apply_filters:
             user_filters = self.extract_user_filters(query)
             if user_filters:
@@ -446,23 +426,48 @@ class AsyncChat(Chat):
                     else:
                         # If no user access information, assume public access
                         user_filtered_results.append(match)
-        
-        # Sort results by timestamp (most recent first)
-        # If reranked, we'll keep the reranking order for better precision
-        if use_reranker:
-            matches = user_filtered_results
+            else:
+                user_filtered_results = filtered_results
         else:
-            matches = sorted(
-                user_filtered_results,
+            user_filtered_results = filtered_results
+            
+        # Apply reranking if enabled and needed (directly on the filtered results)
+        rerank_top_k = kwargs.get("rerank_top_k")
+        if use_reranker and user_filtered_results:
+            if rerank_top_k is None:
+                raise ValueError("rerank_top_k is required when use_reranker is True")
+            # Check if reranking should be applied based on result quality
+            if self._should_apply_reranking(user_filtered_results):
+                logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
+                try:
+                    # Use async reranker to improve precision without blocking
+                    self.reranker = CrossEncoderReranker(self.model_client)
+                    reranked_results = await self.async_rerank(query, user_filtered_results)
+                    logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
+                except Exception as e:
+                    logger.error(f"Error during async reranking: {str(e)}, falling back to vector rankings")
+                    # In case of error, limit to top_k based on vector similarity
+                    reranked_results = user_filtered_results[:rerank_top_k]
+            else:
+                logger.info("Skipping reranking due to high quality initial results")
+                # Just take the top results without reranking
+                reranked_results = sorted(
+                    user_filtered_results[:rerank_top_k],
+                    key=lambda x: x.metadata.get("timestamp", 0)
+                )
+        else:
+            reranked_results = sorted(
+                user_filtered_results[:rerank_top_k],
                 key=lambda x: x.metadata.get("timestamp", 0)
             )
+        logger.debug("Reranked documents", reranked_results)
 
         # Extract text from metadata
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in matches:
+        for match in reranked_results:
             # Extract source information
             data_source = match.metadata["data_source"]
             links.add(match.metadata["link"])
@@ -470,17 +475,8 @@ class AsyncChat(Chat):
             # Get timestamp if available
             timestamp = match.metadata.get("timestamp")
             
-            # Extract context text using various fallback methods
-            context_text = ""
-            if "text" in match.metadata:
-                context_text = match.metadata["text"]
-            elif "_node_content" in match.metadata:
-                try:
-                    node_content = json.loads(match.metadata.get("_node_content", ""))
-                    context_text = node_content.get("text", "") or match.metadata.get("context", "")
-                except:
-                    logger.warning("Failed to parse _node_content JSON, falling back to context field")
-                    context_text = match.metadata.get("context", "")
+            # Extract context text using the same method as in Chat class
+            context_text = json.loads(match.metadata.get("_node_content", "")).get("text", "")
             
             # Skip duplicates
             if not context_text or context_text in seen_contexts:
@@ -497,7 +493,7 @@ class AsyncChat(Chat):
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
         
-    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER):
+    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=None, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER):
         """Asynchronous helper method to retrieve and process context"""
         # Retrieve nodes (this is I/O bound, so we'll run it in the executor)
         loop = asyncio.get_event_loop()
@@ -553,9 +549,6 @@ class AsyncChat(Chat):
         """
         logger.info(f"Asynchronously generating response for query: '{query}' using model: {model}")
 
-        # Fallback models if the specified model is unavailable
-        fallback_models = ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4o", "claude-3-haiku-20240307"]
-
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -565,10 +558,8 @@ class AsyncChat(Chat):
         else:
             full_query = f"(Current date: {today_date}) {query}"
 
-        # Get rerank_top_k from kwargs or default
-        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
-        
         # Create tasks for async processing
+        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
         context_task = asyncio.create_task(self._async_retrieve_and_process_context(
             full_query, 
             top_k=top_k, 
@@ -639,43 +630,32 @@ class AsyncChat(Chat):
         logger.info(f"System prompt: {system_prompt}")
         logger.info(f"User prompt: {prompt}")
 
-        # Try primary model first, then fallback models if there's an error
-        models_to_try = [model] + fallback_models
-        answer = None
-
-        for current_model in models_to_try:
-            try:
-                # Call the model asynchronously
-                loop = asyncio.get_event_loop()
-                response_future = loop.run_in_executor(
-                    None,
-                    lambda: self.model_client.chat.completions.create(
-                        model=current_model,
-                        max_tokens=1024,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt}
-                            ]
-                    )
+        try:
+            # Call the model asynchronously
+            loop = asyncio.get_event_loop()
+            response_future = loop.run_in_executor(
+                None,
+                lambda: self.model_client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                        ]
                 )
-                
-                # Wait for result with timeout
-                response = await asyncio.wait_for(response_future, timeout=90)
-                answer = response.choices[0].message.content
-                
-                # Log a preview of the model's response
-                logger.info(f"Model {current_model} response: {answer}")
-                # Break the loop if response was successful
-                break
-            except asyncio.TimeoutError:
-                logger.error(f"Model {current_model} response generation timed out after 90 seconds")
-                continue
-            except Exception as e:
-                logger.error(f"Error generating model {current_model} response: {str(e)}")
-                continue
-        
-        # If all models failed, return a generic error message
-        if answer is None:
+            )
+            
+            # Wait for result with timeout
+            response = await asyncio.wait_for(response_future, timeout=90)
+            answer = response.choices[0].message.content
+            
+            # Log a preview of the model's response
+            logger.info(f"Model {model} response: {answer}")
+        except asyncio.TimeoutError:
+            logger.error(f"Model {model} response generation timed out after 90 seconds")
+            answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
+        except Exception as e:
+            logger.error(f"Error generating model {model} response: {str(e)}")
             answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled
