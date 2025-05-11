@@ -1,18 +1,13 @@
 from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
-import numpy as np
 from leanworks.rag.filters import FilterExtractor
 from leanworks.rag.memory import MemoryManager
 from leanworks.rag.reranker import CrossEncoderReranker
-from leanworks.rag.setting import GENERATION_MODEL, RETRIEVE_TOP_K, RERANK_TOP_K, SIMILARITY_CUTOFF
+from leanworks.rag.setting import *
 from leanworks.rag.embedding import GoogleEmbedding
 import datetime
 import logging
-from functools import lru_cache
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
 import asyncio
-from google.genai import types
 import json
 
 # Set up logging
@@ -31,8 +26,7 @@ class Chat(FilterExtractor, MemoryManager):
         embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
-        session_id: str | None = None,
-        use_reranker: bool = True,
+        session_id: str | None = None
     ):
         """
         Initialize Chat with Pinecone vector store and memory management.
@@ -45,7 +39,6 @@ class Chat(FilterExtractor, MemoryManager):
             model_client: Initialized OpenAI client for LLM generation
             user_id: ID of the user
             session_id: ID of the current conversation session
-            use_reranker: Whether to use the reranker for improved precision
         """
         # Initialize Pinecone
         pc = Pinecone(api_key=pinecone_api_key)
@@ -63,22 +56,17 @@ class Chat(FilterExtractor, MemoryManager):
             
         # Initialize the FilterExtractor part
         FilterExtractor.__init__(self)
-        
-        # Initialize the Reranker if enabled
-        self.use_reranker = use_reranker
-        if self.use_reranker:
-            self.reranker = CrossEncoderReranker(model_client)
-            logger.info("Cross-encoder reranker initialized")
             
         logger.info("RAG system initialized successfully")
 
-    def retrieve_nodes(self, query: str, top_k: int = RETRIEVE_TOP_K) -> Tuple[List[dict], List[str]]:
+    def retrieve_nodes(self, query: str, top_k: int, apply_filters: bool = False) -> Tuple[List[dict], List[str]]:
         """
         Retrieve relevant context from Pinecone.
         
         Args:
             query: The user query
             top_k: Number of context chunks to retrieve (default from settings)
+            apply_filters: Whether to apply time filters extracted from the query (default True)
             
         Returns:
             Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
@@ -86,21 +74,23 @@ class Chat(FilterExtractor, MemoryManager):
         logger.info(f"Retrieving nodes for query: '{query}' with top_k={top_k}")
         query_embedding = self.embedding_model.get_embedding(query)
         
-        # Extract filters from query
-        time_filters = self.extract_time_filters(query, self.model_client)
-
-        
-        # Prepare filter dict for Pinecone
         filter_dict = {}
-        if time_filters["start_timestamp"]:
-            filter_dict["timestamp"] = {"$gte": time_filters["start_timestamp"]}
-            logger.debug(f"Applied start timestamp filter: {time_filters['start_timestamp']}")
-        if time_filters["end_timestamp"]:
-            if "timestamp" in filter_dict:
-                filter_dict["timestamp"]["$lte"] = time_filters["end_timestamp"]
-            else:
-                filter_dict["timestamp"] = {"$lte": time_filters["end_timestamp"]}
-            logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
+        
+        # Extract filters from query only if apply_filters is True
+        if apply_filters:
+            # Extract filters from query
+            time_filters = self.extract_time_filters(query, self.model_client)
+            
+            # Prepare filter dict for Pinecone
+            if time_filters["start_timestamp"]:
+                filter_dict["timestamp"] = {"$gte": time_filters["start_timestamp"]}
+                logger.debug(f"Applied start timestamp filter: {time_filters['start_timestamp']}")
+            if time_filters["end_timestamp"]:
+                if "timestamp" in filter_dict:
+                    filter_dict["timestamp"]["$lte"] = time_filters["end_timestamp"]
+                else:
+                    filter_dict["timestamp"] = {"$lte": time_filters["end_timestamp"]}
+                logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
         
         # Query Pinecone with time filter if available
         try:
@@ -119,14 +109,21 @@ class Chat(FilterExtractor, MemoryManager):
             empty_response = SimpleNamespace(matches=[])
             return empty_response
     
-    def postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = RERANK_TOP_K) -> Tuple[List[dict], List[str]]:
+    def postprocess_nodes(
+            self, nodes: List[dict], 
+            query: str, 
+            apply_filters: bool = False, 
+            use_reranker: bool = False, 
+            **kwargs
+            ) -> Tuple[List[dict], List[str]]:
         """
         Process retrieved nodes from Pinecone and extract context information.
         
         Args:
             nodes: The query results from Pinecone
             query: The user query
-            rerank_top_k: Number of top documents to keep after reranking
+            apply_filters: Whether to apply user filters extracted from the query (default True)
+            use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
             
         Returns:
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
@@ -136,63 +133,67 @@ class Chat(FilterExtractor, MemoryManager):
         # Filter results by relevance score
         filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
         logger.debug("Score filtered documents", filtered_results)
+
+        # Extract user filters from query only if apply_filters is True
+        if apply_filters:
+            user_filters = self.extract_user_filters(query)
+            if user_filters:
+                # Filter results by user access
+                user_filtered_results = []
+                for match in filtered_results:
+                    # Check if the node has user access information
+                    if "users" in match.metadata:
+                        # Get the users who can access this node
+                        node_users = match.metadata["users"]
+                        # If node_users is a string, check if all user_filters are in it
+                        if isinstance(node_users, str):
+                            if any(user in node_users for user in user_filters) or "everyone" in node_users:
+                                user_filtered_results.append(match)
+                    else:
+                        # If no user access information, assume public access
+                        user_filtered_results.append(match)
+            else:
+                user_filtered_results = filtered_results
+        else:
+            user_filtered_results = filtered_results
         # Apply reranking if enabled and needed (directly on the filtered results)
-        if self.use_reranker and filtered_results:
+        rerank_top_k = kwargs.get("rerank_top_k")
+        if use_reranker and user_filtered_results:
+            if rerank_top_k is None:
+                raise ValueError("rerank_top_k is required when use_reranker is True")
             # Check if reranking should be applied based on result quality
-            if self._should_apply_reranking(filtered_results):
+            if self._should_apply_reranking(user_filtered_results):
                 logger.info(f"Applying reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use the reranker to improve precision
-                    reranked_results = self.reranker.rerank(query, filtered_results, top_k=rerank_top_k)
-                    filtered_results = reranked_results
-                    logger.info(f"Successfully reranked results to {len(filtered_results)} documents")
+                    logger.info("Initializing CrossEncoderReranker")
+                    self.reranker = CrossEncoderReranker(self.model_client)
+                    reranked_results = self.reranker.rerank(query, user_filtered_results, top_k=rerank_top_k)
+                    logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
                     # In case of error, limit to top_k based on vector similarity
-                    filtered_results = filtered_results[:rerank_top_k]
+                    reranked_results = user_filtered_results[:rerank_top_k]
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
-                filtered_results = filtered_results[:rerank_top_k]
-        logger.debug("Reranked documents", filtered_results)
-
-        # Extract user filters from query
-        user_filters = self.extract_user_filters(query)
-        
-        if user_filters:
-            # Filter results by user access
-            user_filtered_results = []
-            for match in filtered_results:
-                # Check if the node has user access information
-                if "users" in match.metadata:
-                    # Get the users who can access this node
-                    node_users = match.metadata["users"]
-                    # If node_users is a string, check if all user_filters are in it
-                    if isinstance(node_users, str):
-                        if any(user in node_users for user in user_filters) or "everyone" in node_users:
-                            user_filtered_results.append(match)
-                else:
-                    # If no user access information, assume public access
-                    user_filtered_results.append(match)
+                reranked_results = sorted(
+                    user_filtered_results[:rerank_top_k],
+                    key=lambda x: x.metadata.get("timestamp", 0)
+                )
         else:
-            user_filtered_results = filtered_results
-        
-        # Sort results by timestamp (most recent first)
-        # If reranked, we'll keep the reranking order for better precision
-        if self.use_reranker:
-            matches = user_filtered_results
-        else:
-            matches = sorted(
-                user_filtered_results,
+            reranked_results = sorted(
+                user_filtered_results[:rerank_top_k],
                 key=lambda x: x.metadata.get("timestamp", 0)
             )
+        logger.debug("Reranked documents", reranked_results)
 
         # Extract text from metadata
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in matches:
+        for match in reranked_results:
             # Extract source information
             data_source = match.metadata["data_source"]
             links.add(match.metadata["link"])
@@ -218,17 +219,6 @@ class Chat(FilterExtractor, MemoryManager):
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
     
-    def _retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K):
-        """Helper method to retrieve and process context in parallel"""
-        try:
-            nodes = self.retrieve_nodes(query_with_date, top_k=top_k)
-            context, data_sources = self.postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
-            return context, data_sources
-        except Exception as e:
-            logger.error(f"Error in context retrieval: {str(e)}")
-            # Return empty results in case of any error
-            return [], []
-    
     def _retrieve_memory(self):
         """Helper method to retrieve memory in parallel"""
         recent_memories = self.get_recent_memories()
@@ -246,9 +236,13 @@ class Chat(FilterExtractor, MemoryManager):
     
     def get_response(
             self, query: str, 
-            model: str = GENERATION_MODEL, 
-            include_memory: bool = True, 
-            cited_context: dict = None
+            model: str = GENERATION_MODEL,
+            top_k: int = RETRIEVE_TOP_K,
+            include_memory: bool = INCLUDE_MEMORY,
+            use_reranker: bool = USE_RERANKER,
+            apply_filters: bool = APPLY_FILTERS,
+            cited_context: dict = None,
+            **kwargs
             ) -> Dict[str, any]:
         """
         Generate a response using RAG approach.
@@ -264,9 +258,6 @@ class Chat(FilterExtractor, MemoryManager):
         """
         logger.info(f"Generating response for query: '{query}' using model: {model}")
 
-        # Fallback models if the specified model is unavailable
-        fallback_models = ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4o", "claude-3-haiku-20240307"]
-
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -276,31 +267,25 @@ class Chat(FilterExtractor, MemoryManager):
         else:
             full_query = f"(Current date: {today_date}) {query}"
 
-        # Use ThreadPoolExecutor to parallelize memory and context retrieval
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Start context retrieval task
-            context_future = executor.submit(self._retrieve_and_process_context, full_query)
-            
-            # Start memory retrieval task if needed
-            memory_future = None
-            if include_memory and self.memory_enabled:
-                memory_future = executor.submit(self._retrieve_memory)
-            
-            # Wait for both tasks to complete with timeouts
-            try:
-                # Set timeout for context retrieval (60 seconds)
-                context, data_sources = context_future.result(timeout=60)
-            except concurrent.futures.TimeoutError:
-                logger.error("Context retrieval timed out after 60 seconds, using empty context")
-                context, data_sources = [], []
-            
-            # Get memory context if requested (with timeout)
-            memory_context = []
-            if memory_future:
-                try:
-                    memory_context = memory_future.result(timeout=30)
-                except concurrent.futures.TimeoutError:
-                    logger.error("Memory retrieval timed out after 30 seconds, using empty memory context")
+        # Retrieve context
+        context, data_sources = [], []
+        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
+        try:
+            nodes = self.retrieve_nodes(full_query, top_k=top_k)
+            context, data_sources = self.postprocess_nodes(
+                nodes, 
+                full_query, 
+                apply_filters=apply_filters, 
+                use_reranker=use_reranker, 
+                rerank_top_k=rerank_top_k
+                )
+        except Exception as e:
+            logger.error(f"Error in context retrieval: {str(e)}")
+        
+        # Get memory if needed
+        memory_context = []
+        if include_memory and self.memory_enabled:
+            memory_context = self._retrieve_memory()
         
         # Format context with recency information
         formatted_context = ""
@@ -344,40 +329,21 @@ class Chat(FilterExtractor, MemoryManager):
         logger.info(f"System prompt: {system_prompt}")
         logger.info(f"User prompt: {prompt}")
 
-        # Try primary model first, then fallback models if there's an error
-        models_to_try = [model] + fallback_models
-        answer = None
-
-        for current_model in models_to_try:
-            try:
-                # Add timeout handling for model response generation
-                with ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        self.model_client.chat.completions.create,
-                        model=current_model,
-                        max_tokens=1024,  # Allow for longer responses
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt}
-                        ]
-                    )
-                    # Wait for result with 90 second timeout
-                    response = future.result(timeout=90)
-                    answer = response.choices[0].message.content
-                
-                # Log a preview of the model's response
-                logger.info(f"Model {current_model} response: {answer}")
-                # Break the loop if response was successful
-                break
-            except concurrent.futures.TimeoutError:
-                logger.error(f"Model {current_model} response generation timed out after 90 seconds")
-                continue
-            except Exception as e:
-                logger.error(f"Error generating model {current_model} response: {str(e)}")
-                continue
-        
-        # If all models failed, return a generic error message
-        if answer is None:
+        try:
+            response = self.model_client.chat.completions.create(
+                model=model,
+                max_tokens=1024,  # Allow for longer responses
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            answer = response.choices[0].message.content
+            
+            # Log a preview of the model's response
+            logger.info(f"Model {model} response: {answer}")
+        except Exception as e:
+            logger.error(f"Error generating model {model} response: {str(e)}")
             answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled
@@ -403,8 +369,7 @@ class AsyncChat(Chat):
         embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
-        session_id: str | None = None,
-        use_reranker: bool = True,
+        session_id: str | None = None
     ):
         """Initialize AsyncChat with the same parameters as Chat."""
         super().__init__(
@@ -414,19 +379,25 @@ class AsyncChat(Chat):
             embedding_model_api_key=embedding_model_api_key,
             model_client=model_client,
             user_id=user_id,
-            session_id=session_id,
-            use_reranker=use_reranker
+            session_id=session_id
         )
         logger.info("AsyncChat initialized successfully")
     
-    async def async_postprocess_nodes(self, nodes: List[dict], query: str, rerank_top_k: int = RERANK_TOP_K) -> Tuple[List[dict], List[str]]:
+    async def async_postprocess_nodes(
+            self, nodes: List[dict], 
+            query: str, 
+            apply_filters: bool = False, 
+            use_reranker: bool = False, 
+            **kwargs
+        ) -> Tuple[List[dict], List[str]]:
         """
         Asynchronous version of postprocess_nodes that uses async reranking for better performance.
         
         Args:
             nodes: The query results from Pinecone
             query: The user query
-            rerank_top_k: Number of top documents to keep after reranking
+            apply_filters: Whether to apply user filters extracted from the query
+            use_reranker: Whether to apply reranking
             
         Returns:
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
@@ -434,16 +405,18 @@ class AsyncChat(Chat):
         logger.info(f"Async postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
         # Filter results by relevance score
         filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
+        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
         
         # Apply reranking if enabled and needed (directly on the filtered results)
-        if self.use_reranker and filtered_results:
+        if use_reranker and filtered_results:
             # Check if reranking should be applied based on result quality
             if self._should_apply_reranking(filtered_results):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
+                    self.reranker = CrossEncoderReranker(self.model_client)
                     reranked_results = await self.async_rerank(query, filtered_results)
-                    filtered_results = reranked_results
+                    filtered_results = reranked_results[:rerank_top_k]
                     logger.info(f"Successfully reranked results to {len(filtered_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during async reranking: {str(e)}, falling back to vector rankings")
@@ -454,30 +427,29 @@ class AsyncChat(Chat):
                 # Just take the top results without reranking
                 filtered_results = filtered_results[:rerank_top_k]
         
-        # Extract user filters from query
-        user_filters = self.extract_user_filters(query)
-        
-        if user_filters:
-            # Filter results by user access
-            user_filtered_results = []
-            for match in filtered_results:
-                # Check if the node has user access information
-                if "users" in match.metadata:
-                    # Get the users who can access this node
-                    node_users = match.metadata["users"]
-                    # If node_users is a string, check if all user_filters are in it
-                    if isinstance(node_users, str):
-                        if any(user in node_users for user in user_filters) or "everyone" in node_users:
-                            user_filtered_results.append(match)
-                else:
-                    # If no user access information, assume public access
-                    user_filtered_results.append(match)
-        else:
-            user_filtered_results = filtered_results
+        # Extract user filters from query only if apply_filters is True
+        user_filtered_results = filtered_results
+        if apply_filters:
+            user_filters = self.extract_user_filters(query)
+            if user_filters:
+                # Filter results by user access
+                user_filtered_results = []
+                for match in filtered_results:
+                    # Check if the node has user access information
+                    if "users" in match.metadata:
+                        # Get the users who can access this node
+                        node_users = match.metadata["users"]
+                        # If node_users is a string, check if all user_filters are in it
+                        if isinstance(node_users, str):
+                            if any(user in node_users for user in user_filters) or "everyone" in node_users:
+                                user_filtered_results.append(match)
+                    else:
+                        # If no user access information, assume public access
+                        user_filtered_results.append(match)
         
         # Sort results by timestamp (most recent first)
         # If reranked, we'll keep the reranking order for better precision
-        if self.use_reranker:
+        if use_reranker:
             matches = user_filtered_results
         else:
             matches = sorted(
@@ -525,15 +497,24 @@ class AsyncChat(Chat):
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
         
-    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K):
+    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=RERANK_TOP_K, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER):
         """Asynchronous helper method to retrieve and process context"""
         # Retrieve nodes (this is I/O bound, so we'll run it in the executor)
         loop = asyncio.get_event_loop()
         try:
-            nodes = await loop.run_in_executor(None, self.retrieve_nodes, query_with_date, top_k)
+            nodes = await loop.run_in_executor(
+                None, 
+                lambda: self.retrieve_nodes(query_with_date, top_k, apply_filters)
+            )
             
             # Use async postprocessing with non-blocking reranking
-            context, data_sources = await self.async_postprocess_nodes(nodes, query_with_date, rerank_top_k=rerank_top_k)
+            context, data_sources = await self.async_postprocess_nodes(
+                nodes, 
+                query_with_date, 
+                apply_filters=apply_filters, 
+                use_reranker=use_reranker, 
+                rerank_top_k=rerank_top_k
+            )
             return context, data_sources
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
@@ -547,9 +528,13 @@ class AsyncChat(Chat):
     
     async def async_get_response(
             self, query: str, 
-            model: str = GENERATION_MODEL, 
-            include_memory: bool = True, 
-            cited_context: dict = None
+            model: str = GENERATION_MODEL,
+            top_k: int = RETRIEVE_TOP_K,
+            include_memory: bool = INCLUDE_MEMORY,
+            use_reranker: bool = USE_RERANKER,
+            apply_filters: bool = APPLY_FILTERS,
+            cited_context: dict = None,
+            **kwargs
             ) -> Dict[str, any]:
         """
         Asynchronously generate a response using RAG approach with improved performance.
@@ -557,7 +542,10 @@ class AsyncChat(Chat):
         Args:
             query: The user query
             model: The model to use for generation
+            top_k: Number of context chunks to retrieve
             include_memory: Whether to include recent conversation history
+            use_reranker: Whether to apply reranking
+            apply_filters: Whether to apply time filters extracted from the query
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -577,8 +565,17 @@ class AsyncChat(Chat):
         else:
             full_query = f"(Current date: {today_date}) {query}"
 
+        # Get rerank_top_k from kwargs or default
+        rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
+        
         # Create tasks for async processing
-        context_task = asyncio.create_task(self._async_retrieve_and_process_context(full_query))
+        context_task = asyncio.create_task(self._async_retrieve_and_process_context(
+            full_query, 
+            top_k=top_k, 
+            rerank_top_k=rerank_top_k,
+            apply_filters=apply_filters,
+            use_reranker=use_reranker
+        ))
         
         # Get memory in parallel if needed
         memory_context = []

@@ -5,7 +5,7 @@ import datetime
 import math
 import concurrent.futures
 import threading
-from leanworks.rag.setting import MIN_SCORE_THRESHOLD, RECENCY_WEIGHT, RERANK_MODEL, RERANK_TOP_K
+from leanworks.rag.setting import *
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -98,8 +98,14 @@ class CrossEncoderReranker:
         result = " ".join(selected_text_parts)
         return result
     
-    def rerank(self, query: str, documents: List[Any], top_k: int = RERANK_TOP_K, 
-               min_score_threshold: float = MIN_SCORE_THRESHOLD, recency_weight: float = RECENCY_WEIGHT) -> List[Any]:
+    def rerank(
+            self, query: str, 
+            documents: List[Any], 
+            top_k: int = RERANK_TOP_K, 
+            min_score_threshold: float = MIN_SCORE_THRESHOLD, 
+            recency_weight: float = RECENCY_WEIGHT,
+            recency_coefficient: float = RECENCY_COEFFICIENT
+            ) -> List[Any]:
         """
         Rerank documents based on their relevance to the query and recency.
         
@@ -109,7 +115,7 @@ class CrossEncoderReranker:
             top_k: Number of top documents to return after reranking
             min_score_threshold: Minimum score threshold for documents to keep
             recency_weight: Weight given to recency in the final score (0-1)
-            
+            recency_coefficient: Coefficient for recency calculation
         Returns:
             List of reranked documents
         """
@@ -142,7 +148,7 @@ class CrossEncoderReranker:
                         # Calculate recency score - more recent = higher score
                         # Use exponential decay based on days difference
                         days_diff = (current_time - doc_timestamp) / (60 * 60 * 24)  # Convert to days
-                        recency_score = max(0.0, min(1.0, math.exp(-0.3 * days_diff)))
+                        recency_score = max(0.0, min(1.0, math.exp(-recency_coefficient * days_diff)))
                     except (ValueError, TypeError):
                         logger.warning(f"Invalid timestamp format in document metadata")
                 
