@@ -3,6 +3,9 @@ from datetime import datetime, timezone
 import json
 import re
 from leanworks.rag.setting import OTHER_MODEL
+from logging import getLogger
+import asyncio
+logger = getLogger(__name__)
 
 class FilterExtractor:
     """
@@ -88,27 +91,67 @@ class FilterExtractor:
 
                 # Determine which date is farthest from current date
                 if start_diff > end_diff:
-                    return {
+                    time_filters = {
                         "start_timestamp": int(current_timestamp - start_diff),
                         "end_timestamp": int(current_timestamp)
                     }
                 else:
-                    return {
+                    time_filters = {
                         "start_timestamp": int(current_timestamp - end_diff),
                         "end_timestamp": int(current_timestamp)
                     }
             else:
-                return {
+                time_filters = {
                     "start_timestamp": start_timestamp,
                     "end_timestamp": end_timestamp
                 }
         except Exception as e:
             print(f"Error extracting time filters: {e}")
             # Return 0 for start_timestamp and current_timestamp for end_timestamp if parsing fails
-            return {
+            time_filters = {
                 "start_timestamp": 0,
                 "end_timestamp": current_timestamp
             }
+        filter_dict = {}
+            
+        # Prepare filter dict for Pinecone
+        if time_filters["start_timestamp"]:
+            filter_dict["timestamp"] = {"$gte": time_filters["start_timestamp"]}
+            logger.debug(f"Applied start timestamp filter: {time_filters['start_timestamp']}")
+        if time_filters["end_timestamp"]:
+            if "timestamp" in filter_dict:
+                filter_dict["timestamp"]["$lte"] = time_filters["end_timestamp"]
+            else:
+                filter_dict["timestamp"] = {"$lte": time_filters["end_timestamp"]}
+            logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
+
+        return filter_dict
+
+    async def async_extract_time_filters(self, query: str) -> dict:
+        """
+        Asynchronous version of extract_time_filters that runs in a separate thread.
+        
+        Args:
+            query: The user query
+            
+        Returns:
+            Dictionary with time filters
+        """
+        logger.info(f"Asynchronously extracting time filters from query: '{query}'")
+        loop = asyncio.get_event_loop()
+        
+        try:
+            # Run the extract_time_filters method in a separate thread
+            filters = await loop.run_in_executor(
+                None, 
+                lambda: self.extract_time_filters(query, self.model_client)
+            )
+            logger.info(f"Extracted time filters: {filters}")
+            return filters
+        except Exception as e:
+            logger.error(f"Error extracting time filters: {str(e)}")
+            return None
+
     def extract_user_filters(self, query: str) -> List[str]:
         """
         Extract user email addresses from the query using regex.

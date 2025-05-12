@@ -5,6 +5,7 @@ from leanworks.rag.memory import MemoryManager
 from leanworks.rag.reranker import CrossEncoderReranker
 from leanworks.rag.setting import *
 from leanworks.rag.embedding import GoogleEmbedding
+from leanworks.rag.query import QueryRewriter
 import datetime
 import logging
 import asyncio
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class Chat(FilterExtractor, MemoryManager):
+class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     """
     Chat class for retrieving context from Pinecone and generating responses using OpenAI.
     Provides synchronous functionality for RAG operations.
@@ -56,60 +57,13 @@ class Chat(FilterExtractor, MemoryManager):
             
         # Initialize the FilterExtractor part
         FilterExtractor.__init__(self)
+        
+        # Initialize QueryRewriter
+        QueryRewriter.__init__(self, model_client)
             
         logger.info("RAG system initialized successfully")
 
-    def rewrite_query(self, query: str, num_rewrites: int = 3, model: str = OTHER_MODEL) -> List[str]:
-        """
-        Rewrite the original query into multiple diverse variants to improve retrieval recall.
-        
-        Args:
-            query: The original user query
-            num_rewrites: Number of query rewrites to generate
-            model: The model to use for generating rewrites
-            
-        Returns:
-            List of rewritten queries
-        """
-        logger.info(f"Generating {num_rewrites} rewrites for query: '{query}'")
-        
-        user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
-        
-        try:
-            response = self.model_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": QUERY_REWRITE_MODEL_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,  # Use some temperature for diversity
-                response_format={"type": "json_object"}
-            )
-            
-            result = response.choices[0].message.content
-            logger.debug(f"MQR response: {result}")
-            
-            # Parse JSON response
-            try:
-                rewrites_data = json.loads(result)
-                rewrites = rewrites_data.get("rewrites", [])
-                
-                # Ensure we have at least one rewrite
-                if not rewrites:
-                    logger.warning("No rewrites received from model, using original query")
-                    return [query]
-                
-                return rewrites
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON response: {e}")
-                return [query]
-                
-        except Exception as e:
-            logger.error(f"Error generating query rewrites: {str(e)}")
-            # Return original query if rewriting fails
-            return [query]
-
-    def retrieve_nodes(self, query: str | List[str], top_k: int, apply_filters: bool = False) -> Tuple[List[dict], List[str]]:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None) -> Tuple[List[dict], List[str]]:
         """
         Retrieve relevant context from Pinecone for one or multiple queries.
         
@@ -117,7 +71,7 @@ class Chat(FilterExtractor, MemoryManager):
             query: The user query or list of queries. If a list is provided, time filters are 
                   extracted from the first query and applied to all retrievals.
             top_k: Number of context chunks to retrieve (default from settings)
-            apply_filters: Whether to apply time filters extracted from the query (default False)
+            filters: Dictionary of filters to apply to the query (default None)
             
         Returns:
             Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
@@ -130,24 +84,6 @@ class Chat(FilterExtractor, MemoryManager):
             
         logger.info(f"Retrieving nodes for {len(queries)} queries with top_k={top_k}")
         
-        filter_dict = {}
-        # Extract filters from the first query only if apply_filters is True
-        if apply_filters:
-            logger.info("Applying time filters from first query")
-            # Extract filters from the first query
-            time_filters = self.extract_time_filters(queries[0], self.model_client)
-            
-            # Prepare filter dict for Pinecone
-            if time_filters["start_timestamp"]:
-                filter_dict["timestamp"] = {"$gte": time_filters["start_timestamp"]}
-                logger.debug(f"Applied start timestamp filter: {time_filters['start_timestamp']}")
-            if time_filters["end_timestamp"]:
-                if "timestamp" in filter_dict:
-                    filter_dict["timestamp"]["$lte"] = time_filters["end_timestamp"]
-                else:
-                    filter_dict["timestamp"] = {"$lte": time_filters["end_timestamp"]}
-                logger.debug(f"Applied end timestamp filter: {time_filters['end_timestamp']}")
-        
         # Results container
         all_matches = []
         
@@ -159,7 +95,7 @@ class Chat(FilterExtractor, MemoryManager):
                     vector=query_embedding.tolist(),
                     top_k=top_k,
                     include_metadata=True,
-                    filter=filter_dict if filter_dict else None
+                    filter=filters
                 )
                 
                 # Add matches to combined results
@@ -359,7 +295,11 @@ class Chat(FilterExtractor, MemoryManager):
                 print(all_queries)
             else:
                 all_queries = [full_query]
-            nodes = self.retrieve_nodes(all_queries, top_k=top_k, apply_filters=apply_filters)
+            if apply_filters:
+                filters = self.extract_time_filters(query, self.model_client)
+            else:
+                filters = None
+            nodes = self.retrieve_nodes(all_queries, top_k=top_k, filters=filters)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
@@ -467,63 +407,6 @@ class AsyncChat(Chat):
             session_id=session_id
         )
         logger.info("AsyncChat initialized successfully")
-    
-    async def async_rewrite_query(self, query: str, num_rewrites: int = 3, model: str = OTHER_MODEL) -> List[str]:
-        """
-        Asynchronous version of rewrite_query that generates query rewrites without blocking.
-        
-        Args:
-            query: The original user query
-            num_rewrites: Number of query rewrites to generate
-            model: The model to use for generating rewrites
-            
-        Returns:
-            List of rewritten queries
-        """
-        logger.info(f"Asynchronously generating {num_rewrites} rewrites for query: '{query}'")
-        
-        user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
-        
-        try:
-            # Run the model call in executor to make it non-blocking
-            loop = asyncio.get_event_loop()
-            
-            # For consistent results with sync version, use the exact same parameters
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.model_client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": QUERY_REWRITE_MODEL_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.7,  # Use same temperature as sync version
-                    response_format={"type": "json_object"}
-                )
-            )
-            
-            result = response.choices[0].message.content
-            logger.debug(f"MQR response: {result}")
-            
-            # Parse JSON response with same logic as sync version
-            try:
-                rewrites_data = json.loads(result)
-                rewrites = rewrites_data.get("rewrites", [])
-                
-                # Ensure we have at least one rewrite
-                if not rewrites:
-                    logger.warning("No rewrites received from model, using original query")
-                    return [query]
-                
-                return rewrites
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON response: {e}")
-                return [query]
-                
-        except Exception as e:
-            logger.error(f"Error generating query rewrites: {str(e)}")
-            # Return original query if rewriting fails
-            return [query]
     
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
@@ -682,62 +565,84 @@ class AsyncChat(Chat):
         logger.info(f"Starting async context retrieval with top_k={top_k}, rerank_top_k={rerank_top_k}, query_rewrites={query_rewrites}")
         
         # Create tasks for parallel execution
-        loop = asyncio.get_event_loop()
+        tasks = []
         
-        # Task 1: Context retrieval
-        async def retrieve_context():
-            try:
-                # Generate query rewrites if needed
-                all_queries = [full_query]
-                if query_rewrites:
-                    # Use async_rewrite_query but limit to same number as sync version
-                    rewrites = await self.async_rewrite_query(query)
-                    all_queries.extend(rewrites)
-                    logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
-                    
-                # Log to make it clear what queries are being used
-                logger.info(f"Using queries for retrieval: {all_queries}")
-                
-                # Use run_in_executor for the blocking retrieve_nodes operation
-                nodes = await loop.run_in_executor(
-                    None, 
-                    lambda: self.retrieve_nodes(all_queries, top_k, apply_filters)
-                )
-                
-                # Use async postprocessing with non-blocking reranking
-                context, data_sources = await self.async_postprocess_nodes(
-                    nodes, 
-                    full_query, 
-                    apply_filters=apply_filters, 
-                    use_reranker=use_reranker, 
-                    rerank_top_k=rerank_top_k
-                )
-                return context, data_sources
-            except Exception as e:
-                logger.error(f"Error in async context retrieval: {str(e)}")
-                # Return empty results in case of any error
-                return [], []
+        # Task 1: Generate query rewrites if needed (runs in parallel)
+        rewrites_task = None
+        if query_rewrites:
+            rewrites_task = asyncio.create_task(self.async_rewrite_query(query))
+            tasks.append(rewrites_task)
         
-        context_task = asyncio.create_task(retrieve_context())
-        
-        # Task 2: Memory retrieval (if needed)
-        memory_context = []
+        # Task 2: Extract time filters if apply_filters is True (runs in parallel)
+        filters_task = None
+        if apply_filters:
+            filters_task = asyncio.create_task(self.async_extract_time_filters(query))
+            tasks.append(filters_task)
+            
+        # Task 3: Memory retrieval (if needed) - runs in parallel
+        memory_task = None
         if include_memory and self.memory_enabled:
+            loop = asyncio.get_event_loop()
+            # This already returns a Future, no need to wrap in create_task
+            memory_task = loop.run_in_executor(None, self._retrieve_memory)
+            tasks.append(memory_task)
+            
+        # Wait for all tasks to complete
+        if tasks:
+            await asyncio.gather(*tasks)
+            
+        # Prepare all queries for retrieval
+        all_queries = [full_query]
+        if query_rewrites and rewrites_task:
             try:
-                memory_context = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._retrieve_memory),
-                    timeout=30
-                )
-            except asyncio.TimeoutError:
-                logger.error("Memory retrieval timed out after 30 seconds, using empty memory context")
+                rewrites = rewrites_task.result()
+                all_queries.extend(rewrites)
+                logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
+            except Exception as e:
+                logger.error(f"Error getting query rewrites: {str(e)}")
+                
+        # Get time filters for retrieval
+        filters = None
+        if apply_filters and filters_task:
+            try:
+                filters = filters_task.result()
+                logger.info(f"Applied time filters: {filters}")
+            except Exception as e:
+                logger.error(f"Error getting time filters: {str(e)}")
+                
+        # Log to make it clear what queries are being used
+        logger.info(f"Using queries for retrieval: {all_queries} with filters: {filters}")
         
-        # Wait for context retrieval to complete
+        # Retrieve nodes (blocking operation, run in executor)
+        loop = asyncio.get_event_loop()
         try:
-            context, data_sources = await asyncio.wait_for(context_task, timeout=60)
-            logger.info(f"Async context retrieval completed with {len(context)} contexts and {len(data_sources)} sources")
-        except asyncio.TimeoutError:
-            logger.error("Context retrieval timed out after 60 seconds, using empty context")
+            nodes = await loop.run_in_executor(
+                None, 
+                lambda: self.retrieve_nodes(all_queries, top_k, filters)
+            )
+            
+            # Use async postprocessing with non-blocking reranking
+            context, data_sources = await self.async_postprocess_nodes(
+                nodes, 
+                full_query, 
+                apply_filters=apply_filters, 
+                use_reranker=use_reranker, 
+                rerank_top_k=rerank_top_k
+            )
+            logger.info(f"Retrieved and processed {len(context)} contexts")
+        except Exception as e:
+            logger.error(f"Error in async context retrieval: {str(e)}")
             context, data_sources = [], []
+        
+        # Get memory context if the task was started
+        memory_context = []
+        if memory_task:
+            try:
+                # Just await the Future directly
+                memory_context = await memory_task
+                logger.info(f"Retrieved memory context with {len(memory_context)} entries")
+            except Exception as e:
+                logger.error(f"Error retrieving memory: {str(e)}")
             
         # Format context with recency information
         formatted_context = ""

@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 # query = "what is the project progress?"
 # query = "go to market"
 # query = "are there resource challenge in Android app development?"
-query = "based on our customer interviews, who has the most potential to be our customer?"
+# query = "based on our customer interviews, who has the most potential to be our customer?"
 # query = "how was the interview with Alan"
-# query = "give me a summary of iOS app progress so far"
+query = "give me a summary of iOS app progress so far"
 def test_sync_chat():
     storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
     secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
@@ -68,10 +68,10 @@ async def test_async_chat():
 
 async def main():
     # Run synchronous test
-    test_sync_chat()
+    # test_sync_chat()
     
     # Run asynchronous test
-    # await test_async_chat()
+    await test_async_chat()
 
 if __name__ == "__main__":
     asyncio.run(main())
