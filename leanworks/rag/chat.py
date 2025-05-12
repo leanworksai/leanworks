@@ -511,6 +511,7 @@ class AsyncChat(Chat):
         """
         logger.info(f"Asynchronously generating {num_rewrites} rewrites for query: '{query}'")
         
+        # Use the same system prompt as the synchronous version
         system_prompt = '''You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that creates
         *diverse, high‑recall* rewrites of a user's information‑seeking query.
 
@@ -540,6 +541,8 @@ class AsyncChat(Chat):
         try:
             # Run the model call in executor to make it non-blocking
             loop = asyncio.get_event_loop()
+            
+            # For consistent results with sync version, use the exact same parameters
             response = await loop.run_in_executor(
                 None,
                 lambda: self.model_client.chat.completions.create(
@@ -548,7 +551,7 @@ class AsyncChat(Chat):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0.7,  # Use some temperature for diversity
+                    temperature=0.7,  # Use same temperature as sync version
                     response_format={"type": "json_object"}
                 )
             )
@@ -556,7 +559,7 @@ class AsyncChat(Chat):
             result = response.choices[0].message.content
             logger.debug(f"MQR response: {result}")
             
-            # Parse JSON response
+            # Parse JSON response with same logic as sync version
             try:
                 rewrites_data = json.loads(result)
                 rewrites = rewrites_data.get("rewrites", [])
@@ -635,7 +638,11 @@ class AsyncChat(Chat):
                 try:
                     # Use async reranker to improve precision without blocking
                     self.reranker = CrossEncoderReranker(self.model_client)
-                    reranked_results = await self.async_rerank(query, user_filtered_results)
+                    reranked_results = await self.async_rerank(
+                        query, 
+                        user_filtered_results,
+                        top_k=rerank_top_k
+                    )
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during async reranking: {str(e)}, falling back to vector rankings")
@@ -686,43 +693,6 @@ class AsyncChat(Chat):
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
         
-    async def _async_retrieve_and_process_context(self, query_with_date, top_k=RETRIEVE_TOP_K, rerank_top_k=None, apply_filters=APPLY_FILTERS, use_reranker=USE_RERANKER, query_rewrites=QUERY_REWRITES):
-        """Asynchronous helper method to retrieve and process context"""
-        # Retrieve nodes (this is I/O bound, so we'll run it in the executor)
-        loop = asyncio.get_event_loop()
-        try:
-            # Generate query rewrites if needed
-            all_queries = [query_with_date]
-            if query_rewrites:
-                rewrites = await self.async_rewrite_query(query_with_date)
-                all_queries.extend(rewrites)
-                logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
-            
-            # Use run_in_executor for the blocking retrieve_nodes operation
-            nodes = await loop.run_in_executor(
-                None, 
-                lambda: self.retrieve_nodes(all_queries, top_k, apply_filters)
-            )
-            
-            # Use async postprocessing with non-blocking reranking
-            context, data_sources = await self.async_postprocess_nodes(
-                nodes, 
-                query_with_date, 
-                apply_filters=apply_filters, 
-                use_reranker=use_reranker, 
-                rerank_top_k=rerank_top_k
-            )
-            return context, data_sources
-        except Exception as e:
-            logger.error(f"Error in async context retrieval: {str(e)}")
-            # Return empty results in case of any error
-            return [], []
-
-    async def async_rerank(self, query: str, documents: List[Any]) -> List[Any]:
-        """Asynchronous reranking to improve response time"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.reranker.rerank, query, documents)
-    
     async def async_get_response(
             self, query: str, 
             model: str = GENERATION_MODEL,
@@ -761,21 +731,52 @@ class AsyncChat(Chat):
         else:
             full_query = f"(Current date: {today_date}) {query}"
 
-        # Create tasks for async processing
+        # Retrieve context asynchronously
         rerank_top_k = kwargs.get("rerank_top_k", RERANK_TOP_K)
-        context_task = asyncio.create_task(self._async_retrieve_and_process_context(
-            full_query, 
-            top_k=top_k, 
-            rerank_top_k=rerank_top_k,
-            apply_filters=apply_filters,
-            use_reranker=use_reranker,
-            query_rewrites=query_rewrites
-        ))
+        logger.info(f"Starting async context retrieval with top_k={top_k}, rerank_top_k={rerank_top_k}, query_rewrites={query_rewrites}")
         
-        # Get memory in parallel if needed
+        # Create tasks for parallel execution
+        loop = asyncio.get_event_loop()
+        
+        # Task 1: Context retrieval
+        async def retrieve_context():
+            try:
+                # Generate query rewrites if needed
+                all_queries = [full_query]
+                if query_rewrites:
+                    # Use async_rewrite_query but limit to same number as sync version
+                    rewrites = await self.async_rewrite_query(query)
+                    all_queries.extend(rewrites)
+                    logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
+                    
+                # Log to make it clear what queries are being used
+                logger.info(f"Using queries for retrieval: {all_queries}")
+                
+                # Use run_in_executor for the blocking retrieve_nodes operation
+                nodes = await loop.run_in_executor(
+                    None, 
+                    lambda: self.retrieve_nodes(all_queries, top_k, apply_filters)
+                )
+                
+                # Use async postprocessing with non-blocking reranking
+                context, data_sources = await self.async_postprocess_nodes(
+                    nodes, 
+                    full_query, 
+                    apply_filters=apply_filters, 
+                    use_reranker=use_reranker, 
+                    rerank_top_k=rerank_top_k
+                )
+                return context, data_sources
+            except Exception as e:
+                logger.error(f"Error in async context retrieval: {str(e)}")
+                # Return empty results in case of any error
+                return [], []
+        
+        context_task = asyncio.create_task(retrieve_context())
+        
+        # Task 2: Memory retrieval (if needed)
         memory_context = []
         if include_memory and self.memory_enabled:
-            loop = asyncio.get_event_loop()
             try:
                 memory_context = await asyncio.wait_for(
                     loop.run_in_executor(None, self._retrieve_memory),
@@ -784,9 +785,10 @@ class AsyncChat(Chat):
             except asyncio.TimeoutError:
                 logger.error("Memory retrieval timed out after 30 seconds, using empty memory context")
         
-        # Wait for context with timeout
+        # Wait for context retrieval to complete
         try:
             context, data_sources = await asyncio.wait_for(context_task, timeout=60)
+            logger.info(f"Async context retrieval completed with {len(context)} contexts and {len(data_sources)} sources")
         except asyncio.TimeoutError:
             logger.error("Context retrieval timed out after 60 seconds, using empty context")
             context, data_sources = [], []
@@ -827,8 +829,8 @@ class AsyncChat(Chat):
         system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
         When recent conversations are provided, use them to maintain consistency with previous responses. 
         User cited context serves as reference for the user query if it is provided.
+        The answer should be concise (< 120 words) and to the point.
         '''
-        
         
         # Log the prompt being sent to the model
         logger.info(f"System prompt: {system_prompt}")
@@ -836,12 +838,11 @@ class AsyncChat(Chat):
 
         try:
             # Call the model asynchronously
-            loop = asyncio.get_event_loop()
             response_future = loop.run_in_executor(
                 None,
                 lambda: self.model_client.chat.completions.create(
                     model=model,
-                    max_tokens=1024,
+                    max_tokens=256,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
@@ -866,7 +867,6 @@ class AsyncChat(Chat):
         # Store in memory if enabled
         if self.memory_enabled:
             # Run memory storage in background
-            loop = asyncio.get_event_loop()
             loop.run_in_executor(None, self.add_memory, query, answer)
         
         # Return dictionary with content and data_sources
@@ -874,3 +874,12 @@ class AsyncChat(Chat):
             "content": answer,
             "data_sources": data_sources
         }
+        
+    async def async_rerank(self, query: str, documents: List[Any], **kwargs) -> List[Any]:
+        """Asynchronous reranking to improve response time"""
+        loop = asyncio.get_event_loop()
+        # Pass through all parameters to ensure identical results with sync version
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.reranker.rerank(query, documents, **kwargs)
+        )

@@ -11,7 +11,8 @@ import logging
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
-query = "based on our customer interviews, who has the most potential to be our customer?"
+query = "are there resource challenge in Android app development?"
+# query = "based on our customer interviews, who has the most potential to be our customer?"
 # query = "how was the interview with Alan"
 # query = "give me a summary of iOS app progress so far"
 def test_sync_chat():
@@ -20,7 +21,6 @@ def test_sync_chat():
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
     session_id = str(uuid.uuid4())
-    # session_id = "hxsd2973"
 
     # Initialize RAG
     chat = Chat(
@@ -44,7 +44,8 @@ async def test_async_chat():
     secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
-    session_id = str(uuid.uuid4())
+    # session_id = str(uuid.uuid4())
+    session_id = "deu2tp892fhg"
 
     # Initialize AsyncRAG
     async_chat = AsyncChat(
