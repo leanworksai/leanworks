@@ -73,37 +73,13 @@ class Chat(FilterExtractor, MemoryManager):
         """
         logger.info(f"Generating {num_rewrites} rewrites for query: '{query}'")
         
-        system_prompt = '''You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that creates
-        *diverse, high‑recall* rewrites of a user's information‑seeking query.
-
-        ## Instructions
-        1. Read the **Original Query**.
-        2. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
-        3. Follow these rewriting strategies *at least once each*  
-        a. **Equality** – preserve all meaning; just de‑chatify the wording.  
-        b. **Expansion** – add missing context a domain expert would expect  
-            (e.g., synonyms, acronyms, date ranges, entity types).  
-        c. **Reduction** – strip to the absolute core keywords.  
-        d. *(Optional if N > 2)* Other creative perspectives that could surface
-            different documents (e.g., broader background, comparison terms).
-        4. **Constraints**  
-        • ≤ 20 tokens per rewrite.  
-        • Remove pronouns/ellipsis; name all entities explicitly.  
-        • Avoid stop‑words unless essential (e.g., "of", "in").  
-        • No duplicate semantic meaning across rewrites.
-        5. Return a **valid JSON** object ONLY without any other text:
-
-        ```json
-        { "rewrites": [" ... ", " ... ", ...] }
-        ```'''
-        
         user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
         
         try:
             response = self.model_client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": QUERY_REWRITE_MODEL_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,  # Use some temperature for diversity
@@ -432,14 +408,9 @@ class Chat(FilterExtractor, MemoryManager):
             formatted_context += recency_indicator + ctx["context"] + "\n\n"
         
         prompt = f"Context information (ordered by relevance, most relevant first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
-        system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
-        When recent conversations are provided, use them to maintain consistency with previous responses. 
-        User cited context serves as reference for the user query if it is provided.
-        The answer should be concise (< 120 words) and to the point.
-        '''
         
         # Log the prompt being sent to the model
-        logger.info(f"System prompt: {system_prompt}")
+        logger.info(f"System prompt: {GENERATION_MODEL_SYSTEM_PROMPT}")
         logger.info(f"User prompt: {prompt}")
 
         try:
@@ -447,7 +418,7 @@ class Chat(FilterExtractor, MemoryManager):
                 model=model,
                 max_tokens=256,  # Allow for longer responses
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.0
@@ -511,31 +482,6 @@ class AsyncChat(Chat):
         """
         logger.info(f"Asynchronously generating {num_rewrites} rewrites for query: '{query}'")
         
-        # Use the same system prompt as the synchronous version
-        system_prompt = '''You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that creates
-        *diverse, high‑recall* rewrites of a user's information‑seeking query.
-
-        ## Instructions
-        1. Read the **Original Query**.
-        2. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
-        3. Follow these rewriting strategies *at least once each*  
-        a. **Equality** – preserve all meaning; just de‑chatify the wording.  
-        b. **Expansion** – add missing context a domain expert would expect  
-            (e.g., synonyms, acronyms, date ranges, entity types).  
-        c. **Reduction** – strip to the absolute core keywords.  
-        d. *(Optional if N > 2)* Other creative perspectives that could surface
-            different documents (e.g., broader background, comparison terms).
-        4. **Constraints**  
-        • ≤ 20 tokens per rewrite.  
-        • Remove pronouns/ellipsis; name all entities explicitly.  
-        • Avoid stop‑words unless essential (e.g., "of", "in").  
-        • No duplicate semantic meaning across rewrites.
-        5. Return a **valid JSON** object ONLY without any other text:
-
-        ```json
-        { "rewrites": [" ... ", " ... ", ...] }
-        ```'''
-        
         user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
         
         try:
@@ -548,7 +494,7 @@ class AsyncChat(Chat):
                 lambda: self.model_client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": QUERY_REWRITE_MODEL_SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.7,  # Use same temperature as sync version
@@ -826,14 +772,9 @@ class AsyncChat(Chat):
             formatted_context += recency_indicator + ctx["context"] + "\n\n"
         
         prompt = f"Context information (ordered by relevance, most relevant first):\n{formatted_context}\n\nUser query: {full_query}\n\nResponse:"
-        system_prompt = f'''You are a helpful technical project manager that answers your teammates' questions based on the provided context. 
-        When recent conversations are provided, use them to maintain consistency with previous responses. 
-        User cited context serves as reference for the user query if it is provided.
-        The answer should be concise (< 120 words) and to the point.
-        '''
         
         # Log the prompt being sent to the model
-        logger.info(f"System prompt: {system_prompt}")
+        logger.info(f"System prompt: {GENERATION_MODEL_SYSTEM_PROMPT}")
         logger.info(f"User prompt: {prompt}")
 
         try:
@@ -844,7 +785,7 @@ class AsyncChat(Chat):
                     model=model,
                     max_tokens=256,
                     messages=[
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
                         {"role": "user", "content": prompt}
                         ],
                     temperature=0.0
