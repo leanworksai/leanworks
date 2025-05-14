@@ -20,9 +20,6 @@ Rules:
 1. When recent conversations are provided, use them to maintain consistency with previous responses. 
 2. User cited context serves as reference for the user query if it is provided.
 3. Your response MUST be less than 120 words.
-
-Clarification Policy:
-You MUST ask a clarification question if a user query is related to a project but there is no project name in the user query & recent conversations.
 '''
 
 QUERY_REWRITE_MODEL_SYSTEM_PROMPT = '''
