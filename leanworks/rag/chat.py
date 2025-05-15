@@ -14,7 +14,7 @@ from types import SimpleNamespace
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class Chat(FilterExtractor, MemoryManager, QueryRewriter):
+class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
     """
     Chat class for retrieving context from Pinecone and generating responses using OpenAI.
     Provides synchronous functionality for RAG operations.
@@ -60,6 +60,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Initialize QueryRewriter
         QueryRewriter.__init__(self, model_client)
+
+        # Initialize CrossEncoderReranker
+        CrossEncoderReranker.__init__(self, model_client)
             
         logger.info("RAG system initialized successfully")
 
@@ -184,8 +187,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 try:
                     # Use the reranker to improve precision
                     logger.info("Initializing CrossEncoderReranker")
-                    self.reranker = CrossEncoderReranker(self.model_client)
-                    reranked_results = self.reranker.rerank(query, user_filtered_results, top_k=rerank_top_k)
+                    reranked_results = self.rerank(query, user_filtered_results, top_k=rerank_top_k)
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
@@ -466,7 +468,6 @@ class AsyncChat(Chat):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
-                    self.reranker = CrossEncoderReranker(self.model_client)
                     reranked_results = await self.async_rerank(
                         query, 
                         user_filtered_results,
@@ -727,5 +728,5 @@ class AsyncChat(Chat):
         # Pass through all parameters to ensure identical results with sync version
         return await loop.run_in_executor(
             None, 
-            lambda: self.reranker.rerank(query, documents, **kwargs)
+            lambda: self.rerank(query, documents, **kwargs)
         )

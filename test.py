@@ -5,7 +5,6 @@ import uuid
 from openai import OpenAI
 from leanworks.secret import GCPSecretLoader
 import time
-import pandas as pd
 import asyncio
 import logging
 
@@ -68,7 +67,7 @@ async def test_async_chat():
 
 async def main():
     # Run synchronous test
-    # test_sync_chat()
+    test_sync_chat()
     
     # Run asynchronous test
     await test_async_chat()
