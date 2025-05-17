@@ -1,1 +1,1 @@
-from .gcs import CloudStorage
+from leanworks.storage.gcs import CloudStorage

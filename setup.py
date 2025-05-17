@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.1.3",
+    version="0.2.0",
     packages=find_packages(),
     install_requires=[
         "pinecone-client==5.0.1",
@@ -17,7 +17,8 @@ setup(
         "google-api-python-client==2.159.0",
         "google-cloud-storage==2.19.0",
         "numpy==1.26.0",
-        "tiktoken==0.9.0"
+        "tiktoken==0.9.0",
+        "google-cloud-bigquery==3.32.0"
     ],
     author="Yanfu Zhu",
     author_email="yanfu@leanworks.ai",

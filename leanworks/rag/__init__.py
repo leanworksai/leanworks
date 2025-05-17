@@ -1,8 +1,8 @@
 """RAG (Retrieval Augmented Generation) functionality for LeanWorks."""
 
-from .chat import Chat, AsyncChat
-from .filters import FilterExtractor
-from .memory import MemoryManager
-from .reranker import CrossEncoderReranker
-from .embedding import GoogleEmbedding
-from .setting import *
+from leanworks.rag.chat import Chat, AsyncChat
+from leanworks.rag.filters import FilterExtractor
+from leanworks.rag.memory import MemoryManager
+from leanworks.rag.reranker import CrossEncoderReranker
+from leanworks.rag.embedding import GoogleEmbedding
+from leanworks.rag.setting import *
