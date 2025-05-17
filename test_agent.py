@@ -2,6 +2,15 @@ from leanworks.agent.chat import ChatAgent
 from leanworks.storage.gcs import CloudStorage
 from leanworks.secret import GCPSecretLoader
 from anthropic import Anthropic
+import logging
+
+logger = logging.getLogger(__name__)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 
 def main():
     # Initialize the chat agent
@@ -18,7 +27,7 @@ def main():
     )
     
     # Process a user message
-    user_message = "Any task that might have delay?"
+    user_message = "what are most recent updates from Qianwen?"
     response = agent.process_message(user_message)
     
     return response

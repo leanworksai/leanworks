@@ -72,12 +72,14 @@ class SearchTool:
             try:
                 rewrites = rewrites_task.result()
                 all_queries.extend(rewrites)
+                logger.info(f"Query rewrites for '{query}': {rewrites}")
             except Exception as e:
                 logger.error(f"Error getting query rewrites: {str(e)}")
                     
             # Get time filters for retrieval
             try:
                 filters = filters_task.result()
+                logger.info(f"Time filters for '{query}': {filters}")
             except Exception as e:
                     logger.error(f"Error getting time filters: {str(e)}")
             
@@ -87,6 +89,7 @@ class SearchTool:
                 None, 
                 lambda: self.chat.retrieve_nodes(all_queries, top_k=10, filters=filters)
             )
+            logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
             
             # Use async postprocessing with non-blocking reranking
             context, data_sources = await self.chat.async_postprocess_nodes(
@@ -96,6 +99,7 @@ class SearchTool:
                 use_reranker=True, 
                 rerank_top_k=8
             )
+            logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
         
@@ -132,6 +136,7 @@ class SearchTool:
         This allows the method to be called from synchronous code.
         """
         try:
+            logger.info(f"Executing search_knowledge with query: {query}")
             # Get or create an event loop
             try:
                 loop = asyncio.get_event_loop()

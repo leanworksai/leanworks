@@ -3,6 +3,9 @@ from datetime import datetime
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.setting import AGENT_SYSTEM_PROMPT, VERIFICATION_QUERY, SEARCH_KNOWLEDGE_QUERY
 import traceback
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ChatAgent:
     """
@@ -91,7 +94,7 @@ class ChatAgent:
         response_text = ""
 
         while unanswered_count < self.max_unanswered_num:
-            print(f"Unanswered attempt {unanswered_count}")
+            logger.info(f"Unanswered attempt {unanswered_count}")
             try:
                 # Create a copy with updated messages
                 current_params = self.conversation.create_params_copy(
@@ -108,7 +111,7 @@ class ChatAgent:
                 
                 # If the answer is complete, break the loop
                 if answered == "true":
-                    print("Question answered. Starting verification...")
+                    logger.info("Question answered. Starting verification...")
                     self.conversation.add_assistant_message(response_text)
                     
                     # Perform verification
@@ -130,10 +133,10 @@ class ChatAgent:
                         response, 
                         self.tool_use.function_map
                     )
-                    print(f"Tool results from unanswered attempt {unanswered_count}: {tool_results}")
                     self.conversation.add_tool_results(tool_results)
                 else:
                     # No tool calls were made and the answer is still not complete
+                    logger.info("No tool calls were made and the answer is still not complete")
                     unanswered_count += 1
                     self.conversation.add_user_message(SEARCH_KNOWLEDGE_QUERY)
                     
@@ -149,7 +152,7 @@ class ChatAgent:
 
             except Exception as e:
                 traceback.print_exc()
-                print(f"Error during unanswered attempt {unanswered_count}: {str(e)}")
+                logger.error(f"Error during unanswered attempt {unanswered_count}: {str(e)}")
                 response_text = f"An error occurred: {str(e)}"
                 break
         
@@ -158,7 +161,7 @@ class ChatAgent:
             self.conversation.add_assistant_message(response_text)
         
         self.conversation.save_conversation()
-        print(f"Final answer: {response_text}")
+        logger.info(f"Final answer: {response_text}")
         return response_text
     
     def _perform_verification(self):
@@ -212,5 +215,5 @@ class ChatAgent:
             
         except Exception as e:
             traceback.print_exc()
-            print(f"Error during verification: {str(e)}")
+            logger.error(f"Error during verification: {str(e)}")
             return None

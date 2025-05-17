@@ -12,7 +12,7 @@ class ProjectTool:
     def list_projects_property(self):
         description = """
         List all projects for a user. The response will be a list of dictionaries, each containing the project details such as project_id, project_name, description, collaborators, created_by and created_ts.
-        If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id.
+        If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         Sometimes, a user will come in asking for projects for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for projects for multiple users. In this case, you need to call this tool without setting the user_id.
         """
@@ -43,6 +43,7 @@ class ProjectTool:
                 SELECT * EXCEPT(last_n_days)
                 FROM `leanworks.leanworks.project_config`
                 '''
+            logger.info(f"Executing BQ query in list_projects: {query}")
             query_job = self.bq_client.query(query)
             results = query_job.result()
             projects = []
@@ -63,7 +64,8 @@ class ProjectTool:
     def list_tasks_property(self):
         description = """
         List all tasks for a user or project. The response will be a list of dictionaries, each containing the task details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
-        If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id.
+        If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
+        If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
         Sometimes, a user will come in asking for tasks for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for tasks for multiple users. In this case, you need to call this tool without setting the user_id.
         If the project is not given, you need to list tasks across all projects for the user.
@@ -103,6 +105,7 @@ class ProjectTool:
             FROM `leanworks.leanworks.tasks` 
             WHERE {where_clause}
             '''
+            logger.info(f"Executing BQ query in list_tasks: {query}")
             query_results = self.bq_client.query(query)
             tasks = []
             for row in query_results:
@@ -128,7 +131,8 @@ class ProjectTool:
         List all progress updates for a user or project within date range. Leave date field empty if not specified in the query. 
         If the query contains words like "recent" or "latest" without any specific time frame, interpret this as looking back 1 week from today.
         The response will be a list of dictionaries, each containing the progress update details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
-        If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id.
+        If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
+        If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
         Sometimes, a user will come in asking for progress updates for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for progress updates for multiple users. In this case, you need to call this tool without setting the user_id.
         If the project is not given, you need to list progress updates across all projects for the user.
@@ -218,7 +222,7 @@ class ProjectTool:
             FROM `leanworks.leanworks.updates`
             WHERE {where_clause}
             '''
-            print(query)
+            logger.info(f"Executing BQ query in list_progress_updates: {query}")
             query_results = self.bq_client.query(query)
             
             # Convert date objects and timestamps to strings to make them JSON serializable
@@ -338,6 +342,7 @@ class ProjectTool:
             """
             
             # Execute the query
+            logger.info(f"Executing BQ query in add_task: {query}")
             query_job = self.bq_client.query(query)
             query_job.result()  # Wait for the query to complete
             
@@ -359,3 +364,26 @@ class ProjectTool:
         except Exception as e:
             logger.warning(f"Error adding task to project {project_id}: {str(e)}")
             return {"error": f"Failed to add task: {str(e)}"}
+        
+    @property
+    def list_users_property(self):
+        description = """
+        List all users in the team. The response will be a list of dictionaries, each containing the user details such as user_id, first_name and last_name.
+        This tool can be used to search for the user_id if the user_id is not in the email address format.
+        """
+        return {
+            "type": "custom",
+            "name": "list_users",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    }
+                }
+            }
+    def list_users(self):
+        query = "SELECT * EXCEPT(user_id), alias_email as user_id FROM `leanworks.leanworks.user_config`"
+        logger.info(f"Executing BQ query in list_users: {query}")
+        query_job = self.bq_client.query(query)
+        results = query_job.result()
+        return [dict(row) for row in results]
