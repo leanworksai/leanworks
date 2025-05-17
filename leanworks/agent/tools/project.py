@@ -162,6 +162,11 @@ class ProjectTool:
         }
     def list_progress_updates(self, user_id: str = None, project_id: str = None, start_date: str = None, end_date: str = None):
         try:
+            # Set default start_date to one week ago if not provided, using UTC
+            if not start_date:
+                one_week_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+                start_date = one_week_ago.strftime('%Y-%m-%d')
+            
             # Parse date strings only if they don't follow the YYYY-MM-DD format
             formatted_start_date = start_date
             formatted_end_date = end_date
