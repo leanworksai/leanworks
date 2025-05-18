@@ -26,7 +26,7 @@ class ProjectTool:
                 "properties": {
                     "user_id": {
                         "type": "string", 
-                        "description": "User email address"
+                        "description": "user_id is the email address of the user you are asked to list tasks for. It is not display name or uuid."
                     }
                 }
             }
@@ -150,7 +150,7 @@ class ProjectTool:
                 "properties": {
                     "user_id": {
                         "type": "string", 
-                        "description": "User email address"
+                        "description": "user_id is the email address of the user you are asked to list tasks for. It is not display name or uuid."
                     },
                     "project_id": {
                         "type": "string", 

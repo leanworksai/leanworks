@@ -27,7 +27,7 @@ def main():
     )
     
     # Process a user message
-    user_message = "what are most recent updates from Qianwen?"
+    user_message = "show me all projects"
     response = agent.process_message(user_message)
     
     return response
