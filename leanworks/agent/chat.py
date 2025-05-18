@@ -167,18 +167,56 @@ class ChatAgent:
     def _perform_verification(self):
         """
         Performs verification on the last answer using the search_knowledge tool.
+        Verification only includes the original user query and previous answer,
+        hiding the rest of the conversation history.
         
         Returns:
             str: The verified response text, or None if verification failed
         """
         try:
-            # Add verification query
-            self.conversation.add_user_message(VERIFICATION_QUERY)
+            # Extract the original user query (first user message) and the most recent answer
+            original_query = None
+            last_answer = None
             
-            # Create a new params copy for verification
+            for message in self.conversation.conversation:
+                if message.get("role") == "user" and original_query is None:
+                    # Get the first user message
+                    original_query = next((block.get("text") for block in message.get("content", []) 
+                                          if isinstance(block, dict) and block.get("type") == "text"), "")
+                
+                if message.get("role") == "assistant":
+                    # Keep updating to get the most recent assistant message
+                    last_answer = next((block.get("text") for block in message.get("content", [])
+                                       if isinstance(block, dict) and block.get("type") == "text"), "")
+            
+            # Create a minimal conversation for verification, only including:
+            # 1. Original user query
+            # 2. Previous assistant answer
+            # 3. Verification query
+            minimal_conversation = []
+            
+            if original_query:
+                minimal_conversation.append({
+                    "role": "user",
+                    "content": [{"type": "text", "text": original_query}]
+                })
+            
+            if last_answer:
+                minimal_conversation.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": last_answer}]
+                })
+            
+            # Add verification query
+            minimal_conversation.append({
+                "role": "user",
+                "content": [{"type": "text", "text": VERIFICATION_QUERY}]
+            })
+            
+            # Create a new params copy for verification with minimal conversation
             verification_params = self.conversation.create_params_copy(
                 self.api_params,
-                messages=self.conversation.conversation,
+                messages=minimal_conversation,
                 tools=[self.tool_use.tools[-1]],
                 tool_choice={"type": "tool", "name": "search_knowledge"}
             )
@@ -186,20 +224,33 @@ class ChatAgent:
             # Make the verification API call
             verification_response = self.model_client.messages.create(**verification_params)
             
-            # Process tool calls and add results to conversation
+            # Process tool calls and add results to the minimal conversation
             has_tool_calls = any(block.type == "tool_use" for block in verification_response.content)
             if has_tool_calls:
-                self.conversation.add_assistant_message_with_tool_uses(verification_response)
+                # Add the assistant response with tool calls to the minimal conversation
+                minimal_conversation.append({
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": block.id, "name": block.name, "input": block.input} 
+                               if block.type == "tool_use" else {"type": "text", "text": block.text}
+                               for block in verification_response.content]
+                })
+                
+                # Process tool calls
                 tool_results = self.conversation.parse_and_format_tool_results(
                     verification_response, 
                     self.tool_use.function_map
                 )
-                self.conversation.add_tool_results(tool_results)
+                
+                # Add tool results to the minimal conversation
+                minimal_conversation.append({
+                    "role": "user",
+                    "content": tool_results
+                })
                 
                 # Create a copy without tools and tool_choice for final response
                 final_params = self.conversation.create_params_copy(
                     self.api_params,
-                    messages=self.conversation.conversation,
+                    messages=minimal_conversation,
                     tools=None,
                     tool_choice=None
                 )
@@ -208,6 +259,8 @@ class ChatAgent:
                 final_text = next((block.text for block in final_response.content if block.type == "text"), "")
                 final_json = self.conversation.extract_json_from_text(final_text)
                 final_response_text = final_json.get("content")
+                
+                # Add the verified response to the full conversation
                 self.conversation.add_assistant_message(final_response_text)
                 return final_response_text
                 

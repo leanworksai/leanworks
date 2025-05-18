@@ -63,7 +63,7 @@ class QueryRewriter:
                     logger.warning("No rewrites received from model, using original query")
                     return [query]
                 
-                return rewrites
+                return [query] + rewrites
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON response: {e}")
                 return [query]
