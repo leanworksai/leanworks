@@ -24,12 +24,12 @@ def main():
             secret_client,
             model_client,
             user_id="zhuyanfu0712@gmail.com",
-            session_id="sg162i876",
+            session_id="hde29897",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "show tasks that were in progress a week ago, and are closed now"
+        user_message = "give me a summary of product development project’s progress since May 1st, including others’ updates"
         response = agent.process_message(user_message)
         
         return response
