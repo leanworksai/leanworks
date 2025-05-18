@@ -15,6 +15,7 @@ class ProjectTool:
         If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         Sometimes, a user will come in asking for projects for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for projects for multiple users. In this case, you need to call this tool without setting the user_id.
+        You might need to call list_tasks or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id.
         """
         return {
             "type": "custom",
@@ -69,6 +70,7 @@ class ProjectTool:
         Sometimes, a user will come in asking for tasks for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for tasks for multiple users. In this case, you need to call this tool without setting the user_id.
         If the project is not given, you need to list tasks across all projects for the user.
+        You might need to call list_projects or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
         """
         return {
             "type": "custom",
@@ -137,6 +139,7 @@ class ProjectTool:
         Sometimes, a user will come in asking for progress updates for multiple users. In this case, you need to call this tool without setting the user_id.
         If the project is not given, you need to list progress updates across all projects for the user.
         If start_date and end_date are not given, you need to list progress updates for whole time period.
+        You might need to call list_projects or list_tasks before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
         """
         return {
             "type": "custom",
