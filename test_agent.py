@@ -22,12 +22,12 @@ def main():
         secret_client,
         model_client,
         user_id="zhuyanfu0712@gmail.com",
-        session_id="frfe8384",
-        clear_conversation=True
+        session_id="vj38",
+        clear_conversation=False
     )
     
     # Process a user message
-    user_message = "show me all projects"
+    user_message = "shoe me latest progress on product development"
     response = agent.process_message(user_message)
     
     return response
