@@ -11,13 +11,14 @@ class ConversationManager:
         self.session_id = session_id
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}.json"
         self.conversation = []
+        self.slim_conversation = []  # Only tracks initial user query and verified responses
         
         # Load previous conversation if storage client and user_id are provided
         if storage_client and user_id and session_id:
             self.load_conversation()
         
     def load_conversation(self):
-        """Load the most recent conversation from CloudStorage"""
+        """Load the most recent slim conversation from CloudStorage."""
         if not self.storage_client or not self.user_id:
             return
             
@@ -25,38 +26,62 @@ class ConversationManager:
         
         if conversation_data:
             try:
-                loaded_conversation = json.loads(conversation_data)
-                
-                # Convert any old-format messages to the new format
-                for message in loaded_conversation:
-                    if "content" in message and isinstance(message["content"], str):
-                        message["content"] = [{"type": "text", "text": message["content"]}]
-                
-                self.conversation = loaded_conversation
-                print(f"Loaded conversation history for user {self.user_id}")
+                self.slim_conversation = json.loads(conversation_data)
+                print(f"Loaded slim conversation history for user {self.user_id}")
             except json.JSONDecodeError:
                 print(f"Error decoding conversation data for user {self.user_id}")
-                self.conversation = []
+                self.slim_conversation = []
         else:
             print(f"No previous conversation found for user {self.user_id}")
-            self.conversation = []
+            self.slim_conversation = []
+        
+        # Initialize the current conversation as empty
+        self.conversation = []
     
     def save_conversation(self):
-        """Save the current conversation to CloudStorage"""
+        """Save the slim conversation to CloudStorage"""
         if not self.storage_client or not self.user_id:
             return
             
-        # Save as latest conversation
-        conversation_json = json.dumps(self.conversation)
+        # Save slim conversation
+        conversation_json = json.dumps(self.slim_conversation)
         self.storage_client.upload_blob_from_memory(conversation_json, self.conversation_path)
-        print(f"Saved conversation for user {self.user_id}")
+        print(f"Saved slim conversation for user {self.user_id}")
         
     def add_user_message(self, content):
         """Add a user message to the conversation history"""
-        self.conversation.append({
+        user_message = {
             "role": "user",
             "content": [{"type": "text", "text": content}]
-        })
+        }
+        self.conversation.append(user_message)
+        
+        # If this is the first user message in the current conversation, add to slim_conversation
+        if len(self.conversation) == 1:
+            self.slim_conversation.append(user_message)
+
+    def add_verified_response(self, content):
+        """Add a verified assistant response to both conversation and slim_conversation"""
+        assistant_message = {
+            "role": "assistant",
+            "content": [{"type": "text", "text": content}]
+        }
+        
+        # Add to current conversation
+        self.conversation.append(assistant_message)
+        
+        # Add to slim conversation if there's at least one user message
+        if any(msg["role"] == "user" for msg in self.slim_conversation):
+            # Check if we already have an assistant response for the latest user query
+            if len(self.slim_conversation) > 0 and self.slim_conversation[-1]["role"] == "assistant":
+                # Replace the last assistant message
+                self.slim_conversation[-1] = assistant_message
+            else:
+                # Add new assistant message
+                self.slim_conversation.append(assistant_message)
+            
+            # Save the slim conversation after adding a verified response
+            self.save_conversation()
 
     def add_tool_results(self, tool_results):
         """Add tool results to the conversation history
@@ -91,6 +116,7 @@ class ConversationManager:
     def clear_conversation(self):
         """Clear the conversation history and start fresh"""
         self.conversation = []
+        self.slim_conversation = []
         
     def reset_for_fresh_attempt(self):
         """Reset the conversation to just the initial user query if problems occur"""
@@ -190,7 +216,11 @@ class ConversationManager:
         # Return empty dict for empty or None input
         if not text:
             return {}
-            
+        
+        if "{" not in text and "}" not in text:
+            return {"content": text, "answered": "false"}
+        
+        
         try:
             # First try to parse the entire text as JSON
             parsed_json = json.loads(text)         
@@ -200,33 +230,29 @@ class ConversationManager:
             # Look for text that appears to be JSON (between curly braces)
             # Use non-greedy matching to find the outermost JSON object
             try:
-                json_match = re.search(r'({.*?})', text, re.DOTALL)
+                # Find the first JSON object in the text, regardless of surrounding content
+                json_match = re.search(r'{.*?}', text, re.DOTALL)
                 if json_match:
-                    json_str = json_match.group(1)
-                    return json.loads(json_str)
-                    
-                # If no match found with simple regex, try more aggressive pattern
-                json_match = re.search(r'({[\s\S]*})', text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                    return json.loads(json_str)
-                
-                # Try to find JSON in text with preceding content (like in LLM responses)
-                json_match = re.search(r'.*?({.*})', text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
+                    json_str = json_match.group(0)
                     return json.loads(json_str)
             except Exception as e:
                 # If regex extraction fails, use Claude to extract the JSON
                 if self.model_client:
-                    prompt = f"Extract the content from below JSON and output it as a natural text:\n\n{text}"
+                    prompt = f'''
+                    Extract the content from below JSON. The response should be exactly the same as the content in the JSON:
+                    ###JSON
+                    {text}
+                    ###
+                    Output ONLY the extracted content text—no explanations, no reasoning, no headings.
+                    '''
                     try:
                         # Use Claude API to extract JSON using JSON mode
-                        messages = [{"role": "user", "content": prompt}]
+                        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
                         response = self.model_client.messages.create(
                             model="claude-3-haiku-20240307",
                             messages=messages,
                             max_tokens=1000,
+                            temperature=0.0
                         )
                         if "true" in text.lower():
                             return {"content": response.content[0].text, "answered": "true"}
@@ -277,9 +303,20 @@ class ConversationManager:
     # Helper function to create a modified copy of parameters
     def create_params_copy(self, params, **modifications):
         params_copy = copy.deepcopy(params)
+        
+        # Make sure required parameters are present in the copy
+        required_params = ["model", "max_tokens", "messages"]
+        for param in required_params:
+            if param not in params_copy and param not in modifications:
+                raise ValueError(f"Missing required parameter: {param}")
+        
+        # Apply modifications
         for key, value in modifications.items():
             if value is None and key in params_copy:
-                del params_copy[key]
+                # Don't remove required parameters even if explicitly set to None
+                if key not in required_params:
+                    del params_copy[key]
             elif value is not None:
                 params_copy[key] = value
+                
         return params_copy

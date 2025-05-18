@@ -70,7 +70,7 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": self.tool_use.tools,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "temperature": 0.1,
             "timeout": 30
         }
@@ -260,8 +260,8 @@ class ChatAgent:
                 final_json = self.conversation.extract_json_from_text(final_text)
                 final_response_text = final_json.get("content")
                 
-                # Add the verified response to the full conversation
-                self.conversation.add_assistant_message(final_response_text)
+                # Add the verified response to the full conversation and slim_conversation
+                self.conversation.add_verified_response(final_response_text)
                 return final_response_text
                 
             return None

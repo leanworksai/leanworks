@@ -3,6 +3,7 @@ from leanworks.storage.gcs import CloudStorage
 from leanworks.secret import GCPSecretLoader
 from anthropic import Anthropic
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 # Configure logging
@@ -13,24 +14,29 @@ logging.basicConfig(
 
 
 def main():
-    # Initialize the chat agent
-    storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-    secret_client = GCPSecretLoader("gcp_credential.json", client_name="leanworks")
-    model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
-    agent = ChatAgent(
-        storage_client,
-        secret_client,
-        model_client,
-        user_id="zhuyanfu0712@gmail.com",
-        session_id="vj38",
-        clear_conversation=False
-    )
-    
-    # Process a user message
-    user_message = "shoe me latest progress on product development"
-    response = agent.process_message(user_message)
-    
-    return response
+    try:
+        # Initialize the chat agent
+        storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
+        secret_client = GCPSecretLoader("gcp_credential.json", client_name="leanworks")
+        model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
+        agent = ChatAgent(
+            storage_client,
+            secret_client,
+            model_client,
+            user_id="zhuyanfu0712@gmail.com",
+            session_id="sg162i876",
+            clear_conversation=False  # Change to True to reset conversation each time
+        )
+        
+        # Process a user message
+        user_message = "show tasks that were in progress a week ago, and are closed now"
+        response = agent.process_message(user_message)
+        
+        return response
+    except Exception as e:
+        print(f"Error in main function: {str(e)}")
+        traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
     main()
