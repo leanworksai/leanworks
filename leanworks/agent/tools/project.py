@@ -12,10 +12,13 @@ class ProjectTool:
     def list_projects_property(self):
         description = """
         List all projects for a user. The response will be a list of dictionaries, each containing the project details such as project_id, project_name, description, collaborators, created_by and created_ts.
+        This tool should be called to retrieve project information when project details are needed to answer the question but is lacking in context, 
         If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         Sometimes, a user will come in asking for projects for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for projects for multiple users. In this case, you need to call this tool without setting the user_id.
-        You might need to call list_tasks or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id.
+        Since this tool only provide basic project information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific project.
+        project_id can be used to link the projects to tasks and progress updates.
+        You might need to call list_tasks or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id.       
         """
         return {
             "type": "custom",
@@ -65,11 +68,16 @@ class ProjectTool:
     def list_tasks_property(self):
         description = """
         List all tasks for a user or project. The response will be a list of dictionaries, each containing the task details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
-        If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
-        If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
+        This tool should be called to retrieve task information when task details are needed to answer the question but is lacking in context.
+        This tool can also be used to retrieve a specific task by setting the task_id, if the task_id is explicitly provided.
         Sometimes, a user will come in asking for tasks for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for tasks for multiple users. In this case, you need to call this tool without setting the user_id.
-        If the project is not given, you need to list tasks across all projects for the user.
+        If the project id is not given, you need to list tasks across all projects for the user by calling this tool without setting the project_id.
+        If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
+        If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
+        Since this tool only provide basic task information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific task.
+        project_id can be used to link the tasks to projects.
+        task_id can be used to link the tasks to progress updates.
         You might need to call list_projects or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
         """
         return {
@@ -85,12 +93,16 @@ class ProjectTool:
                     },
                     "project_id": {
                         "type": "string", 
-                        "description": "Project identifier"
+                        "description": "Project identifier. This is not the project name or task name."
+                    },
+                    "task_id": {
+                        "type": "string", 
+                        "description": "Task identifier. This is not the task name or project name."
                     }
                 }
             }
         }
-    def list_tasks(self, user_id: str = None, project_id: str = None):
+    def list_tasks(self, user_id: str = None, project_id: str = None, task_id: str = None):
         try:
             # Build WHERE clause dynamically based on provided parameters
             where_conditions = []
@@ -98,7 +110,8 @@ class ProjectTool:
                 where_conditions.append(f"user_id = '{user_id}'")
             if project_id:
                 where_conditions.append(f"project_id = '{project_id}'")
-            
+            if task_id:
+                where_conditions.append(f"task_id = '{task_id}'")
             # Combine conditions with AND if both are provided
             where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
             
@@ -130,15 +143,19 @@ class ProjectTool:
     @property
     def list_progress_updates_property(self):
         description = """
-        List all progress updates for a user or project within date range. Leave date field empty if not specified in the query. 
-        If the query contains words like "recent" or "latest" without any specific time frame, interpret this as looking back 1 week from today.
-        The response will be a list of dictionaries, each containing the progress update details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
+        List all progress updates for a user or project within date range. The response will be a list of dictionaries, each containing the progress update details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
+        This tool should be called to retrieve progress update information when progress update details are needed to answer the question but is lacking in context.
+        This tool can also be used to retrieve a specific progress update by setting the update_id, if the update_id is explicitly provided.
+        If the query contains words like "recent" or "latest" without any specific time frame, interpret this as looking back 7 days from today.
         If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
         Sometimes, a user will come in asking for progress updates for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for progress updates for multiple users. In this case, you need to call this tool without setting the user_id.
-        If the project is not given, you need to list progress updates across all projects for the user.
-        If start_date and end_date are not given, you need to list progress updates for whole time period.
+        If the project id is not given, you need to list progress updates across all projects for the user by calling this tool without setting the project_id.
+        If start_date or end_date is not explicitly specified or inferred from the query, you need to list progress updates for last 7 days. Don't it them up.
+        Since this tool only provide basic progress update information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific progress update.
+        project_id can be used to link the progress updates to projects.
+        associated_tasks (a list of task_id) can be used to link the progress updates to tasks.
         You might need to call list_projects or list_tasks before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
         """
         return {
@@ -154,20 +171,24 @@ class ProjectTool:
                     },
                     "project_id": {
                         "type": "string", 
-                        "description": "Project identifier"
+                        "description": "Project identifier. This is not the project name or task name."
+                    },
+                    "update_id": {
+                        "type": "string", 
+                        "description": "Progress update identifier. This is not the progress update details, task name or project name."
                     },
                     "start_date": {
                         "type": "string", 
-                        "description": "Start date in YYYY-MM-DD format."
+                        "description": "Start date in YYYY-MM-DD format. This is for finding progress updates that are made after the start date."
                     },
                     "end_date": {
                         "type": "string", 
-                        "description": "End date in YYYY-MM-DD format."
+                        "description": "End date in YYYY-MM-DD format. This is for finding progress updates that are made before the end date."
                     }
                 }
             }
         }
-    def list_progress_updates(self, user_id: str = None, project_id: str = None, start_date: str = None, end_date: str = None):
+    def list_progress_updates(self, user_id: str = None, project_id: str = None, update_id: str = None, start_date: str = None, end_date: str = None):
         try:
             # Set default start_date to one week ago if not provided, using UTC
             if not start_date:
@@ -212,6 +233,8 @@ class ProjectTool:
                 where_conditions.append(f"user_id = '{user_id}'")
             if project_id:
                 where_conditions.append(f"project_id = '{project_id}'")
+            if update_id:
+                where_conditions.append(f"update_id = '{update_id}'")
             if formatted_start_date:
                 where_conditions.append(f"date_id >= '{formatted_start_date}'")
             if formatted_end_date:
@@ -249,6 +272,7 @@ class ProjectTool:
         description = """
         Add a new task to a project. Any field, if not explicitly provided, will need to be inferred from the context.
         The response will be a dictionary with the task details such as project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline and reason.
+        You might need to call list_projects before this tool to fetch project id that the task belongs to, if it is not provided in the context.
         """
         return {
             "type": "custom",
@@ -259,7 +283,7 @@ class ProjectTool:
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": "Project identifier"
+                        "description": "Project identifier. This is not the project name or task name."
                     },
                     "task_name": {
                         "type": "string",
@@ -372,7 +396,7 @@ class ProjectTool:
     def list_users_property(self):
         description = """
         List all users in the team. The response will be a list of dictionaries, each containing the user details such as user_id, first_name and last_name.
-        This tool can be used to search for the user_id if the user_id is not in the email address format.
+        This tool can be used to verify the user's id or try to find the user's email address.
         """
         return {
             "type": "custom",

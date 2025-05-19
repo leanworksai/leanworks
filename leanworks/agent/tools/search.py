@@ -28,9 +28,12 @@ class SearchTool:
     @property
     def search_knowledge_property(self):
         description = """
-        It will search for relevant documents using the team's knowledge base, based on the query. 
-        The response will be a list of documents ordered by relevance to the query, most relevant first.
-        Those documents can be used as context to answer the user's question.
+        Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
+        You MUST ALWAYS use this tool as the fallback when any of these conditions occur:
+        - Other tools return empty or insufficient results
+        - You have ANY uncertainty about the completeness of your answer
+        NEVER skip this tool if the above conditions are met.
+        Do not reflect on the quality of the returned search results in your response
         """
         return {
             "type": "custom",

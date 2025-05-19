@@ -75,17 +75,19 @@ class ChatAgent:
             "timeout": 30
         }
     
-    def process_message(self, user_message):
+    def process_message(self, user_message, cited_context=None):
         """
         Process a user message and handle the conversation flow.
         
         Args:
             user_message (str): The user's message content
-            
+            cited_context (str): The cited context for the user message
         Returns:
             str: The final response to the user
         """
         # Add the user message
+        if cited_context:
+            user_message = f"<cited_context>{cited_context}</cited_context>\n{user_message}"
         self.conversation.add_user_message(user_message, include_in_slim=True)
         
         # Maximum number of iterations to prevent infinite loops
