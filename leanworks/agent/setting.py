@@ -50,8 +50,10 @@ AGENT_SYSTEM_PROMPT = """
 # Verification query for validating responses
 VERIFICATION_QUERY = """
 Call the search_knowledge tool and spot check the last answer using the information returned from the search_knowledge tool.
-• If the candidate is correct, output it exactly.
-• If it is wrong or incomplete or incorrect, output a fully corrected answer.
+• If no retrieved documents is contradictory to the last answer, output the last answer exactly.
+• If any retrieved document is contradictory to last answer, Remove the contradictory part from the last answer and output a fully corrected answer.
+• If any retrieved document contains information that the last answer is missing, add the missing information to the last answer and output a fully updated answer.
+. If search cannot provide any relevant information, output the last answer exactly.
 Do not reflect on the quality of the returned search results in your response
 Output ONLY the final answer text—no explanations, no reasoning, no headings.
 """

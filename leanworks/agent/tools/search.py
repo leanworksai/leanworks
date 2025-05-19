@@ -33,7 +33,6 @@ class SearchTool:
         - Other tools return empty or insufficient results
         - You have ANY uncertainty about the completeness of your answer
         NEVER skip this tool if the above conditions are met.
-        Retrieved documents can be used as context to answer the user's question. However, if any document contradicts the information provided by other tools, the information with the latest date should be used. If the date is not available, the information from other tools should be used.
         Do not reflect on the quality of the returned search results in your response
         """
         return {
