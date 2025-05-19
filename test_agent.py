@@ -24,13 +24,15 @@ def main():
             secret_client,
             model_client,
             user_id="zhuyanfu0712@gmail.com",
-            session_id="hde29897",
+            session_id="q3[hc4g]",
             clear_conversation=False  # Change to True to reset conversation each time
         )
+        print(agent.conversation.slim_conversation)
         
         # Process a user message
-        user_message = "give me a summary of product development project’s progress since May 1st, including others’ updates"
+        user_message = "what are other high priority tasks?"
         response = agent.process_message(user_message)
+        print(agent.conversation.slim_conversation)
         
         return response
     except Exception as e:

@@ -86,7 +86,7 @@ class ChatAgent:
             str: The final response to the user
         """
         # Add the user message
-        self.conversation.add_user_message(user_message)
+        self.conversation.add_user_message(user_message, include_in_slim=True)
         
         # Maximum number of iterations to prevent infinite loops
         unanswered_count = 0
@@ -112,13 +112,15 @@ class ChatAgent:
                 # If the answer is complete, break the loop
                 if answered == "true":
                     logger.info("Question answered. Starting verification...")
+                    # Add to regular conversation first
                     self.conversation.add_assistant_message(response_text)
                     
                     # Perform verification
                     verification_result = self._perform_verification()
                     if verification_result:
                         response_text = verification_result
-                    
+                    else:
+                        logger.info("Verification failed or returned None. Adding original response to slim conversation.")
                     break
                 
                 # Check if there are any tool calls
@@ -156,10 +158,8 @@ class ChatAgent:
                 response_text = f"An error occurred: {str(e)}"
                 break
         
-        # If we exited the loop without adding the final response, add it now
-        if answered == "false" and unanswered_count >= self.max_unanswered_num:
-            self.conversation.add_assistant_message(response_text)
-        
+        # Always add last response to slim_conversation
+        self.conversation.add_assistant_message(response_text, include_in_slim=True)
         self.conversation.save_conversation()
         logger.info(f"Final answer: {response_text}")
         return response_text
@@ -174,31 +174,34 @@ class ChatAgent:
             str: The verified response text, or None if verification failed
         """
         try:
-            # Extract the original user query (first user message) and the most recent answer
-            original_query = None
+            # Extract the last user query from slim conversation and the most recent answer
+            last_user_query = None
             last_answer = None
             
-            for message in self.conversation.conversation:
-                if message.get("role") == "user" and original_query is None:
-                    # Get the first user message
-                    original_query = next((block.get("text") for block in message.get("content", []) 
+            # Get the most recent user message from slim_conversation
+            for message in reversed(self.conversation.slim_conversation):
+                if message.get("role") == "user" and last_user_query is None:
+                    last_user_query = next((block.get("text") for block in message.get("content", []) 
                                           if isinstance(block, dict) and block.get("type") == "text"), "")
-                
+                    break
+            
+            # Get the most recent assistant response from the full conversation
+            for message in self.conversation.conversation:
                 if message.get("role") == "assistant":
                     # Keep updating to get the most recent assistant message
                     last_answer = next((block.get("text") for block in message.get("content", [])
                                        if isinstance(block, dict) and block.get("type") == "text"), "")
             
             # Create a minimal conversation for verification, only including:
-            # 1. Original user query
+            # 1. Last user query
             # 2. Previous assistant answer
             # 3. Verification query
             minimal_conversation = []
             
-            if original_query:
+            if last_user_query:
                 minimal_conversation.append({
                     "role": "user",
-                    "content": [{"type": "text", "text": original_query}]
+                    "content": [{"type": "text", "text": last_user_query}]
                 })
             
             if last_answer:
@@ -259,9 +262,6 @@ class ChatAgent:
                 final_text = next((block.text for block in final_response.content if block.type == "text"), "")
                 final_json = self.conversation.extract_json_from_text(final_text)
                 final_response_text = final_json.get("content")
-                
-                # Add the verified response to the full conversation and slim_conversation
-                self.conversation.add_verified_response(final_response_text)
                 return final_response_text
                 
             return None

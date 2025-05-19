@@ -42,7 +42,7 @@ class ConversationManager:
             self.slim_conversation = []
         
         # Initialize the current conversation as empty
-        self.conversation = []
+        self.conversation = self.slim_conversation.copy()
     
     def save_conversation(self):
         """Save the slim conversation to CloudStorage"""
@@ -54,7 +54,7 @@ class ConversationManager:
         self.storage_client.upload_blob_from_memory(conversation_json, self.conversation_path)
         print(f"Saved slim conversation for user {self.user_id}")
         
-    def add_user_message(self, content):
+    def add_user_message(self, content, include_in_slim=False):
         """Add a user message to the conversation history"""
         user_message = {
             "role": "user",
@@ -62,32 +62,8 @@ class ConversationManager:
         }
         self.conversation.append(user_message)
         
-        # If this is the first user message in the current conversation, add to slim_conversation
-        if len(self.conversation) == 1:
+        if include_in_slim:
             self.slim_conversation.append(user_message)
-
-    def add_verified_response(self, content):
-        """Add a verified assistant response to both conversation and slim_conversation"""
-        assistant_message = {
-            "role": "assistant",
-            "content": [{"type": "text", "text": content}]
-        }
-        
-        # Add to current conversation
-        self.conversation.append(assistant_message)
-        
-        # Add to slim conversation if there's at least one user message
-        if any(msg["role"] == "user" for msg in self.slim_conversation):
-            # Check if we already have an assistant response for the latest user query
-            if len(self.slim_conversation) > 0 and self.slim_conversation[-1]["role"] == "assistant":
-                # Replace the last assistant message
-                self.slim_conversation[-1] = assistant_message
-            else:
-                # Add new assistant message
-                self.slim_conversation.append(assistant_message)
-            
-            # Save the slim conversation after adding a verified response
-            self.save_conversation()
 
     def add_tool_results(self, tool_results):
         """Add tool results to the conversation history
@@ -112,12 +88,17 @@ class ConversationManager:
             "content": tool_results
         })
 
-    def add_assistant_message(self, content):
+    def add_assistant_message(self, content, include_in_slim=False):
         """Add an assistant message to the conversation history"""
         self.conversation.append({
             "role": "assistant",
             "content": [{"type": "text", "text": content}]
         })
+        if include_in_slim:
+            self.slim_conversation.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": content}]
+            })
             
     def clear_conversation(self):
         """Clear the conversation history and start fresh"""
