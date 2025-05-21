@@ -27,9 +27,9 @@ class ConversationManager:
         if conversation_data:
             try:
                 loaded_data = json.loads(conversation_data)
-                # Ensure slim_conversation is always a list
+                # Ensure slim_conversation is always a list and take last 6 messages
                 if isinstance(loaded_data, list):
-                    self.slim_conversation = loaded_data
+                    self.slim_conversation = loaded_data[-6:] if len(loaded_data) > 6 else loaded_data
                 else:
                     print(f"Conversation data for user {self.user_id} is not a list. Creating new list.")
                     self.slim_conversation = []
