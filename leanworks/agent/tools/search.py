@@ -32,6 +32,8 @@ class SearchTool:
         You MUST ALWAYS use this tool as the fallback when any of these conditions occur:
         - Other tools return empty or insufficient results
         - You have ANY uncertainty about the completeness of your answer
+        - More detailed information is needed to answer the question
+        You might need to use this tool multiple times with different queries to fully answer the question.
         NEVER skip this tool if the above conditions are met.
         Do not reflect on the quality of the returned search results in your response
         """

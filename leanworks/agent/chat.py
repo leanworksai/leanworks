@@ -113,18 +113,10 @@ class ChatAgent:
                 
                 # If the answer is complete, break the loop
                 if answered == "true":
-                    logger.info("Question answered. Starting verification...")
+                    logger.info("Question answered.")
                     # Add to regular conversation first
                     self.conversation.add_assistant_message(response_text)
-                    
-                    # Perform verification
-                    verification_result = self._perform_verification()
-                    if verification_result:
-                        response_text = verification_result
-                    else:
-                        logger.info("Verification failed or returned None. Adding original response to slim conversation.")
                     break
-                
                 # Check if there are any tool calls
                 has_tool_calls = any(block.type == "tool_use" for block in response.content)
                 
@@ -159,7 +151,16 @@ class ChatAgent:
                 logger.error(f"Error during unanswered attempt {unanswered_count}: {str(e)}")
                 response_text = f"An error occurred: {str(e)}"
                 break
-        
+            
+        if answered == "false":
+            # Perform verification
+            logger.info("Starting verification...")
+            verification_result = self._perform_verification()
+            if verification_result:
+                response_text = verification_result
+            else:
+                logger.info("Verification failed or returned None. Adding original response to slim conversation.")
+
         # Always add last response to slim_conversation
         self.conversation.add_assistant_message(response_text, include_in_slim=True)
         self.conversation.save_conversation()

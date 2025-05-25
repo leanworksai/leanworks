@@ -24,12 +24,12 @@ def main():
             secret_client,
             model_client,
             user_id="zhuyanfu0712@gmail.com",
-            session_id="dje9287",
+            session_id="vn;jdefp9t7",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "what progress updates did we make for this task?"
+        user_message = "waht progress did we make for this task?"
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
         
