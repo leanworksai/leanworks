@@ -49,6 +49,9 @@ class ChatAgent:
         # Initialize tool use
         self.tool_use = ToolUse()
         
+        # Initialize data source tracking
+        self.data_sources = []
+        
         # Initialize conversation manager
         self.conversation = ConversationManager(
             self.model_client, 
@@ -83,8 +86,11 @@ class ChatAgent:
             user_message (str): The user's message content
             cited_context (str): The cited context for the user message
         Returns:
-            str: The final response to the user
+            dict: Dictionary with 'content' (response text) and 'data_sources' (list of sources)
         """
+        # Reset data sources for new message
+        self.data_sources = []
+        
         # Add the user message
         if cited_context:
             user_message = f"<cited_context>{cited_context}</cited_context>\n{user_message}"
@@ -124,10 +130,11 @@ class ChatAgent:
                     # Add the assistant message with tool_use blocks to the conversation
                     self.conversation.add_assistant_message_with_tool_uses(response)
                     
-                    # Process tool calls and add results to conversation
-                    tool_results = self.conversation.parse_and_format_tool_results(
+                    # Process tool calls and add results to conversation with data source tracking
+                    tool_results = self.conversation.parse_and_format_tool_results_with_sources(
                         response, 
-                        self.tool_use.function_map
+                        self.tool_use.function_map,
+                        self.data_sources
                     )
                     self.conversation.add_tool_results(tool_results)
                 else:
@@ -161,11 +168,25 @@ class ChatAgent:
             else:
                 logger.info("Verification failed or returned None. Adding original response to slim conversation.")
 
+        # Remove duplicates while preserving order
+        unique_sources = []
+        seen = set()
+        for source in self.data_sources:
+            if source not in seen:
+                unique_sources.append(source)
+                seen.add(source)
+
         # Always add last response to slim_conversation
         self.conversation.add_assistant_message(response_text, include_in_slim=True)
         self.conversation.save_conversation()
         logger.info(f"Final answer: {response_text}")
-        return response_text
+        logger.info(f"Data sources used: {unique_sources}")
+        
+        # Return dictionary with content and data sources
+        return {
+            "content": response_text,
+            "data_sources": unique_sources
+        }
     
     def _perform_verification(self):
         """
@@ -241,10 +262,11 @@ class ChatAgent:
                                for block in verification_response.content]
                 })
                 
-                # Process tool calls
-                tool_results = self.conversation.parse_and_format_tool_results(
+                # Process tool calls with data source tracking for verification
+                tool_results = self.conversation.parse_and_format_tool_results_with_sources(
                     verification_response, 
-                    self.tool_use.function_map
+                    self.tool_use.function_map,
+                    self.data_sources
                 )
                 
                 # Add tool results to the minimal conversation

@@ -22,7 +22,7 @@ def test_sync_chat():
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
     # session_id = str(uuid.uuid4())
-    session_id = "cjw[fp984]"
+    session_id = "cwjhh[fp984]"
 
     # Initialize RAG
     chat = Chat(

@@ -190,6 +190,125 @@ class ConversationManager:
         
         return tool_results
 
+    def parse_and_format_tool_results_with_sources(self, response, function_map, data_sources):
+        """
+        Parse tool use blocks from Claude's response and execute the corresponding functions.
+        Returns properly formatted tool_result content blocks following Anthropic's API format.
+        Also tracks data sources used by each tool.
+        """
+        tool_results = []
+        
+        for block in response.content:
+            if block.type == "tool_use":
+                # Extract tool details - handle different API versions
+                try:
+                    tool_use_id = block.id  # For newer versions of Claude API
+                except AttributeError:
+                    tool_use_id = block.tool_use.id  # For Claude API 3.5
+                
+                try:
+                    tool_name = block.name  # For newer versions of Claude API 
+                    tool_input = block.input
+                except AttributeError:
+                    tool_name = block.tool_use.name  # For Claude API 3.5
+                    tool_input = block.tool_use.input
+                
+                # Execute the tool function if it exists in our function map
+                if tool_name in function_map:
+                    try:
+                        # Call the function with the provided input
+                        result = function_map[tool_name](**tool_input)
+                        
+                        # Track data sources based on tool type
+                        if tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
+                            # For BigQuery tools, add the table name
+                            table_mapping = {
+                                "list_projects": "leanworks.leanworks.project_config",
+                                "list_tasks": "leanworks.leanworks.tasks", 
+                                "list_progress_updates": "leanworks.leanworks.updates",
+                                "list_users": "leanworks.leanworks.user_config"
+                            }
+                            data_sources.append(f"BigQuery table: {table_mapping[tool_name]}")
+                        
+                        elif tool_name == "search_knowledge":
+                            # For search_knowledge, use the data sources directly from the result
+                            if hasattr(result, '_search_data_sources'):
+                                # Use the actual data sources returned by the search tool
+                                for source in result._search_data_sources:
+                                    if source:
+                                        data_sources.append(f"Knowledge base: {source}")
+                            else:
+                                # Fallback to parsing if the attribute is not available
+                                if isinstance(result, str):
+                                    lines = result.split('\n')
+                                    for line in lines:
+                                        if '- Source:' in line:
+                                            source_part = line.split('- Source:')[1].strip()
+                                            if source_part and source_part != ']':
+                                                data_sources.append(f"Knowledge base: {source_part}")
+                                        elif '[DOCUMENT - Date:' in line and '- Source:' in line:
+                                            # Extract source from the document header format
+                                            try:
+                                                source_start = line.find('- Source:') + len('- Source:')
+                                                source_end = line.find(']:')
+                                                if source_end == -1:
+                                                    source_end = len(line)
+                                                source_part = line[source_start:source_end].strip()
+                                                if source_part:
+                                                    data_sources.append(f"Knowledge base: {source_part}")
+                                            except Exception as e:
+                                                logger.warning(f"Error parsing source from line: {line}, error: {e}")
+                        
+                        # Format the result to have proper content structure
+                        formatted_result = []
+                        if isinstance(result, list):
+                            for item in result:
+                                if isinstance(item, dict):
+                                    # For dictionaries, convert to a JSON string
+                                    formatted_result.append(json.dumps(item))
+                                elif isinstance(item, str):
+                                    # For strings, just add the string
+                                    formatted_result.append(item)
+                                else:
+                                    # For any other type, convert to string
+                                    formatted_result.append(str(item))
+                            # Join all items with newlines
+                            formatted_result = "\n".join(formatted_result)
+                        elif isinstance(result, str):
+                            # If result is a string, use it directly
+                            formatted_result = result
+                        elif isinstance(result, dict):
+                            # If result is a dictionary, convert to JSON string
+                            formatted_result = json.dumps(result)
+                        else:
+                            # For any other type, convert to string
+                            formatted_result = str(result)
+                        
+                        # Format as proper tool_result content block
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": formatted_result
+                        })
+                    except Exception as e:
+                        # Handle errors in tool execution with is_error flag
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": f"Error executing {tool_name}: {str(e)}",
+                            "is_error": True
+                        })
+                else:
+                    # Handle unknown tool as an error
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": f"Unknown tool: {tool_name}",
+                        "is_error": True
+                    })
+        
+        return tool_results
+
     def extract_json_from_text(self, text):
         """
         Extract and parse JSON from text content.

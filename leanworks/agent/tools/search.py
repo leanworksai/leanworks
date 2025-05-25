@@ -8,6 +8,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class SearchResult:
+    """
+    Custom class to hold search results with both formatted context and data sources.
+    This class behaves like a string for backward compatibility while also storing metadata.
+    """
+    def __init__(self, formatted_context: str, data_sources: list = None):
+        self.formatted_context = formatted_context
+        self._search_data_sources = data_sources or []
+    
+    def __str__(self):
+        return self.formatted_context
+    
+    def __repr__(self):
+        return f"SearchResult(context_length={len(self.formatted_context)}, sources={len(self._search_data_sources)})"
+
 class SearchTool:
     """
     Tool that uses the Leanworks API to search for information when other tools
@@ -56,6 +71,7 @@ class SearchTool:
     async def async_search_knowledge(self, query: str):
         # Retrieve context
         context = []
+        data_sources = []
         try:
             # Create tasks for parallel execution
             tasks = []
@@ -105,6 +121,7 @@ class SearchTool:
                 rerank_top_k=5
             )
             logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
+            logger.info(f"Retrieved data sources: {data_sources}")
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
         
@@ -132,8 +149,11 @@ class SearchTool:
             recency_indicator = f"[DOCUMENT - Date: {timestamp_str}{source_str}]: "
             formatted_context += recency_indicator + ctx["context"] + "\n\n"
         
-        # Return just the formatted context without the search quality reflection
-        return formatted_context
+        # Return both formatted context and data sources
+        return {
+            "formatted_context": formatted_context,
+            "data_sources": data_sources
+        }
         
     def search_knowledge(self, query: str):
         """
@@ -153,11 +173,17 @@ class SearchTool:
             # Run the async method in the event loop
             result = loop.run_until_complete(self.async_search_knowledge(query))
             
-            # Remove the search quality reflection header
-            if result.startswith("Search results (ordered by relevance, most relevant first):"):
-                result = result.replace("Search results (ordered by relevance, most relevant first):\n", "", 1)
+            # Extract the formatted context for backward compatibility
+            formatted_context = result["formatted_context"]
             
-            return result
+            # Remove the search quality reflection header if present
+            if formatted_context.startswith("Search results (ordered by relevance, most relevant first):"):
+                formatted_context = formatted_context.replace("Search results (ordered by relevance, most relevant first):\n", "", 1)
+            
+            # Return SearchResult object that behaves like a string but also stores data sources
+            return SearchResult(formatted_context, result["data_sources"])
+            
         except Exception as e:
             logger.error(f"Error in synchronous search_knowledge: {str(e)}")
-            return f"Error occurred during knowledge search: {str(e)}"
+            error_message = f"Error occurred during knowledge search: {str(e)}"
+            return SearchResult(error_message, [])
