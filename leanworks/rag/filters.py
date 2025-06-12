@@ -151,22 +151,3 @@ class FilterExtractor:
         except Exception as e:
             logger.error(f"Error extracting time filters: {str(e)}")
             return None
-
-    def extract_user_filters(self, query: str) -> List[str]:
-        """
-        Extract user email addresses from the query using regex.
-        
-        Args:
-            query: The user query
-            
-        Returns:
-            List of unique user email addresses found in the query
-        """
-        # Regex pattern for matching email addresses
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        
-        # Find all email matches in the query
-        email_matches = re.findall(email_pattern, query)
-        
-        # Return unique email addresses (remove duplicates)
-        return list(set(email_matches))

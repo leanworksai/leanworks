@@ -131,7 +131,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
     def postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            apply_filters: bool = False, 
             use_reranker: bool = False, 
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
@@ -153,56 +152,33 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
         logger.debug("Score filtered documents", filtered_results)
 
-        # Extract user filters from query only if apply_filters is True
-        if apply_filters:
-            logger.info("Applying user filters")
-            user_filters = self.extract_user_filters(query)
-            if user_filters:
-                # Filter results by user access
-                user_filtered_results = []
-                for match in filtered_results:
-                    # Check if the node has user access information
-                    if "users" in match.metadata:
-                        # Get the users who can access this node
-                        node_users = match.metadata["users"]
-                        # If node_users is a string, check if all user_filters are in it
-                        if isinstance(node_users, str):
-                            if any(user in node_users for user in user_filters) or "everyone" in node_users:
-                                user_filtered_results.append(match)
-                    else:
-                        # If no user access information, assume public access
-                        user_filtered_results.append(match)
-            else:
-                user_filtered_results = filtered_results
-        else:
-            user_filtered_results = filtered_results
         # Apply reranking if enabled and needed (directly on the filtered results)
         rerank_top_k = kwargs.get("rerank_top_k")
-        if use_reranker and user_filtered_results:
+        if use_reranker and filtered_results:
             if rerank_top_k is None:
                 raise ValueError("rerank_top_k is required when use_reranker is True")
             # Check if reranking should be applied based on result quality
-            if self._should_apply_reranking(user_filtered_results):
+            if self._should_apply_reranking(filtered_results):
                 logger.info(f"Applying reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use the reranker to improve precision
                     logger.info("Initializing CrossEncoderReranker")
-                    reranked_results = self.rerank(query, user_filtered_results, top_k=rerank_top_k)
+                    reranked_results = self.rerank(query, filtered_results, top_k=rerank_top_k)
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
                     # In case of error, limit to top_k based on vector similarity
-                    reranked_results = user_filtered_results[:rerank_top_k]
+                    reranked_results = filtered_results[:rerank_top_k]
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
                 reranked_results = sorted(
-                    user_filtered_results[:rerank_top_k],
+                    filtered_results[:rerank_top_k],
                     key=lambda x: x.metadata.get("timestamp", 0)
                 )
         else:
             reranked_results = sorted(
-                user_filtered_results[:rerank_top_k],
+                filtered_results[:rerank_top_k],
                 key=lambda x: x.metadata.get("timestamp", 0)
             )
         logger.debug("Reranked documents", reranked_results)
@@ -294,7 +270,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             if query_rewrites:
                 query_rewrites = self.rewrite_query(query)
                 all_queries = [full_query] + query_rewrites
-                print(all_queries)
             else:
                 all_queries = [full_query]
             if apply_filters:
@@ -305,7 +280,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
-                apply_filters=apply_filters, 
                 use_reranker=use_reranker, 
                 rerank_top_k=rerank_top_k
                 )
@@ -413,7 +387,6 @@ class AsyncChat(Chat):
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            apply_filters: bool = False, 
             use_reranker: bool = False, 
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
@@ -423,7 +396,6 @@ class AsyncChat(Chat):
         Args:
             nodes: The query results from Pinecone
             query: The user query
-            apply_filters: Whether to apply user filters extracted from the query
             use_reranker: Whether to apply reranking
             
         Returns:
@@ -434,60 +406,37 @@ class AsyncChat(Chat):
         # Filter results by relevance score
         filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
         logger.debug("Score filtered documents", filtered_results)
-
-        # Extract user filters from query only if apply_filters is True
-        if apply_filters:
-            user_filters = self.extract_user_filters(query)
-            if user_filters:
-                # Filter results by user access
-                user_filtered_results = []
-                for match in filtered_results:
-                    # Check if the node has user access information
-                    if "users" in match.metadata:
-                        # Get the users who can access this node
-                        node_users = match.metadata["users"]
-                        # If node_users is a string, check if all user_filters are in it
-                        if isinstance(node_users, str):
-                            if any(user in node_users for user in user_filters) or "everyone" in node_users:
-                                user_filtered_results.append(match)
-                    else:
-                        # If no user access information, assume public access
-                        user_filtered_results.append(match)
-            else:
-                user_filtered_results = filtered_results
-        else:
-            user_filtered_results = filtered_results
             
         # Apply reranking if enabled and needed (directly on the filtered results)
         rerank_top_k = kwargs.get("rerank_top_k")
-        if use_reranker and user_filtered_results:
+        if use_reranker and filtered_results:
             if rerank_top_k is None:
                 raise ValueError("rerank_top_k is required when use_reranker is True")
             # Check if reranking should be applied based on result quality
-            if self._should_apply_reranking(user_filtered_results):
+            if self._should_apply_reranking(filtered_results):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
                     reranked_results = await self.async_rerank(
                         query, 
-                        user_filtered_results,
+                        filtered_results,
                         top_k=rerank_top_k
                     )
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during async reranking: {str(e)}, falling back to vector rankings")
                     # In case of error, limit to top_k based on vector similarity
-                    reranked_results = user_filtered_results[:rerank_top_k]
+                    reranked_results = filtered_results[:rerank_top_k]
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
                 reranked_results = sorted(
-                    user_filtered_results[:rerank_top_k],
+                    filtered_results[:rerank_top_k],
                     key=lambda x: x.metadata.get("timestamp", 0)
                 )
         else:
             reranked_results = sorted(
-                user_filtered_results[:rerank_top_k],
+                filtered_results[:rerank_top_k],
                 key=lambda x: x.metadata.get("timestamp", 0)
             )
         logger.debug("Reranked documents", reranked_results)
@@ -626,7 +575,6 @@ class AsyncChat(Chat):
             context, data_sources = await self.async_postprocess_nodes(
                 nodes, 
                 full_query, 
-                apply_filters=apply_filters, 
                 use_reranker=use_reranker, 
                 rerank_top_k=rerank_top_k
             )
