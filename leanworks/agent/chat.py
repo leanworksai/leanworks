@@ -1,7 +1,7 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from datetime import datetime
 from leanworks.agent.conversation import ConversationManager
-from leanworks.agent.setting import AGENT_SYSTEM_PROMPT, VERIFICATION_QUERY, SEARCH_KNOWLEDGE_QUERY
+from leanworks.setting import AGENT_SYSTEM_PROMPT, VERIFICATION_QUERY, SEARCH_KNOWLEDGE_QUERY
 import traceback
 import logging
 
@@ -17,7 +17,7 @@ class ChatAgent:
                  storage_client,
                  secret_client,
                  model_client,
-                 bq_client,
+                 bq_client_wrapper,
                  user_id=None,
                  session_id=None,
                  max_unanswered_num=2,
@@ -30,7 +30,7 @@ class ChatAgent:
             storage_client: The storage client for GCS operations
             secret_client: The secret client for accessing secrets
             model_client: The Claude model client
-            bq_client: The BigQuery client object that contains dataset_id
+            bq_client_wrapper: The BigQuery client object that contains dataset_id
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
             max_unanswered_num (int): Maximum number of attempts to answer a question
@@ -40,7 +40,7 @@ class ChatAgent:
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.model_client = model_client
-        self.bq_client = bq_client
+        self.bq_client_wrapper = bq_client_wrapper
         
         # Set parameters
         self.user_id = user_id
@@ -48,7 +48,7 @@ class ChatAgent:
         self.max_unanswered_num = max_unanswered_num
         
         # Initialize tool use with BigQuery client
-        self.tool_use = ToolUse(bq_client)
+        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client)
         
         # Initialize data source tracking
         self.data_sources = []
@@ -95,11 +95,11 @@ class ChatAgent:
             
             query = f"""
             SELECT user_id, alias_email, first_name, last_name 
-            FROM `leanworks.{self.bq_client.dataset_id}.user_config` 
+            FROM `leanworks.{self.bq_client_wrapper.client_name}.user_config` 
             WHERE user_id = '{self.user_id}'
             """
             
-            query_job = self.bq_client.query(query)
+            query_job = self.bq_client_wrapper.bq_client.query(query)
             results = query_job.result()
             
             # Convert results to dict

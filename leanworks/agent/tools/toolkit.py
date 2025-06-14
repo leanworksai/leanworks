@@ -2,15 +2,15 @@ from leanworks.agent.tools.project import ProjectTool
 from leanworks.agent.tools.search import SearchTool
 
 class ToolUse:
-    def __init__(self, bq_client=None):
+    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None):
         """
         Initialize ToolUse with a BigQuery client.
         
         Args:
             bq_client: BigQuery client object that has dataset_id attribute
         """
-        self.project_tool = ProjectTool(bq_client) if bq_client else None
-        self.search_tool = SearchTool()
+        self.project_tool = ProjectTool(bq_client_wrapper) if bq_client_wrapper else None
+        self.search_tool = SearchTool(storage_client, secret_client)
         
         # Define tools as variables
         if self.project_tool:

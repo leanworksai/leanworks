@@ -2,7 +2,7 @@ import json
 import logging
 import asyncio
 from typing import List
-from leanworks.rag.setting import OTHER_MODEL, QUERY_REWRITE_MODEL_SYSTEM_PROMPT
+from leanworks.setting import OTHER_MODEL, QUERY_REWRITE_MODEL_SYSTEM_PROMPT
 
 # Set up logging
 logger = logging.getLogger(__name__)

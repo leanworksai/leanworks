@@ -5,7 +5,7 @@ import datetime
 import math
 import concurrent.futures
 import threading
-from leanworks.rag.setting import *
+from leanworks.setting import *
 
 # Set up logging
 logger = logging.getLogger(__name__)

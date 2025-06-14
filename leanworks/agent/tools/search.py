@@ -1,7 +1,5 @@
 import asyncio
 import datetime
-from leanworks.storage import CloudStorage
-from leanworks.secret import GCPSecretLoader
 from openai import OpenAI
 from leanworks.rag.chat import AsyncChat
 import logging
@@ -28,17 +26,18 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-    secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
-    embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
-    model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
-    chat = AsyncChat(
-        pinecone_api_key=secret_client.get("PINECONE_API_KEY"),
-        index_host=secret_client.get("PINECONE_INDEX_HOST"),
-        storage_client=storage_client,
-        embedding_model_api_key=embedding_model_api_key,
-        model_client=model_client
-    )
+    def __init__(self, storage_client, secret_client):
+        self.storage_client = storage_client
+        self.secret_client = secret_client
+        self.embedding_model_api_key=self.secret_client.get("GEMINI_API_KEY")
+        self.model_client = OpenAI(api_key=self.secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        self.chat = AsyncChat(
+            pinecone_api_key=self.secret_client.get("PINECONE_API_KEY"),
+            index_host=self.secret_client.get("PINECONE_INDEX_HOST"),
+            storage_client=storage_client,
+            embedding_model_api_key=self.embedding_model_api_key,
+            model_client=self.model_client
+        )
         
     @property
     def search_knowledge_property(self):

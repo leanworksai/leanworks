@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Dict
 import json
 import tiktoken
-from leanworks.rag.setting import OTHER_MODEL
+from leanworks.setting import OTHER_MODEL
 
 @dataclass
 class Memory:

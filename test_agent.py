@@ -5,7 +5,7 @@ from anthropic import Anthropic
 from google.cloud import bigquery
 import logging
 import traceback
-
+from leanworks.setting import get_client_name
 logger = logging.getLogger(__name__)
 # Configure logging
 logging.basicConfig(
@@ -13,36 +13,28 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-
-class BigQueryClient:
-    """Wrapper class for BigQuery client that includes dataset_id"""
-    def __init__(self, credentials_path, dataset_id):
-        self.client = bigquery.Client.from_service_account_json(credentials_path)
-        self.dataset_id = dataset_id
-    
-    def query(self, query_string):
-        """Execute a BigQuery query"""
-        return self.client.query(query_string)
-
-
 def main():
     try:
-        # Initialize clients
-        storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-        secret_client = GCPSecretLoader("gcp_credential.json", client_name="leanworks")
+        bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
+        client_name = get_client_name(bq_client, "yanfu@leanworks.ai")
+        storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
+        secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
-        
-        # Initialize BigQuery client with service account
-        bq_client = BigQueryClient("gcp_credential.json", dataset_id="leanworks")
-        
+
+        class BigQueryClient:
+            def __init__(self, bq_client, client_name):
+                self.bq_client = bq_client
+                self.client_name = client_name
+                
+        bq_client_wrapper = BigQueryClient(bq_client, client_name)
         # Initialize the chat agent with BigQuery client
         agent = ChatAgent(
             storage_client,
             secret_client,
             model_client,
-            bq_client,
+            bq_client_wrapper,
             user_id="yanfu@leanworks.ai",
-            session_id="dhe2o86",
+            session_id="chp27t6t",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         

@@ -2,7 +2,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, timezone
 import json
 import re
-from leanworks.rag.setting import OTHER_MODEL
+from leanworks.setting import OTHER_MODEL
 from logging import getLogger
 import asyncio
 logger = getLogger(__name__)
