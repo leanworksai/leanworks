@@ -6,7 +6,14 @@ import uuid
 logger = logging.getLogger(__name__)
 
 class ProjectTool:
-    bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
+    def __init__(self, bq_client):
+        """
+        Initialize ProjectTool with a BigQuery client that contains dataset_id.
+        
+        Args:
+            bq_client: BigQuery client object that has dataset_id attribute
+        """
+        self.bq_client = bq_client
     
     @property
     def list_projects_property(self):
@@ -39,16 +46,16 @@ class ProjectTool:
             if user_id:
                 query = f'''
                 SELECT * EXCEPT(last_n_days)
-                FROM `leanworks.leanworks.project_config`
+                FROM `leanworks.{self.bq_client.dataset_id}.project_config`
                 WHERE collaborators LIKE '%{user_id}%'
                 '''
             else:
                 query = f'''
                 SELECT * EXCEPT(last_n_days)
-                FROM `leanworks.leanworks.project_config`
+                FROM `leanworks.{self.bq_client.dataset_id}.project_config`
                 '''
             logger.info(f"Executing BQ query in list_projects: {query}")
-            query_job = self.bq_client.query(query)
+            query_job = self.bq_client.client.query(query)
             results = query_job.result()
             projects = []
             for row in results:
@@ -117,11 +124,11 @@ class ProjectTool:
             
             query = f'''
             SELECT *
-            FROM `leanworks.leanworks.tasks` 
+            FROM `leanworks.{self.bq_client.dataset_id}.tasks` 
             WHERE {where_clause}
             '''
             logger.info(f"Executing BQ query in list_tasks: {query}")
-            query_results = self.bq_client.query(query)
+            query_results = self.bq_client.client.query(query)
             tasks = []
             for row in query_results:
                 task = dict(row)
@@ -245,11 +252,11 @@ class ProjectTool:
             
             query = f'''
             SELECT *
-            FROM `leanworks.leanworks.updates`
+            FROM `leanworks.{self.bq_client.dataset_id}.updates`
             WHERE {where_clause}
             '''
             logger.info(f"Executing BQ query in list_progress_updates: {query}")
-            query_results = self.bq_client.query(query)
+            query_results = self.bq_client.client.query(query)
             
             # Convert date objects and timestamps to strings to make them JSON serializable
             results = []
@@ -352,7 +359,7 @@ class ProjectTool:
             
             # Prepare the query
             query = f"""
-            INSERT INTO `leanworks.leanworks.tasks`
+            INSERT INTO `leanworks.{self.bq_client.dataset_id}.tasks`
             (project_id, user_id, task_id, created_at, updated_at, task_name, status, description, priority, deadline, reason)
             VALUES
             ('{project_id}', 
@@ -370,7 +377,7 @@ class ProjectTool:
             
             # Execute the query
             logger.info(f"Executing BQ query in add_task: {query}")
-            query_job = self.bq_client.query(query)
+            query_job = self.bq_client.client.query(query)
             query_job.result()  # Wait for the query to complete
             
             # Return the task details
@@ -409,8 +416,8 @@ class ProjectTool:
                 }
             }
     def list_users(self):
-        query = "SELECT * EXCEPT(user_id), alias_email as user_id FROM `leanworks.leanworks.user_config`"
+        query = f"SELECT * EXCEPT(user_id), alias_email as user_id FROM `leanworks.{self.bq_client.dataset_id}.user_config`"
         logger.info(f"Executing BQ query in list_users: {query}")
-        query_job = self.bq_client.query(query)
+        query_job = self.bq_client.client.query(query)
         results = query_job.result()
         return [dict(row) for row in results]

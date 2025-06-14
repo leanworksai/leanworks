@@ -17,6 +17,7 @@ class ChatAgent:
                  storage_client,
                  secret_client,
                  model_client,
+                 bq_client,
                  user_id=None,
                  session_id=None,
                  max_unanswered_num=2,
@@ -26,28 +27,28 @@ class ChatAgent:
         Initialize the ChatAgent with necessary clients and settings.
         
         Args:
-            credentials_path (str): Path to the GCP credentials JSON file
-            bucket (str): The storage bucket name
+            storage_client: The storage client for GCS operations
+            secret_client: The secret client for accessing secrets
+            model_client: The Claude model client
+            bq_client: The BigQuery client object that contains dataset_id
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
-            model (str): The Claude model to use
-            max_tokens (int): Maximum number of tokens for Claude responses
-            temperature (float): Temperature setting for response generation
-            timeout (int): API timeout in seconds
             max_unanswered_num (int): Maximum number of attempts to answer a question
+            clear_conversation (bool): Whether to clear conversation history on init
         """
         # Initialize clients
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.model_client = model_client
+        self.bq_client = bq_client
         
         # Set parameters
         self.user_id = user_id
         self.session_id = session_id
         self.max_unanswered_num = max_unanswered_num
         
-        # Initialize tool use
-        self.tool_use = ToolUse()
+        # Initialize tool use with BigQuery client
+        self.tool_use = ToolUse(bq_client)
         
         # Initialize data source tracking
         self.data_sources = []
@@ -62,9 +63,12 @@ class ChatAgent:
         if clear_conversation:
             self.conversation.clear_conversation()
         
+        # Get user info from BigQuery
+        user_info = self._get_user_info()
+        
         # Set up API parameters
         self.system_prompt = AGENT_SYSTEM_PROMPT.format(
-            USER_ID=self.user_id, 
+            USER_INFO=user_info, 
             CURRENT_DATE=datetime.now().strftime("%Y-%m-%d")
         )
         
@@ -78,6 +82,46 @@ class ChatAgent:
             "timeout": 30
         }
     
+    def _get_user_info(self):
+        """
+        Query user information from BigQuery user_config table.
+        
+        Returns:
+            dict: User information dictionary with user_id, alias_email, first_name, last_name
+        """
+        try:
+            if not self.user_id:
+                return {"user_id": "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
+            
+            query = f"""
+            SELECT user_id, alias_email, first_name, last_name 
+            FROM `leanworks.{self.bq_client.dataset_id}.user_config` 
+            WHERE user_id = '{self.user_id}'
+            """
+            
+            query_job = self.bq_client.query(query)
+            results = query_job.result()
+            
+            # Convert results to dict
+            for row in results:
+                user_info = {
+                    "user_id": row.user_id or "",
+                    "alias_email": row.alias_email or "",
+                    "first_name": row.first_name or "",
+                    "last_name": row.last_name or ""
+                }
+                logger.info(f"Retrieved user info: {user_info}")
+                return user_info
+            
+            # If no results found, return default dict
+            logger.warning(f"No user info found for user_id: {self.user_id}")
+            return {"user_id": self.user_id, "alias_email": "", "first_name": "", "last_name": ""}
+            
+        except Exception as e:
+            logger.error(f"Error retrieving user info from BigQuery: {str(e)}")
+            # Return default dict on error
+            return {"user_id": self.user_id or "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
+
     def process_message(self, user_message, cited_context=None):
         """
         Process a user message and handle the conversation flow.

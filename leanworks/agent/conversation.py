@@ -221,12 +221,24 @@ class ConversationManager:
                         
                         # Track data sources based on tool type
                         if tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
-                            # For BigQuery tools, add the table name
+                            # For BigQuery tools, add the table name with dynamic dataset
+                            # Note: This assumes bq_client is accessible through data_sources context
+                            # If bq_client is not available, fall back to default
+                            try:
+                                # Try to get dataset_id from the function's bound method
+                                dataset_id = getattr(function_map[tool_name].__self__, 'bq_client', None)
+                                if dataset_id and hasattr(dataset_id, 'dataset_id'):
+                                    dataset_name = dataset_id.dataset_id
+                                else:
+                                    dataset_name = "leanworks"  # fallback
+                            except:
+                                dataset_name = "leanworks"  # fallback
+                                
                             table_mapping = {
-                                "list_projects": "leanworks.leanworks.project_config",
-                                "list_tasks": "leanworks.leanworks.tasks", 
-                                "list_progress_updates": "leanworks.leanworks.updates",
-                                "list_users": "leanworks.leanworks.user_config"
+                                "list_projects": f"leanworks.{dataset_name}.project_config",
+                                "list_tasks": f"leanworks.{dataset_name}.tasks", 
+                                "list_progress_updates": f"leanworks.{dataset_name}.updates",
+                                "list_users": f"leanworks.{dataset_name}.user_config"
                             }
                             data_sources.append(f"BigQuery table: {table_mapping[tool_name]}")
                         
