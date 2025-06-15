@@ -34,12 +34,12 @@ def main():
             model_client,
             bq_client_wrapper,
             user_id="yanfu@leanworks.ai",
-            session_id="chp27t6t",
+            session_id="cdj976r6f",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "summarize email response from sara"
+        user_message = "what is vijay's speed in completing tasks?"
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
         

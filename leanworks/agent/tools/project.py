@@ -416,7 +416,7 @@ class ProjectTool:
                 }
             }
     def list_users(self):
-        query = f"SELECT * EXCEPT(user_id), alias_email as user_id FROM `leanworks.{self.bq_client_wrapper.client_name}.user_config`"
+        query = f"SELECT * FROM `leanworks.{self.bq_client_wrapper.client_name}.user_config`"
         logger.info(f"Executing BQ query in list_users: {query}")
         query_job = self.bq_client_wrapper.bq_client.query(query)
         results = query_job.result()
