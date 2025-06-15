@@ -142,15 +142,42 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             query: The user query
             apply_filters: Whether to apply user filters extracted from the query (default True)
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
+            read_document_ids: Set of document IDs already read to skip duplicates
             
         Returns:
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
         """
         logger.info(f"Postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
         logger.debug("Initial documents", nodes.matches)
-        # Filter results by relevance score
-        filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
-        logger.debug("Score filtered documents", filtered_results)
+        
+        # Get read document IDs for deduplication
+        read_document_ids = kwargs.get("read_document_ids")
+        if read_document_ids is None:
+            logger.warning("No read_document_ids provided for deduplication - creating temporary set")
+            read_document_ids = set()
+        
+        logger.info(f"Starting sync deduplication with {len(read_document_ids)} already read documents")
+        
+        # Filter results by relevance score AND deduplication
+        filtered_results = []
+        skipped_count = 0
+        for match in nodes.matches:
+            if match.score >= SIMILARITY_CUTOFF:
+                if match.id not in read_document_ids:
+                    filtered_results.append(match)
+                    # Add this document ID to the read set
+                    read_document_ids.add(match.id)
+                    logger.debug(f"Added new document ID: {match.id}")
+                else:
+                    skipped_count += 1
+                    logger.info(f"Skipped duplicate document ID: {match.id}")
+        
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} duplicate documents that were already read")
+        
+        logger.info(f"After sync processing: {len(read_document_ids)} total documents in read set")
+            
+        logger.debug("Score filtered and deduplicated documents", filtered_results)
 
         # Apply reranking if enabled and needed (directly on the filtered results)
         rerank_top_k = kwargs.get("rerank_top_k")
@@ -397,15 +424,42 @@ class AsyncChat(Chat):
             nodes: The query results from Pinecone
             query: The user query
             use_reranker: Whether to apply reranking
+            read_document_ids: Set of document IDs already read to skip duplicates
             
         Returns:
             Tuple containing (list of context dicts with text/timestamp/source, list of unique data sources)
         """
         logger.info(f"Async postprocessing {len(nodes.matches) if hasattr(nodes, 'matches') else 0} retrieved nodes")
         logger.debug("Initial documents", nodes.matches)
-        # Filter results by relevance score
-        filtered_results = [match for match in nodes.matches if match.score >= SIMILARITY_CUTOFF]
-        logger.debug("Score filtered documents", filtered_results)
+        
+        # Get read document IDs for deduplication
+        read_document_ids = kwargs.get("read_document_ids")
+        if read_document_ids is None:
+            logger.warning("No read_document_ids provided for deduplication - creating temporary set")
+            read_document_ids = set()
+        
+        logger.info(f"Starting async deduplication with {len(read_document_ids)} already read documents")
+        
+        # Filter results by relevance score AND deduplication
+        filtered_results = []
+        skipped_count = 0
+        for match in nodes.matches:
+            if match.score >= SIMILARITY_CUTOFF:
+                if match.id not in read_document_ids:
+                    filtered_results.append(match)
+                    # Add this document ID to the read set
+                    read_document_ids.add(match.id)
+                    logger.debug(f"Added new document ID: {match.id}")
+                else:
+                    skipped_count += 1
+                    logger.info(f"Skipped duplicate document ID: {match.id}")
+        
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} duplicate documents that were already read")
+        
+        logger.info(f"After async processing: {len(read_document_ids)} total documents in read set")
+        
+        logger.debug("Score filtered and deduplicated documents", filtered_results)
             
         # Apply reranking if enabled and needed (directly on the filtered results)
         rerank_top_k = kwargs.get("rerank_top_k")

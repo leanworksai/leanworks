@@ -67,7 +67,7 @@ class SearchTool:
             }
         }
 
-    async def async_search_knowledge(self, query: str):
+    async def async_search_knowledge(self, query: str, read_document_ids: set = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -111,13 +111,14 @@ class SearchTool:
             )
             logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
             
-            # Use async postprocessing with non-blocking reranking
+            # Use async postprocessing with non-blocking reranking and deduplication
             context, data_sources = await self.chat.async_postprocess_nodes(
                 nodes, 
                 query, 
                 apply_filters=True, 
                 use_reranker=True, 
-                rerank_top_k=5
+                rerank_top_k=5,
+                read_document_ids=read_document_ids
             )
             logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
             logger.info(f"Retrieved data sources: {data_sources}")
@@ -154,13 +155,22 @@ class SearchTool:
             "data_sources": data_sources
         }
         
-    def search_knowledge(self, query: str):
+    def search_knowledge(self, query: str, read_document_ids: set = None):
         """
         Synchronous wrapper for the async search_knowledge method.
         This allows the method to be called from synchronous code.
+        
+        Args:
+            query: The search query
+            read_document_ids: Set of document IDs already read to skip duplicates
         """
         try:
             logger.info(f"Executing search_knowledge with query: {query}")
+            logger.info(f"Received read_document_ids: {read_document_ids}")
+            logger.info(f"read_document_ids is None: {read_document_ids is None}")
+            if read_document_ids is not None:
+                logger.info(f"read_document_ids length: {len(read_document_ids)}")
+                logger.info(f"read_document_ids id: {id(read_document_ids)}")
             # Get or create an event loop
             try:
                 loop = asyncio.get_event_loop()
@@ -170,7 +180,7 @@ class SearchTool:
                 asyncio.set_event_loop(loop)
             
             # Run the async method in the event loop
-            result = loop.run_until_complete(self.async_search_knowledge(query))
+            result = loop.run_until_complete(self.async_search_knowledge(query, read_document_ids))
             
             # Extract the formatted context for backward compatibility
             formatted_context = result["formatted_context"]

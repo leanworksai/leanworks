@@ -47,11 +47,19 @@ class ChatAgent:
         self.session_id = session_id
         self.max_unanswered_num = max_unanswered_num
         
-        # Initialize tool use with BigQuery client
-        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client)
-        
         # Initialize data source tracking
         self.data_sources = []
+        
+        # Initialize document ID tracking for aggressive deduplication
+        self.read_document_ids = set()
+        
+        # Initialize tool use with BigQuery client
+        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids)
+        
+        # Verify that the reference is maintained
+        logger.info(f"ChatAgent read_document_ids id: {id(self.read_document_ids)}")
+        logger.info(f"ToolUse read_document_ids id: {id(self.tool_use.read_document_ids)}")
+        logger.info(f"References are same: {self.read_document_ids is self.tool_use.read_document_ids}")
         
         # Initialize conversation manager
         self.conversation = ConversationManager(
@@ -62,6 +70,8 @@ class ChatAgent:
         )
         if clear_conversation:
             self.conversation.clear_conversation()
+            # Also clear read document IDs when clearing conversation
+            self.read_document_ids.clear()
         
         # Get user info from BigQuery
         user_info = self._get_user_info()
@@ -122,6 +132,14 @@ class ChatAgent:
             # Return default dict on error
             return {"user_id": self.user_id or "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
 
+    def reset_read_documents(self):
+        """
+        Reset the set of read document IDs for a fresh start.
+        Useful when starting a new conversation or topic.
+        """
+        logger.info(f"Resetting read document IDs (previously had {len(self.read_document_ids)} documents)")
+        self.read_document_ids.clear()
+
     def process_message(self, user_message, cited_context=None):
         """
         Process a user message and handle the conversation flow.
@@ -134,6 +152,9 @@ class ChatAgent:
         """
         # Reset data sources for new message
         self.data_sources = []
+        
+        # Log current state of document deduplication
+        logger.info(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
         
         # Add the user message
         if cited_context:
@@ -225,6 +246,7 @@ class ChatAgent:
         self.conversation.save_conversation()
         logger.info(f"Final answer: {response_text}")
         logger.info(f"Data sources used: {unique_sources}")
+        logger.info(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
         
         # Return dictionary with content and data sources
         return {
