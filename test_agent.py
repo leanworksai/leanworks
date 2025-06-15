@@ -34,12 +34,12 @@ def main():
             model_client,
             bq_client_wrapper,
             user_id="yanfu@leanworks.ai",
-            session_id="vfjj3p96g",
+            session_id="cdh2863r6",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "i mean customers we are planning to reach out?"
+        user_message = "how many customers have we reached out to?"
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
         

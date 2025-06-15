@@ -236,7 +236,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             contexts.append({
                 "context": context_text,
                 "timestamp": timestamp,
-                "data_source": data_source
+                "data_source": data_source,
+                "doc_id": match.id
             })
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
@@ -521,7 +522,8 @@ class AsyncChat(Chat):
             contexts.append({
                 "context": context_text,
                 "timestamp": timestamp,
-                "data_source": data_source
+                "data_source": data_source,
+                "doc_id": match.id
             })
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
