@@ -4,7 +4,6 @@ from leanworks.rag.filters import FilterExtractor
 from leanworks.rag.memory import MemoryManager
 from leanworks.rag.reranker import CrossEncoderReranker
 from leanworks.setting import *
-from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.rag.query import QueryRewriter
 import datetime
 import logging
@@ -21,32 +20,27 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
     """
     def __init__(
         self,
-        pinecone_api_key: str,
-        index_host: str,
+        vectordb_client,
         storage_client,
-        embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None
     ):
         """
-        Initialize Chat with Pinecone vector store and memory management.
+        Initialize Chat with vector database client and memory management.
         
         Args:
-            pinecone_api_key: API key for Pinecone
-            index_host: Host URL for the Pinecone index
+            vectordb_client: Initialized PineconeHybridIndex client for hybrid search
             storage_client: Initialized CloudStorage client for memory persistence
-            embedding_model_api_key: API key for the embedding model
             model_client: Initialized OpenAI client for LLM generation
             user_id: ID of the user
             session_id: ID of the current conversation session
         """
-        # Initialize Pinecone
-        pc = Pinecone(api_key=pinecone_api_key)
-        self.index = pc.Index(host=index_host)
+        
+        # Use the provided vector database client
+        self.vectordb_client = vectordb_client
+        
         self.model_client = model_client
-        # Initialize embedding model
-        self.embedding_model = GoogleEmbedding(embedding_model_api_key)
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
         if self.memory_enabled:
@@ -66,18 +60,18 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             
         logger.info("RAG system initialized successfully")
 
-    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None) -> Tuple[List[dict], List[str]]:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = 0.5) -> SimpleNamespace:
         """
-        Retrieve relevant context from Pinecone for one or multiple queries.
+        Retrieve relevant context using hybrid search for one or multiple queries.
         
         Args:
-            query: The user query or list of queries. If a list is provided, time filters are 
-                  extracted from the first query and applied to all retrievals.
+            query: The user query or list of queries. If a list is provided, hybrid search is 
+                  performed for each query and results are combined.
             top_k: Number of context chunks to retrieve (default from settings)
             filters: Dictionary of filters to apply to the query (default None)
             
         Returns:
-            Tuple containing (list of relevant context dicts with context and timestamp, list of unique source links)
+            SimpleNamespace with 'matches' attribute containing hybrid search results
         """
         # Handle single query case by converting to list
         queries = [query] if isinstance(query, str) else query
@@ -85,26 +79,33 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             logger.warning("No queries provided to retrieve_nodes")
             return SimpleNamespace(matches=[])
             
-        logger.info(f"Retrieving nodes for {len(queries)} queries with top_k={top_k}")
+        logger.info(f"Retrieving nodes using hybrid search for {len(queries)} queries with top_k={top_k}")
         
         # Results container
         all_matches = []
         
-        # Query Pinecone for each query
+        # Perform hybrid search for each query
         try:
             for q in queries:
-                query_embedding = self.embedding_model.get_embedding(q)
-                nodes = self.index.query(
-                    vector=query_embedding.tolist(),
+                # Use hybrid search from PineconeHybridIndex
+                hybrid_results = self.vectordb_client.hybrid_search(
+                    query=q,
                     top_k=top_k,
-                    include_metadata=True,
+                    alpha=alpha,
                     filter=filters
                 )
                 
-                # Add matches to combined results
-                if hasattr(nodes, 'matches'):
-                    all_matches.extend(nodes.matches)
-                    logger.info(f"Retrieved {len(nodes.matches)} nodes for query: '{q}'")
+                # Convert hybrid search results to match Pinecone response format
+                for result in hybrid_results:
+                    # Create match object with same structure as Pinecone response
+                    match = SimpleNamespace(
+                        id=result['id'],
+                        score=result['combined_score'],  # Use combined hybrid score
+                        metadata=result['metadata']
+                    )
+                    all_matches.append(match)
+                
+                logger.info(f"Retrieved {len(hybrid_results)} hybrid search results for query: '{q}'")
                 
             # Deduplicate matches by ID
             seen_ids = set()
@@ -114,16 +115,19 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                     seen_ids.add(match.id)
                     unique_matches.append(match)
             
+            # Sort by combined score (highest first) and limit to top_k
+            unique_matches.sort(key=lambda x: x.score, reverse=True)
+            
             # Create a new response object with deduplicated matches
             combined_response = SimpleNamespace(
                 matches=unique_matches[:top_k]  # Limit to top_k after deduplication
             )
             
-            logger.info(f"Combined and deduplicated to {len(combined_response.matches)} nodes")
+            logger.info(f"Combined and deduplicated to {len(combined_response.matches)} hybrid search results")
             return combined_response
             
         except Exception as e:
-            logger.error(f"Error querying Pinecone: {str(e)}")
+            logger.error(f"Error performing hybrid search: {str(e)}")
             # Return an empty result structure with similar interface as Pinecone response
             empty_response = SimpleNamespace(matches=[])
             return empty_response
@@ -224,7 +228,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             timestamp = match.metadata.get("timestamp")
             
             # Extract context text using various fallback methods
-            context_text = json.loads(match.metadata.get("_node_content", "")).get("text", "")
+            context_text = match.metadata.get("chunk_text", "")
             
             # Skip duplicates
             if not context_text or context_text in seen_contexts:
@@ -266,6 +270,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
+            alpha: float = 0.5,
             **kwargs
             ) -> Dict[str, any]:
         """
@@ -304,7 +309,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                 filters = self.extract_time_filters(query, self.model_client)
             else:
                 filters = None
-            nodes = self.retrieve_nodes(all_queries, top_k=top_k, filters=filters)
+            nodes = self.retrieve_nodes(all_queries, top_k=top_k, filters=filters, alpha=alpha)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
@@ -392,20 +397,16 @@ class AsyncChat(Chat):
     """
     def __init__(
         self,
-        pinecone_api_key: str,
-        index_host: str,
+        vectordb_client,
         storage_client,
-        embedding_model_api_key: str,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None
     ):
         """Initialize AsyncChat with the same parameters as Chat."""
         super().__init__(
-            pinecone_api_key=pinecone_api_key,
-            index_host=index_host,
+            vectordb_client=vectordb_client,
             storage_client=storage_client,
-            embedding_model_api_key=embedding_model_api_key,
             model_client=model_client,
             user_id=user_id,
             session_id=session_id
@@ -509,8 +510,8 @@ class AsyncChat(Chat):
             # Get timestamp if available
             timestamp = match.metadata.get("timestamp")
             
-            # Extract context text using the same method as in Chat class
-            context_text = json.loads(match.metadata.get("_node_content", "")).get("text", "")
+            # Extract context text directly from metadata
+            context_text = match.metadata.get("chunk_text", "")
             
             # Skip duplicates
             if not context_text or context_text in seen_contexts:
@@ -537,6 +538,7 @@ class AsyncChat(Chat):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
+            alpha: float = 0.5,
             **kwargs
             ) -> Dict[str, any]:
         """
@@ -624,7 +626,7 @@ class AsyncChat(Chat):
         try:
             nodes = await loop.run_in_executor(
                 None, 
-                lambda: self.retrieve_nodes(all_queries, top_k, filters)
+                lambda: self.retrieve_nodes(all_queries, top_k, filters, alpha)
             )
             
             # Use async postprocessing with non-blocking reranking

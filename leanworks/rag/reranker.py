@@ -43,8 +43,8 @@ class CrossEncoderReranker:
         Returns:
             Query-relevant text from document
         """
-        # Extract base text using existing method
-        text = json.loads(doc.metadata.get("_node_content", "")).get("text", "")
+        # Extract text directly from metadata
+        text = doc.metadata.get("chunk_text", "")
         # If text is short enough, just return it
         if len(text) <= 1000:
             return text

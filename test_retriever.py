@@ -1,6 +1,8 @@
 from leanworks.storage.gcs import CloudStorage
 from leanworks.secret import GCPSecretLoader
 from leanworks.rag.chat import Chat
+from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.embedding import GoogleEmbedding
 from openai import OpenAI
 import logging
 import traceback
@@ -18,24 +20,37 @@ logging.basicConfig(
 def main():
     try:
         # Initialize storage and secret clients
-        storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-        secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
-        embedding_model_api_key = secret_client.get("GEMINI_API_KEY")
+        storage_client = CloudStorage("gcp_credential.json", bucket="sbna")
+        secret_client = GCPSecretLoader("gcp_credential.json", "sbna")
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        
+        # Initialize embedding model
+        embedding_model = GoogleEmbedding(secret_client.get("GEMINI_API_KEY"))
+        
+        # Initialize vector database client
+        vectordb_client = PineconeHybridIndex(
+            pinecone_key=secret_client.get("PINECONE_API_KEY"),
+            embedding_model_client=embedding_model
+        )
+        
+        # Load hybrid indexes
+        vectordb_client.load_hybrid_index(
+            dense_index_name=secret_client.client_name + "-dense",
+            sparse_index_name=secret_client.client_name + "-sparse"
+        )
         
         # Initialize Chat retriever with query rewrite capabilities
         chat_retriever = Chat(
-            pinecone_api_key=secret_client.get("PINECONE_API_KEY"),
-            index_host=secret_client.get("PINECONE_INDEX_HOST"),
+            vectordb_client=vectordb_client,
             storage_client=storage_client,
-            embedding_model_api_key=embedding_model_api_key,
             model_client=model_client,
-            user_id="zhuyanfu0712@gmail.com",
+            user_id="bharathkumar.l@sbnasoftware.com",
             session_id=str(uuid.uuid4())
         )
         
         # Test query rewrite functionality
-        test_query = "have we heard back from Sara in email?"
+        test_query = "find standup updates (accomplishments/ progress/ blockers) for team member {'user_id': 'soundhar.m@sbnasoftware.com', 'alias_email': None, 'first_name': 'Soundhar', 'last_name': 'Manickam', 'job_title': 'Trainee SW Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks. project: {'project_name': 'allcare software', 'description': 'US based homecare application, contains both web app & mobile app development'}. IMPORTANT: document from the search result should match the user id or name."
+
         
         print(f"Testing query rewrite for: '{test_query}'")
         print("=" * 60)
@@ -55,11 +70,14 @@ def main():
         
         # Test 3: Postprocessing with reranking
         print("\n3. Testing Postprocessing with Reranking:")
+        # Initialize read_document_ids set for deduplication
+        read_document_ids = set()
         context, sources = chat_retriever.postprocess_nodes(
             nodes, 
             test_query, 
             use_reranker=True, 
-            rerank_top_k=5
+            rerank_top_k=5,
+            read_document_ids=read_document_ids
         )
         
         print(f"Processed contexts: {len(context)}")

@@ -1,4 +1,6 @@
 from leanworks.rag.chat import Chat, AsyncChat
+from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.storage.gcs import CloudStorage
 from google import genai
 import uuid
@@ -24,10 +26,24 @@ def test_sync_chat():
     # session_id = str(uuid.uuid4())
     session_id = "cwjhh[fp984]"
 
+    # Initialize embedding model
+    embedding_model = GoogleEmbedding(embedding_model_api_key)
+    
+    # Initialize vector database client
+    vectordb_client = PineconeHybridIndex(
+        pinecone_key=secret_client.get("PINECONE_API_KEY"),
+        embedding_client=embedding_model
+    )
+    
+    # Load hybrid indexes
+    vectordb_client.load_hybrid_index(
+        dense_index_name=secret_client.get("DENSE_INDEX_NAME", "dense-index"),
+        sparse_index_name=secret_client.get("SPARSE_INDEX_NAME", "sparse-index")
+    )
+    
     # Initialize RAG
     chat = Chat(
-        pinecone_api_key=secret_client.get("PINECONE_API_KEY"),
-        index_host=secret_client.get("PINECONE_INDEX_HOST"),
+        vectordb_client=vectordb_client,
         storage_client=storage_client,
         embedding_model_api_key=embedding_model_api_key,
         model_client=model_client,
@@ -49,10 +65,24 @@ async def test_async_chat():
     session_id = str(uuid.uuid4())
     # session_id = "deu2tp892fhg"
 
+    # Initialize embedding model
+    embedding_model = GoogleEmbedding(embedding_model_api_key)
+    
+    # Initialize vector database client
+    vectordb_client = PineconeHybridIndex(
+        pinecone_key=secret_client.get("PINECONE_API_KEY"),
+        embedding_client=embedding_model
+    )
+    
+    # Load hybrid indexes
+    vectordb_client.load_hybrid_index(
+        dense_index_name=secret_client.get("DENSE_INDEX_NAME", "dense-index"),
+        sparse_index_name=secret_client.get("SPARSE_INDEX_NAME", "sparse-index")
+    )
+    
     # Initialize AsyncRAG
     async_chat = AsyncChat(
-        pinecone_api_key=secret_client.get("PINECONE_API_KEY"),
-        index_host=secret_client.get("PINECONE_INDEX_HOST"),
+        vectordb_client=vectordb_client,
         storage_client=storage_client,
         embedding_model_api_key=embedding_model_api_key,
         model_client=model_client,
