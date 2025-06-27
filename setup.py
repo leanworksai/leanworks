@@ -5,7 +5,7 @@ setup(
     version="0.2.6",
     packages=find_packages(),
     install_requires=[
-        "pinecone-client==5.0.1",
+        "pinecone==7.2.0",
         "google-cloud-storage==2.19.0",
         "google-cloud-secret-manager==2.22.0",
         "google-auth==2.37.0",
