@@ -2,6 +2,8 @@ import asyncio
 import datetime
 from openai import OpenAI
 from leanworks.rag.chat import AsyncChat
+from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.embedding import GoogleEmbedding
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,16 +29,26 @@ class SearchTool:
     cannot provide sufficient context.
     """
     def __init__(self, storage_client, secret_client):
-        self.storage_client = storage_client
-        self.secret_client = secret_client
-        self.embedding_model_api_key=self.secret_client.get("GEMINI_API_KEY")
-        self.model_client = OpenAI(api_key=self.secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        
+        model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        embedding_model_client = GoogleEmbedding(secret_client.get("GEMINI_API_KEY"))
+        
+        # Initialize vector database client
+        vectordb_client = PineconeHybridIndex(
+            pinecone_key=secret_client.get("PINECONE_API_KEY"),
+            embedding_model_client=embedding_model_client
+        )
+        
+        # Load hybrid indexes
+        vectordb_client.load_hybrid_index(
+            dense_index_name=secret_client.client_name + "-dense",
+            sparse_index_name=secret_client.client_name + "-sparse"
+        )
+        
         self.chat = AsyncChat(
-            pinecone_api_key=self.secret_client.get("PINECONE_API_KEY"),
-            index_host=self.secret_client.get("PINECONE_INDEX_HOST"),
+            vectordb_client=vectordb_client,
             storage_client=storage_client,
-            embedding_model_api_key=self.embedding_model_api_key,
-            model_client=self.model_client
+            model_client=model_client
         )
         
     @property

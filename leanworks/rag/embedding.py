@@ -23,30 +23,26 @@ class GoogleEmbedding:
         logger.info("GoogleEmbedding initialized successfully")
     
     @lru_cache(maxsize=1000)
-    def get_embedding(self, text: str) -> np.ndarray:
+    def get_embedding(self, text: str, task_type: str) -> np.ndarray:
         """
         Generate embedding for input text using Google embedding model with caching.
         
         Args:
             text: The text to generate an embedding for
+            task_type: The task type to use for the embedding, can be "RETRIEVAL_QUERY" or "RETRIEVAL_DOCUMENT"
             
         Returns:
             numpy array containing the embedding vector
         """
         logger.debug(f"Generating embedding for text of length: {len(text)}")
         try:
-            # Add timeout handling for embedding generation
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    self.embedding_model_client.models.embed_content,
-                    model="text-embedding-004",
-                    contents=text,
-                    config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-                )
-                # Wait for result with 30 second timeout
-                result = future.result(timeout=30)
-                return np.array(result.embeddings[0].values)
-        except (concurrent.futures.TimeoutError, Exception) as e:
+            result = self.embedding_model_client.models.embed_content(
+                model="text-embedding-004",
+                contents=text,
+                config=types.EmbedContentConfig(task_type=task_type)
+            )
+            return np.array(result.embeddings[0].values)
+        except Exception as e:
             logger.error(f"Error generating embedding: {str(e)}")
             # Return a zero embedding as fallback
             return np.zeros(768)  # Standard embedding dimension
