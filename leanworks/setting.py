@@ -12,6 +12,16 @@ GENERATION_MODEL = "claude-3-5-haiku-latest"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 
+# Embedding API rate limiting settings
+EMBEDDING_REQUESTS_PER_MINUTE = 90   # Conservative limit for text-embedding-005 (leaves buffer)
+EMBEDDING_BATCH_SIZE = 5             # Conservative batch size to avoid overwhelming API
+EMBEDDING_BATCH_DELAY = 3            # Seconds to wait between batches
+EMBEDDING_MODEL = "text-embedding-005"  # Official supported model (768 dimensions, 2048 tokens)
+
+# Alternative models available:
+# - "gemini-embedding-001" (3072 dimensions, 2048 tokens, single input per request)
+# - "text-multilingual-embedding-002" (768 dimensions, 2048 tokens, multilingual)
+
 GENERATION_MODEL_SYSTEM_PROMPT = '''
 You are a helpful technical project manager who can concisely and accurately answer any project related questions 
 based on the provided context

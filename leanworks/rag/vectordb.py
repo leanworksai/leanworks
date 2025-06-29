@@ -1,5 +1,6 @@
 from pinecone import Pinecone, ServerlessSpec
-from .embedding import GoogleEmbedding
+from leanworks.rag.embedding import GoogleEmbedding
+from leanworks.setting import EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
 import logging
 import time
 import uuid
@@ -8,8 +9,15 @@ from collections import defaultdict
 import re
 import tiktoken
 
+# Constants
+DEFAULT_EMBEDDING_DIMENSION = 768
+DEFAULT_VOCAB_SIZE = 30000
+UPSERT_BATCH_SIZE = 100
+SERVERLESS_SPEC = ServerlessSpec(cloud="gcp", region="us-central1")
+
 class PineconeHybridIndex:
-    def __init__(self, pinecone_key, embedding_model_client, chunk_size=512, chunk_overlap=128):
+    def __init__(self, pinecone_key: str, embedding_model_client: GoogleEmbedding, 
+                 chunk_size: int = 512, chunk_overlap: int = 128):
         self.pc = Pinecone(api_key=pinecone_key)
         self.dense_index = None
         self.sparse_index = None
@@ -17,82 +25,58 @@ class PineconeHybridIndex:
         self.chunk_overlap = chunk_overlap  # tokens
         self.tokenizer = tiktoken.get_encoding("o200k_base")  # GPT-4o tokenizer
         self.embedding_model_client = embedding_model_client
-    def create_hybrid_index(
-            self, 
-            dense_index_name: str,
-            sparse_index_name: str
-            ):
-        """Load both dense and sparse indexes for hybrid search."""
-        
-        # Create dense index
+
+    def create_hybrid_index(self, dense_index_name: str, sparse_index_name: str):
+        """Create both dense and sparse indexes for hybrid search."""
         self._create_dense_index(dense_index_name)
-        
-        # Create sparse index
         self._create_sparse_index(sparse_index_name)
-        
-        # Return the indexes
         return self.dense_index, self.sparse_index
 
-    def load_hybrid_index(
-            self, 
-            dense_index_name: str,
-            sparse_index_name: str
-            ):
+    def load_hybrid_index(self, dense_index_name: str, sparse_index_name: str):
         """Load both dense and sparse indexes for hybrid search."""
-        
-        # Connect to the dense index
         self.dense_index = self.pc.Index(dense_index_name)
-        
-        # Connect to the sparse index
         self.sparse_index = self.pc.Index(sparse_index_name)
-        
-        # Return the indexes
         return self.dense_index, self.sparse_index
     
     def _create_dense_index(self, index_name: str):
         """Create and connect to dense index."""
-        try:
-            self.pc.delete_index(index_name)
-            logging.info(f"Dense index {index_name} deleted.")
-        except Exception:
-            logging.info(f"Dense index {index_name} doesn't exist.")
+        self._delete_index_if_exists(index_name)
         
-        # Create new dense index
         self.pc.create_index(
             name=index_name,
-            dimension=768,
+            dimension=DEFAULT_EMBEDDING_DIMENSION,
             metric="cosine",
             vector_type="dense",
-            spec=ServerlessSpec(cloud="gcp", region="us-central1"),
+            spec=SERVERLESS_SPEC,
         )
         logging.info(f"Dense index {index_name} created.")
         
-        # Connect to the dense index
         self.dense_index = self.pc.Index(index_name)
     
     def _create_sparse_index(self, index_name: str):
         """Create and connect to sparse index."""
-        try:
-            self.pc.delete_index(index_name)
-            logging.info(f"Sparse index {index_name} deleted.")
-        except Exception:
-            logging.info(f"Sparse index {index_name} doesn't exist.")
+        self._delete_index_if_exists(index_name)
         
-        # Create new sparse index (dimension not specified for sparse indexes)
         self.pc.create_index(
             name=index_name,
             metric="dotproduct",
             vector_type="sparse",
-            spec=ServerlessSpec(cloud="gcp", region="us-central1"),
+            spec=SERVERLESS_SPEC,
         )
         logging.info(f"Sparse index {index_name} created.")
         
-        # Connect to the sparse index
         self.sparse_index = self.pc.Index(index_name)
+    
+    def _delete_index_if_exists(self, index_name: str):
+        """Delete index if it exists."""
+        try:
+            self.pc.delete_index(index_name)
+            logging.info(f"Index {index_name} deleted.")
+        except Exception:
+            logging.info(f"Index {index_name} doesn't exist.")
     
     def _chunk_text(self, text: str) -> List[str]:
         """Split text into chunks with overlap based on token count."""
-        # Tokenize the text
         tokens = self.tokenizer.encode(text)
         
         if len(tokens) <= self.chunk_size:
@@ -102,11 +86,8 @@ class PineconeHybridIndex:
         start = 0
         
         while start < len(tokens):
-            end = start + self.chunk_size
-            if end > len(tokens):
-                end = len(tokens)
+            end = min(start + self.chunk_size, len(tokens))
             
-            # Extract token chunk and decode back to text
             chunk_tokens = tokens[start:end]
             chunk_text = self.tokenizer.decode(chunk_tokens)
             chunks.append(chunk_text)
@@ -118,9 +99,8 @@ class PineconeHybridIndex:
         
         return chunks
     
-    def _get_sparse_embedding(self, text: str, vocab_size: int = 30000) -> Dict[str, Any]:
+    def _get_sparse_embedding(self, text: str, vocab_size: int = DEFAULT_VOCAB_SIZE) -> Dict[str, Any]:
         """Generate enhanced sparse embedding with proper handling of user names and emails."""
-        # Enhanced tokenization that preserves important patterns
         tokens = self._enhanced_tokenize(text.lower())
         
         # Count term frequencies
@@ -134,72 +114,56 @@ class PineconeHybridIndex:
         total_tokens = len(tokens)
         
         for term, count in term_counts.items():
-            # Use hash to create consistent index for each term
             index = hash(term) % vocab_size
             if index not in indices:  # Avoid duplicate indices
                 indices.append(index)
-                
-                # Enhanced weighting based on term importance
                 weight = self._calculate_term_weight(term, count, total_tokens)
                 values.append(weight)
         
-        return {
-            'indices': indices,
-            'values': values
-        }
+        return {'indices': indices, 'values': values}
     
     def _enhanced_tokenize(self, text: str) -> List[str]:
         """Enhanced tokenization that preserves important patterns like emails and user IDs."""
         tokens = []
-        
-        # First, extract and preserve important patterns
         important_patterns = []
         
-        # Email addresses (preserve as single tokens)
-        email_pattern = r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
-        emails = re.findall(email_pattern, text)
-        for email in emails:
-            important_patterns.append(email)
-            # Also add email parts for partial matching
-            local_part = email.split('@')[0]
-            domain_part = email.split('@')[1]
-            important_patterns.extend([local_part, domain_part])
-            # Extract name parts from email local part
-            name_parts = re.split(r'[._-]', local_part)
-            important_patterns.extend([part for part in name_parts if len(part) > 1])
+        # Define patterns to preserve
+        patterns = {
+            'email': r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
+            'mention': r'@[a-zA-Z0-9._-]+',
+            'structured_id': r'\b[a-zA-Z0-9]+[._-][a-zA-Z0-9._-]+\b',
+            'name': r'\b[A-Z][a-z]+\b'
+        }
         
-        # User mentions (@username)
-        mention_pattern = r'@[a-zA-Z0-9._-]+'
-        mentions = re.findall(mention_pattern, text)
-        for mention in mentions:
-            important_patterns.append(mention)
-            # Also add without @ symbol
-            important_patterns.append(mention[1:])
+        # Extract important patterns
+        for pattern_type, pattern in patterns.items():
+            matches = re.findall(pattern, text)
+            
+            for match in matches:
+                important_patterns.append(match)
+                
+                if pattern_type == 'email':
+                    # Add email parts for partial matching
+                    parts = match.split('@')
+                    important_patterns.extend(parts)
+                    # Extract name parts from email local part
+                    name_parts = re.split(r'[._-]', parts[0])
+                    important_patterns.extend([part for part in name_parts if len(part) > 1])
+                elif pattern_type == 'mention':
+                    # Add without @ symbol
+                    important_patterns.append(match[1:])
+                elif pattern_type == 'structured_id':
+                    # Add individual parts
+                    parts = re.split(r'[._-]', match)
+                    important_patterns.extend([part for part in parts if len(part) > 1])
         
-        # User IDs and structured identifiers (word.word, word_word, word-word)
-        structured_id_pattern = r'\b[a-zA-Z0-9]+[._-][a-zA-Z0-9._-]+\b'
-        structured_ids = re.findall(structured_id_pattern, text)
-        for sid in structured_ids:
-            important_patterns.append(sid)
-            # Also add individual parts
-            parts = re.split(r'[._-]', sid)
-            important_patterns.extend([part for part in parts if len(part) > 1])
-        
-        # Names with capital letters (likely proper nouns/names)
-        name_pattern = r'\b[A-Z][a-z]+\b'
-        names = re.findall(name_pattern, text)
-        important_patterns.extend(names)
-        
-        # Add all important patterns to tokens
         tokens.extend(important_patterns)
         
         # Regular tokenization for remaining text
-        # Remove already processed patterns to avoid duplication
         remaining_text = text
         for pattern in important_patterns:
             remaining_text = remaining_text.replace(pattern.lower(), ' ')
         
-        # Extract regular words
         regular_words = re.findall(r'\b\w+\b', remaining_text)
         tokens.extend([word for word in regular_words if len(word) > 1])
         
@@ -209,141 +173,156 @@ class PineconeHybridIndex:
         """Calculate enhanced weight for terms based on their importance."""
         base_tf = count / total_tokens if total_tokens > 0 else 0
         
-        # Identity term boosting
-        identity_boost = 1.0
-        
-        # Email addresses get highest boost
+        # Identity term boosting based on patterns
         if '@' in term and '.' in term:
-            identity_boost = 5.0
-        # User mentions
+            identity_boost = 5.0  # Email addresses
         elif term.startswith('@'):
-            identity_boost = 4.0
-        # Structured identifiers (likely user IDs)
+            identity_boost = 4.0  # User mentions
         elif any(char in term for char in ['.', '_', '-']) and len(term) > 3:
-            identity_boost = 3.0
-        # Capitalized words (likely names)
-        elif term[0].isupper() if term else False:
-            identity_boost = 2.5
-        # Common name patterns
-        elif any(name_indicator in term.lower() for name_indicator in ['name', 'user', 'id', 'email']):
-            identity_boost = 2.0
+            identity_boost = 3.0  # Structured identifiers
+        elif term and term[0].isupper():
+            identity_boost = 2.5  # Capitalized words (likely names)
+        elif any(indicator in term.lower() for indicator in ['name', 'user', 'id', 'email']):
+            identity_boost = 2.0  # Common name patterns
+        else:
+            identity_boost = 1.0
         
-        # Apply length-based adjustment (longer terms are typically more specific)
+        # Length-based adjustment (longer terms are typically more specific)
         length_boost = min(2.0, 1.0 + (len(term) - 3) * 0.1) if len(term) > 3 else 1.0
         
-        # Final weight calculation
+        # Final weight calculation with cap
         final_weight = base_tf * identity_boost * length_boost
-        
-        # Cap the maximum weight to prevent any single term from dominating
         return min(final_weight, 1.0)
     
-    def upsert_documents_hybrid(self, documents, retries=3, delay=2):
-        """Upsert documents to both dense and sparse indexes."""
+    def upsert_documents_hybrid(self, documents, retries: int = 3, delay: int = 2):
+        """Upsert documents to both dense and sparse indexes with improved batching."""
         documents = [doc for doc in documents if doc is not None]
         
         if not documents:
             logging.warning("No documents to upsert")
             return None
         
-        attempt = 0
-        while attempt < retries:
+        for attempt in range(retries):
             try:
-                dense_vectors = []
-                sparse_vectors = []
+                # Prepare chunks and metadata
+                all_chunks, chunk_metadata_list = self._prepare_chunks(documents)
                 
-                for doc in documents:
-                    # Get document content
-                    if hasattr(doc, 'page_content'):
-                        content = doc.page_content
-                        metadata = doc.metadata if hasattr(doc, 'metadata') else {}
-                    else:
-                        content = str(doc)
-                        metadata = {}
-                    document_id = metadata.get('id', str(uuid.uuid4()))
-                    # Split document into chunks
-                    chunks = self._chunk_text(content)
-                    
-                    for i, chunk in enumerate(chunks):
-                        # Create unique ID for this chunk (same for both indexes)
-                        chunk_id = f"{document_id}_chunk_{i}"
-                        
-                        # Prepare metadata for this chunk
-                        chunk_metadata = metadata.copy()
-                        chunk_metadata.update({
-                            'chunk_number': i,
-                            'chunk_text': chunk,
-                            'document_id': document_id
-                        })
-                        
-                        # Generate dense embedding
-                        dense_embedding = self.embedding_model_client.get_embedding(chunk, task_type="RETRIEVAL_DOCUMENT")
-                        # Convert numpy array to list for Pinecone serialization
-                        if hasattr(dense_embedding, 'tolist'):
-                            dense_embedding = dense_embedding.tolist()
-                        dense_vectors.append({
-                            'id': chunk_id,
-                            'values': dense_embedding,
-                            'metadata': chunk_metadata
-                        })
-                        
-                        # Generate sparse embedding
-                        sparse_embedding = self._get_sparse_embedding(chunk)
-                        sparse_vectors.append({
-                            'id': chunk_id,
-                            'values': sparse_embedding['values'],
-                            'sparse_values': {
-                                'indices': sparse_embedding['indices'],
-                                'values': sparse_embedding['values']
-                            },
-                            'metadata': chunk_metadata
-                        })
+                # Generate embeddings and create vectors
+                dense_vectors, sparse_vectors = self._create_vectors(all_chunks, chunk_metadata_list)
                 
-                # Upsert to dense index
-                self._upsert_to_index(self.dense_index, dense_vectors, "dense")
-                
-                # Upsert to sparse index
-                self._upsert_to_sparse_index(self.sparse_index, sparse_vectors, "sparse")
+                # Upsert to both indexes
+                self._upsert_vectors(self.dense_index, dense_vectors, "dense")
+                self._upsert_vectors(self.sparse_index, sparse_vectors, "sparse", is_sparse=True)
                 
                 logging.info(f"Successfully upserted {len(dense_vectors)} document chunks to both indexes")
                 return self.dense_index, self.sparse_index
                 
             except Exception as e:
-                attempt += 1
-                if attempt < retries:
-                    logging.warning(f"Attempt {attempt} failed, retrying in {delay} seconds...")
+                if attempt < retries - 1:
+                    logging.warning(f"Attempt {attempt + 1} failed, retrying in {delay} seconds...")
                     logging.error(e)
                     time.sleep(delay)
                 else:
                     logging.error("Max retries reached, operation failed.")
                     raise e
     
-    def _upsert_to_index(self, index, vectors, index_type):
-        """Upsert vectors to a specific index."""
-        batch_size = 100
-        total_vectors = len(vectors)
+    def _prepare_chunks(self, documents) -> tuple[List[str], List[Dict]]:
+        """Prepare chunks and metadata from documents."""
+        all_chunks = []
+        chunk_metadata_list = []
         
-        for i in range(0, total_vectors, batch_size):
-            batch = vectors[i:i + batch_size]
-            index.upsert(vectors=batch)
-            logging.info(f"Upserted {index_type} batch {i//batch_size + 1}/{(total_vectors + batch_size - 1)//batch_size}")
-    
-    def _upsert_to_sparse_index(self, index, vectors, index_type):
-        """Upsert sparse vectors to sparse index."""
-        batch_size = 100
-        total_vectors = len(vectors)
-        
-        for i in range(0, total_vectors, batch_size):
-            batch = []
-            for vector in vectors[i:i + batch_size]:
-                sparse_vector = {
-                    'id': vector['id'],
-                    'sparse_values': vector['sparse_values'],
-                    'metadata': vector['metadata']
-                }
-                batch.append(sparse_vector)
+        for doc in documents:
+            # Get document content and metadata
+            if hasattr(doc, 'page_content'):
+                content = doc.page_content
+                metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+            else:
+                content = str(doc)
+                metadata = {}
             
-            index.upsert(vectors=batch)
-            logging.info(f"Upserted {index_type} batch {i//batch_size + 1}/{(total_vectors + batch_size - 1)//batch_size}")
+            document_id = metadata.get('id', str(uuid.uuid4()))
+            chunks = self._chunk_text(content)
+            
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{document_id}_chunk_{i}"
+                chunk_metadata = metadata.copy()
+                chunk_metadata.update({
+                    'chunk_number': i,
+                    'chunk_text': chunk,
+                    'document_id': document_id,
+                    'chunk_id': chunk_id
+                })
+                
+                all_chunks.append(chunk)
+                chunk_metadata_list.append(chunk_metadata)
+        
+        logging.info(f"Processing {len(all_chunks)} chunks for embedding generation")
+        return all_chunks, chunk_metadata_list
+    
+    def _create_vectors(self, all_chunks: List[str], chunk_metadata_list: List[Dict]) -> tuple[List[Dict], List[Dict]]:
+        """Create dense and sparse vectors from chunks."""
+        logging.info("Generating dense embeddings for all chunks...")
+        dense_embeddings = self.embedding_model_client.get_embeddings_batch(
+            all_chunks, 
+            task_type="RETRIEVAL_DOCUMENT"
+        )
+        
+        dense_vectors = []
+        sparse_vectors = []
+        
+        for chunk, chunk_metadata, dense_embedding in zip(all_chunks, chunk_metadata_list, dense_embeddings):
+            chunk_id = chunk_metadata['chunk_id']
+            final_metadata = {k: v for k, v in chunk_metadata.items() if k != 'chunk_id'}
+            
+            # Convert numpy array to list for Pinecone serialization
+            if hasattr(dense_embedding, 'tolist'):
+                dense_embedding = dense_embedding.tolist()
+            
+            # Create dense vector
+            dense_vectors.append({
+                'id': chunk_id,
+                'values': dense_embedding,
+                'metadata': final_metadata
+            })
+            
+            # Create sparse vector
+            sparse_embedding = self._get_sparse_embedding(chunk)
+            sparse_vectors.append({
+                'id': chunk_id,
+                'values': sparse_embedding['values'],
+                'sparse_values': {
+                    'indices': sparse_embedding['indices'],
+                    'values': sparse_embedding['values']
+                },
+                'metadata': final_metadata
+            })
+        
+        return dense_vectors, sparse_vectors
+    
+    def _upsert_vectors(self, index, vectors: List[Dict], index_type: str, is_sparse: bool = False):
+        """Upsert vectors to a specific index."""
+        total_vectors = len(vectors)
+        
+        for i in range(0, total_vectors, UPSERT_BATCH_SIZE):
+            batch = vectors[i:i + UPSERT_BATCH_SIZE]
+            
+            if is_sparse:
+                # Transform sparse vectors for upsert
+                sparse_batch = []
+                for vector in batch:
+                    sparse_vector = {
+                        'id': vector['id'],
+                        'sparse_values': vector['sparse_values'],
+                        'metadata': vector['metadata']
+                    }
+                    sparse_batch.append(sparse_vector)
+                index.upsert(vectors=sparse_batch)
+            else:
+                index.upsert(vectors=batch)
+            
+            batch_num = i // UPSERT_BATCH_SIZE + 1
+            total_batches = (total_vectors + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE
+            logging.info(f"Upserted {index_type} batch {batch_num}/{total_batches}")
     
     def hybrid_search(
         self, 
@@ -368,9 +347,9 @@ class PineconeHybridIndex:
         """
         # Get embeddings for query
         dense_query_embedding = self.embedding_model_client.get_embedding(query, task_type="RETRIEVAL_QUERY")
-        # Convert numpy array to list for Pinecone serialization
         if hasattr(dense_query_embedding, 'tolist'):
             dense_query_embedding = dense_query_embedding.tolist()
+        
         sparse_query_embedding = self._get_sparse_embedding(query)
         
         # Prepare query parameters
@@ -380,30 +359,15 @@ class PineconeHybridIndex:
             'namespace': namespace
         }
         
-        # Add filter if provided
         if filter is not None:
             query_params['filter'] = filter
         
-        # Search dense index
-        dense_results = self.dense_index.query(
-            vector=dense_query_embedding,
-            **query_params
-        )
+        # Search both indexes
+        dense_results = self.dense_index.query(vector=dense_query_embedding, **query_params)
+        sparse_results = self.sparse_index.query(sparse_vector=sparse_query_embedding, **query_params)
         
-        # Search sparse index
-        sparse_results = self.sparse_index.query(
-            sparse_vector=sparse_query_embedding,
-            **query_params
-        )
-        
-        # Merge and deduplicate results
-        merged_results = self._merge_results(
-            dense_results['matches'], 
-            sparse_results['matches'], 
-            alpha=alpha
-        )
-        
-        # Return top results
+        # Merge and return top results
+        merged_results = self._merge_results(dense_results['matches'], sparse_results['matches'], alpha)
         return merged_results[:top_k]
     
     def _merge_results(
@@ -412,17 +376,7 @@ class PineconeHybridIndex:
         sparse_results: List[Dict], 
         alpha: float = 0.5
     ) -> List[Dict[str, Any]]:
-        """
-        Merge and deduplicate results from dense and sparse searches.
-        
-        Args:
-            dense_results: Results from dense search
-            sparse_results: Results from sparse search  
-            alpha: Weight for combining scores
-            
-        Returns:
-            Merged and sorted results list
-        """
+        """Merge and deduplicate results from dense and sparse searches."""
         # Normalize scores to 0-1 range
         dense_scores = [match['score'] for match in dense_results]
         sparse_scores = [match['score'] for match in sparse_results]
@@ -432,12 +386,11 @@ class PineconeHybridIndex:
         sparse_max = max(sparse_scores) if sparse_scores else 1.0
         sparse_min = min(sparse_scores) if sparse_scores else 0.0
         
-        # Create combined results dictionary
         combined_results = {}
         
-        # Add dense results
+        # Process dense results
         for match in dense_results:
-            normalized_score = (match['score'] - dense_min) / (dense_max - dense_min) if dense_max != dense_min else 0.5
+            normalized_score = self._normalize_score(match['score'], dense_min, dense_max)
             combined_results[match['id']] = {
                 'id': match['id'],
                 'metadata': match['metadata'],
@@ -446,9 +399,9 @@ class PineconeHybridIndex:
                 'combined_score': alpha * normalized_score
             }
         
-        # Add sparse results and combine scores
+        # Process sparse results and combine scores
         for match in sparse_results:
-            normalized_score = (match['score'] - sparse_min) / (sparse_max - sparse_min) if sparse_max != sparse_min else 0.5
+            normalized_score = self._normalize_score(match['score'], sparse_min, sparse_max)
             
             if match['id'] in combined_results:
                 # Update existing result
@@ -467,11 +420,11 @@ class PineconeHybridIndex:
                     'combined_score': (1 - alpha) * normalized_score
                 }
         
-        # Sort by combined score and return as list
-        sorted_results = sorted(
-            combined_results.values(), 
-            key=lambda x: x['combined_score'], 
-            reverse=True
-        )
-        
-        return sorted_results
+        # Sort by combined score and return
+        return sorted(combined_results.values(), key=lambda x: x['combined_score'], reverse=True)
+    
+    def _normalize_score(self, score: float, min_score: float, max_score: float) -> float:
+        """Normalize a score to 0-1 range."""
+        if max_score == min_score:
+            return 0.5
+        return (score - min_score) / (max_score - min_score)
