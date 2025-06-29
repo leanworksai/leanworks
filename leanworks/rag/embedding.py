@@ -9,14 +9,8 @@ import time
 import random
 import tiktoken
 from typing import List, Optional
+from leanworks.setting import EMBEDDING_REQUESTS_PER_MINUTE, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
 
-try:
-    from ..setting import EMBEDDING_REQUESTS_PER_MINUTE, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
-except ImportError:
-    # Fallback values if settings are not available
-    EMBEDDING_REQUESTS_PER_MINUTE = 90
-    EMBEDDING_BATCH_SIZE = 5
-    EMBEDDING_MODEL = "text-embedding-005"
 
 # Set up logging
 logger = logging.getLogger(__name__)

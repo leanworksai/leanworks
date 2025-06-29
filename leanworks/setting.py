@@ -13,9 +13,9 @@ RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 
 # Embedding API rate limiting settings
-EMBEDDING_REQUESTS_PER_MINUTE = 90   # Conservative limit for text-embedding-005 (leaves buffer)
-EMBEDDING_BATCH_SIZE = 5             # Conservative batch size to avoid overwhelming API
-EMBEDDING_BATCH_DELAY = 3            # Seconds to wait between batches
+EMBEDDING_REQUESTS_PER_MINUTE = 150   # At the API limit
+EMBEDDING_BATCH_SIZE = 39             # Maximum possible with 512-token texts
+EMBEDDING_BATCH_DELAY = 0.5  
 EMBEDDING_MODEL = "text-embedding-004"  # Official supported model (768 dimensions, 2048 tokens)
 
 # Alternative models available:
