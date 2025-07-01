@@ -67,6 +67,16 @@ def main():
         print("\n2. Testing Direct Node Retrieval with Multiple Queries:")
         nodes = chat_retriever.retrieve_nodes(rewrites[:3], top_k=10)
         print(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes")
+        if hasattr(nodes, 'matches') and nodes.matches:
+            for i, match in enumerate(nodes.matches):
+                metadata = getattr(match, 'metadata', {})
+                if isinstance(metadata, dict):
+                    chunk_text = metadata.get('chunk_text', 'No chunk text available')
+                else:
+                    chunk_text = getattr(metadata, 'chunk_text', 'No chunk text available')
+                print(f"Node {i+1}: {chunk_text}")
+        else:
+            print("No nodes retrieved")
         
         # Test 3: Postprocessing with reranking
         print("\n3. Testing Postprocessing with Reranking:")

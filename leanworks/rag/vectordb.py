@@ -1,6 +1,6 @@
 from pinecone import Pinecone, ServerlessSpec
 from leanworks.rag.embedding import GoogleEmbedding
-from leanworks.setting import EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
+from leanworks.setting import ALPHA
 import logging
 import time
 import uuid
@@ -328,7 +328,7 @@ class PineconeHybridIndex:
         self, 
         query: str, 
         top_k: int = 10, 
-        alpha: float = 0.7,
+        alpha: float = ALPHA,
         namespace: str = "",
         filter: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
@@ -374,7 +374,7 @@ class PineconeHybridIndex:
         self, 
         dense_results: List[Dict], 
         sparse_results: List[Dict], 
-        alpha: float = 0.5
+        alpha: float = ALPHA
     ) -> List[Dict[str, Any]]:
         """Merge and deduplicate results from dense and sparse searches."""
         # Normalize scores to 0-1 range

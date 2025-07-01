@@ -1,14 +1,12 @@
 import numpy as np
 import logging
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from google.genai import types
 from google import genai
 import time
 import random
 import tiktoken
-from typing import List, Optional
+from typing import List
 from leanworks.setting import EMBEDDING_REQUESTS_PER_MINUTE, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
 
 

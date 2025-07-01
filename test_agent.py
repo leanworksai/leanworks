@@ -34,12 +34,12 @@ def main():
             model_client,
             bq_client_wrapper,
             user_id="bharathkumar.l@sbnasoftware.com",
-            session_id="dnwouu",
+            session_id="cdhpf86f",
             clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "find standup updates (accomplishments/ progress/ blockers) for team member {'user_id': 'soundhar.m@sbnasoftware.com', 'alias_email': None, 'first_name': 'Soundhar', 'last_name': 'Manickam', 'job_title': 'Trainee SW Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks. project: {'project_name': 'allcare software', 'description': 'US based homecare application, contains both web app & mobile app development'}. IMPORTANT: document from the search result should match the user id or name."
+        user_message = "find most recent gitlab commits for team member {'user_id': 'soundhar.m@sbnasoftware.com', 'alias_email': None, 'first_name': 'Soundhar', 'last_name': 'Manickam', 'job_title': 'Trainee SW Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks. project: {'project_name': 'allcare software', 'description': 'US based homecare application, contains both web app & mobile app development'}. The user id for gitlab commit might not be exact match with the user id in the project. If that's the case, you need to find the most likely user id from the commit message."
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
         
