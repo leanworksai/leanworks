@@ -20,8 +20,8 @@ logging.basicConfig(
 def main():
     try:
         # Initialize storage and secret clients
-        storage_client = CloudStorage("gcp_credential.json", bucket="sbna")
-        secret_client = GCPSecretLoader("gcp_credential.json", "sbna")
+        storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
+        secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
         
         # Initialize embedding model
@@ -44,12 +44,12 @@ def main():
             vectordb_client=vectordb_client,
             storage_client=storage_client,
             model_client=model_client,
-            user_id="bharathkumar.l@sbnasoftware.com",
+            user_id="yanfu@leanworks.ai",
             session_id=str(uuid.uuid4())
         )
         
         # Test query rewrite functionality
-        test_query = "find standup updates (accomplishments/ progress/ blockers) for team member {'user_id': 'soundhar.m@sbnasoftware.com', 'alias_email': None, 'first_name': 'Soundhar', 'last_name': 'Manickam', 'job_title': 'Trainee SW Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks. project: {'project_name': 'allcare software', 'description': 'US based homecare application, contains both web app & mobile app development'}. IMPORTANT: document from the search result should match the user id or name."
+        test_query = "find github commits from yanfu from last 7 days"
 
         
         print(f"Testing query rewrite for: '{test_query}'")
@@ -65,7 +65,12 @@ def main():
         
         # Test 2: Direct node retrieval with multiple queries
         print("\n2. Testing Direct Node Retrieval with Multiple Queries:")
-        nodes = chat_retriever.retrieve_nodes(rewrites[:3], top_k=10)
+        
+        # Extract time filters from the test query
+        filters = chat_retriever.extract_time_filters(test_query, model_client)
+        print(f"Extracted filters: {filters}")
+        
+        nodes = chat_retriever.retrieve_nodes(rewrites[:3], top_k=10, filters=filters)
         print(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes")
         if hasattr(nodes, 'matches') and nodes.matches:
             for i, match in enumerate(nodes.matches):

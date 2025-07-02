@@ -16,7 +16,7 @@ logging.basicConfig(
 def main():
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-        client_name = get_client_name(bq_client, "bharathkumar.l@sbnasoftware.com")
+        client_name = get_client_name(bq_client, "yanfu@leanworks.ai")
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
@@ -33,13 +33,13 @@ def main():
             secret_client,
             model_client,
             bq_client_wrapper,
-            user_id="bharathkumar.l@sbnasoftware.com",
-            session_id="cdhpf86f",
-            clear_conversation=False  # Change to True to reset conversation each time
+            user_id="yanfu@leanworks.ai",
+            session_id="cdhw7t6fr",
+            clear_conversation=True  # Change to True to reset conversation each time
         )
         
         # Process a user message
-        user_message = "find most recent gitlab commits for team member {'user_id': 'soundhar.m@sbnasoftware.com', 'alias_email': None, 'first_name': 'Soundhar', 'last_name': 'Manickam', 'job_title': 'Trainee SW Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks. project: {'project_name': 'allcare software', 'description': 'US based homecare application, contains both web app & mobile app development'}. The user id for gitlab commit might not be exact match with the user id in the project. If that's the case, you need to find the most likely user id from the commit message."
+        user_message = "show yanfu's recent project progress"
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
         

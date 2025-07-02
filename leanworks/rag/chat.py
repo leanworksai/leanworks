@@ -122,8 +122,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             combined_response = SimpleNamespace(
                 matches=unique_matches[:top_k]  # Limit to top_k after deduplication
             )
-            
             logger.info(f"Combined and deduplicated to {len(combined_response.matches)} hybrid search results")
+            print(f"combined_response: {combined_response}")
             return combined_response
             
         except Exception as e:
@@ -166,15 +166,14 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         filtered_results = []
         skipped_count = 0
         for match in nodes.matches:
-            if match.score >= SIMILARITY_CUTOFF:
-                if match.id not in read_document_ids:
-                    filtered_results.append(match)
-                    # Add this document ID to the read set
-                    read_document_ids.add(match.id)
-                    logger.debug(f"Added new document ID: {match.id}")
-                else:
-                    skipped_count += 1
-                    logger.info(f"Skipped duplicate document ID: {match.id}")
+            if match.id not in read_document_ids:
+                filtered_results.append(match)
+                # Add this document ID to the read set
+                read_document_ids.add(match.id)
+                logger.debug(f"Added new document ID: {match.id}")
+            else:
+                skipped_count += 1
+                logger.info(f"Skipped duplicate document ID: {match.id}")
         
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} duplicate documents that were already read")
@@ -446,15 +445,14 @@ class AsyncChat(Chat):
         filtered_results = []
         skipped_count = 0
         for match in nodes.matches:
-            if match.score >= SIMILARITY_CUTOFF:
-                if match.id not in read_document_ids:
-                    filtered_results.append(match)
-                    # Add this document ID to the read set
-                    read_document_ids.add(match.id)
-                    logger.debug(f"Added new document ID: {match.id}")
-                else:
-                    skipped_count += 1
-                    logger.info(f"Skipped duplicate document ID: {match.id}")
+            if match.id not in read_document_ids:
+                filtered_results.append(match)
+                # Add this document ID to the read set
+                read_document_ids.add(match.id)
+                logger.debug(f"Added new document ID: {match.id}")
+            else:
+                skipped_count += 1
+                logger.info(f"Skipped duplicate document ID: {match.id}")
         
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} duplicate documents that were already read")

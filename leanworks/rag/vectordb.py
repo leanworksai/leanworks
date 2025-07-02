@@ -26,54 +26,11 @@ class PineconeHybridIndex:
         self.tokenizer = tiktoken.get_encoding("o200k_base")  # GPT-4o tokenizer
         self.embedding_model_client = embedding_model_client
 
-    def create_hybrid_index(self, dense_index_name: str, sparse_index_name: str):
-        """Create both dense and sparse indexes for hybrid search."""
-        self._create_dense_index(dense_index_name)
-        self._create_sparse_index(sparse_index_name)
-        return self.dense_index, self.sparse_index
-
     def load_hybrid_index(self, dense_index_name: str, sparse_index_name: str):
         """Load both dense and sparse indexes for hybrid search."""
         self.dense_index = self.pc.Index(dense_index_name)
         self.sparse_index = self.pc.Index(sparse_index_name)
         return self.dense_index, self.sparse_index
-    
-    def _create_dense_index(self, index_name: str):
-        """Create and connect to dense index."""
-        self._delete_index_if_exists(index_name)
-        
-        self.pc.create_index(
-            name=index_name,
-            dimension=DEFAULT_EMBEDDING_DIMENSION,
-            metric="cosine",
-            vector_type="dense",
-            spec=SERVERLESS_SPEC,
-        )
-        logging.info(f"Dense index {index_name} created.")
-        
-        self.dense_index = self.pc.Index(index_name)
-    
-    def _create_sparse_index(self, index_name: str):
-        """Create and connect to sparse index."""
-        self._delete_index_if_exists(index_name)
-        
-        self.pc.create_index(
-            name=index_name,
-            metric="dotproduct",
-            vector_type="sparse",
-            spec=SERVERLESS_SPEC,
-        )
-        logging.info(f"Sparse index {index_name} created.")
-        
-        self.sparse_index = self.pc.Index(index_name)
-    
-    def _delete_index_if_exists(self, index_name: str):
-        """Delete index if it exists."""
-        try:
-            self.pc.delete_index(index_name)
-            logging.info(f"Index {index_name} deleted.")
-        except Exception:
-            logging.info(f"Index {index_name} doesn't exist.")
     
     def _chunk_text(self, text: str) -> List[str]:
         """Split text into chunks with overlap based on token count."""
@@ -170,61 +127,15 @@ class PineconeHybridIndex:
         return tokens
     
     def _calculate_term_weight(self, term: str, count: int, total_tokens: int) -> float:
-        """Calculate enhanced weight for terms based on their importance."""
+        """Calculate weight for terms based on term frequency and length."""
         base_tf = count / total_tokens if total_tokens > 0 else 0
-        
-        # Identity term boosting based on patterns
-        if '@' in term and '.' in term:
-            identity_boost = 5.0  # Email addresses
-        elif term.startswith('@'):
-            identity_boost = 4.0  # User mentions
-        elif any(char in term for char in ['.', '_', '-']) and len(term) > 3:
-            identity_boost = 3.0  # Structured identifiers
-        elif term and term[0].isupper():
-            identity_boost = 2.5  # Capitalized words (likely names)
-        elif any(indicator in term.lower() for indicator in ['name', 'user', 'id', 'email']):
-            identity_boost = 2.0  # Common name patterns
-        else:
-            identity_boost = 1.0
         
         # Length-based adjustment (longer terms are typically more specific)
         length_boost = min(2.0, 1.0 + (len(term) - 3) * 0.1) if len(term) > 3 else 1.0
         
         # Final weight calculation with cap
-        final_weight = base_tf * identity_boost * length_boost
+        final_weight = base_tf * length_boost
         return min(final_weight, 1.0)
-    
-    def upsert_documents_hybrid(self, documents, retries: int = 3, delay: int = 2):
-        """Upsert documents to both dense and sparse indexes with improved batching."""
-        documents = [doc for doc in documents if doc is not None]
-        
-        if not documents:
-            logging.warning("No documents to upsert")
-            return None
-        
-        for attempt in range(retries):
-            try:
-                # Prepare chunks and metadata
-                all_chunks, chunk_metadata_list = self._prepare_chunks(documents)
-                
-                # Generate embeddings and create vectors
-                dense_vectors, sparse_vectors = self._create_vectors(all_chunks, chunk_metadata_list)
-                
-                # Upsert to both indexes
-                self._upsert_vectors(self.dense_index, dense_vectors, "dense")
-                self._upsert_vectors(self.sparse_index, sparse_vectors, "sparse", is_sparse=True)
-                
-                logging.info(f"Successfully upserted {len(dense_vectors)} document chunks to both indexes")
-                return self.dense_index, self.sparse_index
-                
-            except Exception as e:
-                if attempt < retries - 1:
-                    logging.warning(f"Attempt {attempt + 1} failed, retrying in {delay} seconds...")
-                    logging.error(e)
-                    time.sleep(delay)
-                else:
-                    logging.error("Max retries reached, operation failed.")
-                    raise e
     
     def _prepare_chunks(self, documents) -> tuple[List[str], List[Dict]]:
         """Prepare chunks and metadata from documents."""
@@ -298,31 +209,6 @@ class PineconeHybridIndex:
             })
         
         return dense_vectors, sparse_vectors
-    
-    def _upsert_vectors(self, index, vectors: List[Dict], index_type: str, is_sparse: bool = False):
-        """Upsert vectors to a specific index."""
-        total_vectors = len(vectors)
-        
-        for i in range(0, total_vectors, UPSERT_BATCH_SIZE):
-            batch = vectors[i:i + UPSERT_BATCH_SIZE]
-            
-            if is_sparse:
-                # Transform sparse vectors for upsert
-                sparse_batch = []
-                for vector in batch:
-                    sparse_vector = {
-                        'id': vector['id'],
-                        'sparse_values': vector['sparse_values'],
-                        'metadata': vector['metadata']
-                    }
-                    sparse_batch.append(sparse_vector)
-                index.upsert(vectors=sparse_batch)
-            else:
-                index.upsert(vectors=batch)
-            
-            batch_num = i // UPSERT_BATCH_SIZE + 1
-            total_batches = (total_vectors + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE
-            logging.info(f"Upserted {index_type} batch {batch_num}/{total_batches}")
     
     def hybrid_search(
         self, 

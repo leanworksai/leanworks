@@ -119,7 +119,7 @@ class SearchTool:
             loop = asyncio.get_event_loop()
             nodes = await loop.run_in_executor(
                 None, 
-                lambda: self.chat.retrieve_nodes(all_queries, top_k=5, filters=filters)
+                lambda: self.chat.retrieve_nodes(all_queries, top_k=10, filters=filters)
             )
             logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
             
@@ -129,9 +129,10 @@ class SearchTool:
                 query, 
                 apply_filters=True, 
                 use_reranker=True, 
-                rerank_top_k=5,
+                rerank_top_k=8,
                 read_document_ids=read_document_ids
             )
+            print(f"context: {context}")
             logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
             logger.info(f"Retrieved data sources: {data_sources}")
         except Exception as e:
