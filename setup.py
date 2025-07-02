@@ -12,7 +12,7 @@ setup(
         "google-auth-oauthlib==1.2.1",
         "google-auth-httplib2==0.2.0",
         "anthropic==0.49.0",
-        "google-genai==1.8.0",
+        "google-genai==1.24.0",
         "openai==1.60.0",
         "google-api-python-client==2.159.0",
         "numpy==1.26.0",
