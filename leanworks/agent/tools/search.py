@@ -5,6 +5,7 @@ from leanworks.rag.chat import AsyncChat
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.embedding import GoogleEmbedding
 import logging
+from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ class SearchTool:
             loop = asyncio.get_event_loop()
             nodes = await loop.run_in_executor(
                 None, 
-                lambda: self.chat.retrieve_nodes(all_queries, top_k=10, filters=filters)
+                lambda: self.chat.retrieve_nodes(all_queries, top_k=RETRIEVE_TOP_K, filters=filters)
             )
             logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
             
@@ -129,7 +130,7 @@ class SearchTool:
                 query, 
                 apply_filters=True, 
                 use_reranker=True, 
-                rerank_top_k=8,
+                rerank_top_k=RERANK_TOP_K,
                 read_document_ids=read_document_ids
             )
             print(f"context: {context}")

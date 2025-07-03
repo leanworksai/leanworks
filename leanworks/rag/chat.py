@@ -60,7 +60,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             
         logger.info("RAG system initialized successfully")
 
-    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = 0.5) -> SimpleNamespace:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA) -> SimpleNamespace:
         """
         Retrieve relevant context using hybrid search for one or multiple queries.
         
@@ -269,7 +269,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
-            alpha: float = 0.5,
+            alpha: float = ALPHA,
             **kwargs
             ) -> Dict[str, any]:
         """
@@ -536,7 +536,7 @@ class AsyncChat(Chat):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             cited_context: dict = None,
-            alpha: float = 0.5,
+            alpha: float = ALPHA,
             **kwargs
             ) -> Dict[str, any]:
         """
