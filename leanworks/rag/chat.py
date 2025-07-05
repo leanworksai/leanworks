@@ -123,7 +123,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                 matches=unique_matches[:top_k]  # Limit to top_k after deduplication
             )
             logger.info(f"Combined and deduplicated to {len(combined_response.matches)} hybrid search results")
-            print(f"combined_response: {combined_response}")
             return combined_response
             
         except Exception as e:
