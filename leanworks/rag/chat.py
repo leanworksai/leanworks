@@ -470,7 +470,7 @@ class AsyncChat(Chat):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
-                    reranked_results = await self.async_rerank(
+                    reranked_results = await self.rerank_async(
                         query, 
                         filtered_results,
                         top_k=rerank_top_k
@@ -724,12 +724,3 @@ class AsyncChat(Chat):
             "content": answer,
             "data_sources": data_sources
         }
-        
-    async def async_rerank(self, query: str, documents: List[Any], **kwargs) -> List[Any]:
-        """Asynchronous reranking to improve response time"""
-        loop = asyncio.get_event_loop()
-        # Pass through all parameters to ensure identical results with sync version
-        return await loop.run_in_executor(
-            None, 
-            lambda: self.rerank(query, documents, **kwargs)
-        )
