@@ -16,7 +16,7 @@ logging.basicConfig(
 def main():
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-        client_name = get_client_name(bq_client, "bharathkumar.l@sbnasoftware.com")
+        client_name = get_client_name(bq_client, "yanfu@leanworks.ai")
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
@@ -33,16 +33,14 @@ def main():
             secret_client,
             model_client,
             bq_client_wrapper,
-            user_id="bharathkumar.l@sbnasoftware.com",
+            user_id="yanfu@leanworks.ai",
             session_id="fne;oefgtd",
             clear_conversation=True  # Change to True to reset conversation each time
         )
         
         # Process a user message
         user_message = '''
-        find standup updates (accomplishments/ progress/ blockers) for team member {'user_id': 'sundhar.k@sbnasoftware.com', 'alias_email': None, 'first_name': 'Sundhar', 'last_name': 'Kumar', 'job_title': 'Software Engineer', 'job_responsibilities': 'Backend developer'} in the project related to its assigned tasks.
-        project: {'project_name': 'ccxai software', 'description': 'Globally focused contact center application with AI capabilities, contains web app development'}
-        existing tasks: []
+        is there any progress in using veo3 to generate video?
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
