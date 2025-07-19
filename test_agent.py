@@ -40,7 +40,7 @@ def main():
         
         # Process a user message
         user_message = '''
-        is there any progress in using veo3 to generate video?
+        what are open tasks for vijay?
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message)
