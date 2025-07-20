@@ -91,7 +91,7 @@ AGENT_SYSTEM_PROMPT = """
         "content": "your helpful answer goes here",
         "answered": "true" or "false" depending on if the question was fully answered
     }}
-    You must ensure the following criteria are met to determine if the question is fully answered:
+    You must ensure the following criteria are at least 85% met to say that the question is fully answered:
     • Completeness: every explicit or implicit sub-question is addressed.  
     • Correctness: information is factually accurate and internally consistent. Contents retrieved from list_projects,list_tasks,list_progress_updates and list_users should be considered as 'correct'.
     • Relevance: content stays on topic with no unnecessary digressions.  
