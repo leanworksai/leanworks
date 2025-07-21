@@ -20,7 +20,6 @@ class ChatAgent:
                  bq_client_wrapper,
                  user_id=None,
                  session_id=None,
-                 max_unanswered_num=2,
                  clear_conversation=True
                  ):
         """
@@ -45,7 +44,6 @@ class ChatAgent:
         # Set parameters
         self.user_id = user_id
         self.session_id = session_id
-        self.max_unanswered_num = max_unanswered_num
         
         # Initialize data source tracking
         self.data_sources = []
@@ -140,7 +138,7 @@ class ChatAgent:
         logger.info(f"Resetting read document IDs (previously had {len(self.read_document_ids)} documents)")
         self.read_document_ids.clear()
 
-    def process_message(self, user_message, cited_context=None):
+    def process_message(self, user_message, cited_context=None, deep_research=False):
         """
         Process a user message and handle the conversation flow.
         
@@ -165,8 +163,9 @@ class ChatAgent:
         unanswered_count = 0
         answered = "false"
         response_text = ""
+        max_unanswered_num = 2 if not deep_research else 5
 
-        while unanswered_count < self.max_unanswered_num:
+        while unanswered_count < max_unanswered_num:
             logger.info(f"Unanswered attempt {unanswered_count}")
             try:
                 # Create a copy with updated messages

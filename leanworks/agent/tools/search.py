@@ -57,9 +57,13 @@ class SearchTool:
         description = """
         Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
         You MUST ALWAYS use this tool as the fallback when any of these conditions occur:
+        - Other tools are not suitable to answer the question
         - Other tools return empty or insufficient results
-        - You have ANY uncertainty about the completeness of your answer
+        - You have used the search_knowledge tool before and the answer is still not satisfactory. 
+        - You have ANY uncertainty about the quality of your answer
         - More detailed information is needed to answer the question
+        When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_knowledge tool) with a different query 
+        so that it can surface more information to help refine your answer.
         You might need to use this tool multiple times with different queries to fully answer the question.
         NEVER skip this tool if the above conditions are met.
         Do not reflect on the quality of the returned search results in your response

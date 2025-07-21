@@ -122,11 +122,9 @@ Output ONLY the final answer text—no explanations, no reasoning, no headings.
 
 # Query for using search_knowledge as a fallback
 SEARCH_KNOWLEDGE_QUERY = """
-At this point, if you still cannot answer the question and you have never used the search_knowledge tool, 
-use the search_knowledge tool with original query to find more information to refine your answer.
-But if you have already used the search_knowledge tool before and the answer is still not satisfactory, 
-try to search with a different query so that it can surface more information that might be missing from the previous search,
-call search_knowledge tool again, and then refine your answer based on the new information.
+At this point, if you still cannot get a satisfying answer, 
+find what are the missing information from the last response and try to search (call search_knowledge tool) with a different query 
+so that it can surface more information to help refine your answer,
 Do not reflect on the quality of the returned search results in your response
 Output ONLY the final answer text—no explanations, no reasoning, no headings.
 """
