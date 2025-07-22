@@ -85,7 +85,7 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": self.tool_use.tools,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "temperature": 0.1,
             "timeout": 30
         }
