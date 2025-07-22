@@ -14,35 +14,25 @@ class ToolUse:
         self.search_tool = SearchTool(storage_client, secret_client)
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         
-        # Define tools as variables
-        if self.project_tool:
-            self.tools = [
-                self.project_tool.list_projects_property,
-                self.project_tool.list_tasks_property,
-                self.project_tool.list_progress_updates_property,
-                self.project_tool.add_task_property,
-                self.project_tool.list_users_property,
-                self.search_tool.search_knowledge_property
-            ]
-            
-            # Define function map as variable
-            self.function_map = {
-                "list_projects": self.project_tool.list_projects,
-                "list_tasks": self.project_tool.list_tasks,
-                "list_progress_updates": self.project_tool.list_progress_updates,
-                "add_task": self.project_tool.add_task,
-                "list_users": self.project_tool.list_users,
-                "search_knowledge": self._search_knowledge_with_deduplication
-            }
-        else:
-            # If no bq_client is provided, only include search tool
-            self.tools = [
-                self.search_tool.search_knowledge_property
-            ]
-            
-            self.function_map = {
-                "search_knowledge": self._search_knowledge_with_deduplication
-            }
+        self.tools = [
+            self.project_tool.list_projects_property,
+            self.project_tool.list_tasks_property,
+            self.project_tool.list_progress_updates_property,
+            self.project_tool.add_task_property,
+            self.project_tool.list_users_property,
+            self.search_tool.search_knowledge_property
+        ]
+        
+        # Define function map as variable
+        self.function_map = {
+            "list_projects": self.project_tool.list_projects,
+            "list_tasks": self.project_tool.list_tasks,
+            "list_progress_updates": self.project_tool.list_progress_updates,
+            "add_task": self.project_tool.add_task,
+            "list_users": self.project_tool.list_users,
+            "search_knowledge": self._search_knowledge_with_deduplication
+        }
+
     
     def _search_knowledge_with_deduplication(self, query: str):
         """
