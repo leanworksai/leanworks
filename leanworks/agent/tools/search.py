@@ -5,7 +5,7 @@ from leanworks.rag.chat import AsyncChat
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.embedding import GoogleEmbedding
 import logging
-from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
+from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K, APPLY_FILTERS
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +96,11 @@ class SearchTool:
             rewrites_task = asyncio.create_task(self.chat.async_rewrite_query(query))
             tasks.append(rewrites_task)
             
-            # Task 2: Extract time filters if needed
-            filters_task = asyncio.create_task(self.chat.async_extract_time_filters(query))
-            tasks.append(filters_task)
+            # Task 2: Extract time filters if APPLY_FILTERS is enabled
+            filters_task = None
+            if APPLY_FILTERS:
+                filters_task = asyncio.create_task(self.chat.async_extract_time_filters(query))
+                tasks.append(filters_task)
                 
             # Wait for all tasks to complete
             if tasks:
@@ -114,10 +116,12 @@ class SearchTool:
                 logger.error(f"Error getting query rewrites: {str(e)}")
                     
             # Get time filters for retrieval
-            try:
-                filters = filters_task.result()
-                logger.info(f"Time filters for '{query}': {filters}")
-            except Exception as e:
+            filters = None
+            if APPLY_FILTERS and filters_task:
+                try:
+                    filters = filters_task.result()
+                    logger.info(f"Time filters for '{query}': {filters}")
+                except Exception as e:
                     logger.error(f"Error getting time filters: {str(e)}")
             
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
