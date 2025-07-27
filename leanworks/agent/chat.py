@@ -1,7 +1,7 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from datetime import datetime
 from leanworks.agent.conversation import ConversationManager
-from leanworks.setting import AGENT_SYSTEM_PROMPT, VERIFICATION_QUERY, SEARCH_KNOWLEDGE_QUERY
+from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT
 import traceback
 import logging
 
@@ -28,7 +28,7 @@ class ChatAgent:
         Args:
             storage_client: The storage client for GCS operations
             secret_client: The secret client for accessing secrets
-            model_client: The Claude model client
+            model_client: The Claude model client for main chat
             bq_client_wrapper: The BigQuery client object that contains dataset_id
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
@@ -74,7 +74,7 @@ class ChatAgent:
         # Get user info from BigQuery
         user_info = self._get_user_info()
         
-        # Set up API parameters
+        # Set up API parameters for main model
         self.system_prompt = AGENT_SYSTEM_PROMPT.format(
             USER_INFO=user_info, 
             CURRENT_DATE=datetime.now().strftime("%Y-%m-%d")
@@ -89,7 +89,7 @@ class ChatAgent:
             "temperature": 0.1,
             "timeout": 30
         }
-    
+
     def _get_user_info(self):
         """
         Query user information from BigQuery user_config table.
@@ -151,6 +151,10 @@ class ChatAgent:
         # Reset data sources for new message
         self.data_sources = []
         
+        # Store the original user query for evaluation (before adding cited context)
+        self.original_user_query = user_message
+        logger.info(f"Stored original user query for evaluation: {self.original_user_query}")
+        
         # Log current state of document deduplication
         logger.info(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
         
@@ -161,7 +165,6 @@ class ChatAgent:
         
         # Maximum number of iterations to prevent infinite loops
         unanswered_count = 0
-        answered = "false"
         response_text = ""
         max_unanswered_num = 2 if not deep_research else 5
 
@@ -177,18 +180,7 @@ class ChatAgent:
                 # Make API call with current parameters
                 response = self.model_client.messages.create(**current_params)
                 text_content = next((block.text for block in response.content if block.type == "text"), "")
-                response_json = self.conversation.extract_json_from_text(text_content)
-                response_text = response_json.get("content")
-                answered = response_json.get("answered", "false")
-                
-                # If the answer is complete, break the loop
-                if answered == "true":
-                    logger.info("Question answered.")
-                    # Add to regular conversation first
-                    self.conversation.add_assistant_message(response_text)
-                    break
-                # Check if there are any tool calls
-                has_tool_calls = any(block.type == "tool_use" for block in response.content)
+                has_tool_calls = any(block.type == "tool_use" for block in response.content)   
                 
                 if has_tool_calls:
                     # Add the assistant message with tool_use blocks to the conversation
@@ -202,20 +194,46 @@ class ChatAgent:
                     )
                     self.conversation.add_tool_results(tool_results)
                 else:
+                    # Assign the actual response text
+                    response_text = text_content
+                    eval_feedback = self._perform_evaluation(response_text)
+
+                    # Add null check for eval_feedback
+                    if eval_feedback and eval_feedback.get("score", 0) >= 7:
+                        logger.info("Question answered.")
+                        # Add to regular conversation first
+                        self.conversation.add_assistant_message(response_text)
+                        break
                     # No tool calls were made and the answer is still not complete
                     logger.info("No tool calls were made and the answer is still not complete")
                     unanswered_count += 1
-                    self.conversation.add_user_message(SEARCH_KNOWLEDGE_QUERY)
-                    
-                    # Create a copy for search_knowledge with updated parameters
-                    current_params = self.conversation.create_params_copy(
+
+                    # Now response_text has the actual content for the search query
+                    self.conversation.add_user_message(SEARCH_KNOWLEDGE_QUERY.format(
+                        USER_QUERY=self.original_user_query, 
+                        LAST_RESPONSE=response_text, 
+                        EVALUATION_FEEDBACK=eval_feedback or "No feedback available"
+                    ))
+
+                    # Create and immediately use forced search_knowledge parameters
+                    forced_params = self.conversation.create_params_copy(
                         self.api_params,
                         messages=self.conversation.conversation,
                         tools=[self.tool_use.tools[-1]],
                         tool_choice={"type": "tool", "name": "search_knowledge"}
                     )
                     
-                    # Continue to the next iteration with these updated parameters
+                    # Make API call with forced search_knowledge
+                    response = self.model_client.messages.create(**forced_params)
+                    
+                    # Process the forced tool call
+                    self.conversation.add_assistant_message_with_tool_uses(response)
+                    tool_results = self.conversation.parse_and_format_tool_results_with_sources(
+                        response, 
+                        self.tool_use.function_map,
+                        self.data_sources
+                    )
+                    self.conversation.add_tool_results(tool_results)
 
             except Exception as e:
                 traceback.print_exc()
@@ -223,14 +241,6 @@ class ChatAgent:
                 response_text = f"An error occurred: {str(e)}"
                 break
             
-        if answered == "false":
-            # Perform verification
-            logger.info("Starting verification...")
-            verification_result = self._perform_verification()
-            if verification_result:
-                response_text = verification_result
-            else:
-                logger.info("Verification failed or returned None. Adding original response to slim conversation.")
 
         # Remove duplicates while preserving order
         unique_sources = []
@@ -253,110 +263,57 @@ class ChatAgent:
             "data_sources": unique_sources
         }
     
-    def _perform_verification(self):
+    def _perform_evaluation(self, response_text):
         """
-        Performs verification on the last answer using the search_knowledge tool.
-        Verification only includes the original user query and previous answer,
-        hiding the rest of the conversation history.
+        Performs evaluation on the response using a separate evaluation LLM.
+        Returns evaluation feedback including potential search queries.
         
+        Args:
+            response_text (str): The response text to evaluate
+            
         Returns:
-            str: The verified response text, or None if verification failed
+            dict: Evaluation feedback with search queries, or None if evaluation failed
         """
         try:
-            # Extract the last user query from slim conversation and the most recent answer
-            last_user_query = None
-            last_answer = None
+            # Use the original user query stored when processing the message
+            if not hasattr(self, 'original_user_query') or not self.original_user_query or not response_text:
+                logger.warning("Missing original user query or response text for evaluation")
+                return None
             
-            # Get the most recent user message from slim_conversation
-            for message in reversed(self.conversation.slim_conversation):
-                if message.get("role") == "user" and last_user_query is None:
-                    last_user_query = next((block.get("text") for block in message.get("content", []) 
-                                          if isinstance(block, dict) and block.get("type") == "text"), "")
-                    break
+            logger.info(f"Using stored original user query for evaluation: {self.original_user_query}")
             
-            # Get the most recent assistant response from the full conversation
-            for message in self.conversation.conversation:
-                if message.get("role") == "assistant":
-                    # Keep updating to get the most recent assistant message
-                    last_answer = next((block.get("text") for block in message.get("content", [])
-                                       if isinstance(block, dict) and block.get("type") == "text"), "")
+            # Create evaluation conversation
+            eval_conversation = [
+                {
+                    "role": "user", 
+                    "content": [{"type": "text", "text": EVALUATION_PROMPT.format(USER_QUERY=self.original_user_query, LAST_RESPONSE=response_text)}]
+                }
+            ]
             
-            # Create a minimal conversation for verification, only including:
-            # 1. Last user query
-            # 2. Previous assistant answer
-            # 3. Verification query
-            minimal_conversation = []
+            # Create evaluation parameters
+            eval_params = {
+                "model": "claude-3-5-haiku-latest",
+                "messages": eval_conversation,
+                "max_tokens": 512,
+                "temperature": 0.1,
+                "timeout": 30
+            }
             
-            if last_user_query:
-                minimal_conversation.append({
-                    "role": "user",
-                    "content": [{"type": "text", "text": last_user_query}]
-                })
+            # Make evaluation API call using separate eval model client
+            eval_response = self.model_client.messages.create(**eval_params)
+            eval_text = next((block.text for block in eval_response.content if block.type == "text"), "")
             
-            if last_answer:
-                minimal_conversation.append({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": last_answer}]
-                })
-            
-            # Add verification query
-            minimal_conversation.append({
-                "role": "user",
-                "content": [{"type": "text", "text": VERIFICATION_QUERY}]
-            })
-            
-            # Create a new params copy for verification with minimal conversation
-            verification_params = self.conversation.create_params_copy(
-                self.api_params,
-                messages=minimal_conversation,
-                tools=[self.tool_use.tools[-1]],
-                tool_choice={"type": "tool", "name": "search_knowledge"}
-            )
-            
-            # Make the verification API call
-            verification_response = self.model_client.messages.create(**verification_params)
-            
-            # Process tool calls and add results to the minimal conversation
-            has_tool_calls = any(block.type == "tool_use" for block in verification_response.content)
-            if has_tool_calls:
-                # Add the assistant response with tool calls to the minimal conversation
-                minimal_conversation.append({
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "id": block.id, "name": block.name, "input": block.input} 
-                               if block.type == "tool_use" else {"type": "text", "text": block.text}
-                               for block in verification_response.content]
-                })
+            # Parse evaluation JSON
+            try:
+                import json
+                eval_feedback = json.loads(eval_text)
+                logger.info(f"Evaluation feedback: {eval_feedback}")
+                return eval_feedback
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse evaluation JSON: {eval_text}")
+                return None
                 
-                # Process tool calls with data source tracking for verification
-                tool_results = self.conversation.parse_and_format_tool_results_with_sources(
-                    verification_response, 
-                    self.tool_use.function_map,
-                    self.data_sources
-                )
-                
-                # Add tool results to the minimal conversation
-                minimal_conversation.append({
-                    "role": "user",
-                    "content": tool_results
-                })
-                
-                # Create a copy without tools and tool_choice for final response
-                final_params = self.conversation.create_params_copy(
-                    self.api_params,
-                    messages=minimal_conversation,
-                    tools=None,
-                    tool_choice=None
-                )
-                final_response = self.model_client.messages.create(**final_params)
-
-                final_text = next((block.text for block in final_response.content if block.type == "text"), "")
-                final_json = self.conversation.extract_json_from_text(final_text)
-                final_response_text = final_json.get("content")
-                return final_response_text
-                
-            return None
-            
         except Exception as e:
             traceback.print_exc()
-            logger.error(f"Error during verification: {str(e)}")
+            logger.error(f"Error during evaluation: {str(e)}")
             return None
