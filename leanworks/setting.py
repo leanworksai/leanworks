@@ -8,7 +8,7 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-GENERATION_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -83,50 +83,52 @@ AGENT_SYSTEM_PROMPT = """
     list_projects/list_tasks/list_progress_updates are used to retrieve information from the database. search_knowledge is used to search the knowledge base.
     DON'T put search quality reflection or score in your response after you call the search_knowledge tool for any purpose.
     </tool_calling>
-
-    <schema>
-    By default, you MUST ALWAYS RESPOND WITH VALID JSON unless you are instructed to respond with a different format. Your entire response MUST be a single JSON object with this exact structure:
-    ###
-    {{
-        "content": "your helpful answer goes here",
-        "answered": "true" or "false" depending on if the question was fully answered
-    }}
-    You must ensure the following criteria are at least 85% met to say that the question is fully answered:
-    • Completeness: every explicit or implicit sub-question is addressed.  
-    • Correctness: information is factually accurate and internally consistent. Contents retrieved from list_projects,list_tasks,list_progress_updates and list_users should be considered as 'correct'.
-    • Relevance: content stays on topic with no unnecessary digressions.  
-    • Depth/Sufficiency: level of detail matches what the QUESTION reasonably expects.
-    ###
-
-    IMPORTANT:
-    - NEVER include markdown code blocks, backticks, or the word "json" in your response
-    - NEVER include any text before or after the JSON object
-    - NEVER include comments or explanations outside the JSON structure
-    - NEVER create nested JSON objects
-    - ALWAYS use double quotes for JSON keys and string values
-    - ALWAYS escape quotes inside string values with backslash
-    - Your entire response MUST be parseable by json.loads()
-    </schema>
-"""
-
-# Verification query for validating responses
-VERIFICATION_QUERY = """
-Call the search_knowledge tool and spot check the last answer using the information returned from the search_knowledge tool.
-• If no retrieved documents is contradictory to the last answer, output the last answer exactly.
-• If any retrieved document is contradictory to last answer, Remove the contradictory part from the last answer and output a fully corrected answer.
-• If any retrieved document contains information that the last answer is missing, add the missing information to the last answer and output a fully updated answer.
-. If search cannot provide any relevant information, output the last answer exactly.
-Do not reflect on the quality of the returned search results in your response
-Output ONLY the final answer text—no explanations, no reasoning, no headings.
 """
 
 # Query for using search_knowledge as a fallback
 SEARCH_KNOWLEDGE_QUERY = """
-At this point, if you still cannot get a satisfying answer, 
-find what are the missing information from the last response and try to search (call search_knowledge tool) with a different query 
-so that it can surface more information to help refine your answer,
+Given the user query: {USER_QUERY}, the response: {LAST_RESPONSE}, and the response evaluation feedback: {EVALUATION_FEEDBACK}, 
+generate a new query to search (call search_knowledge tool) so that it can surface more information and use the new information to refine your last response.
 Do not reflect on the quality of the returned search results in your response
 Output ONLY the final answer text—no explanations, no reasoning, no headings.
+"""
+
+EVALUATION_PROMPT = """
+You are an impartial expert evaluator.
+
+Task: grade one assistant answer to a user's question.
+
+<user_query>
+{USER_QUERY}
+</user_query>
+
+<last_response>
+{LAST_RESPONSE}
+</last_response>
+
+<sources>
+{SOURCES}
+</sources>
+
+Judge on the four criteria below, weighting them equally:
+1. Correctness & Factuality – Is every non-trivial claim attributable to the provided sources?
+2. Relevance  – addresses every part of the user's request  
+3. Depth & Insight – completeness, useful details, edge-cases  
+
+Process:
+• Deduct points for any major flaw in a criterion.  
+• Assign an OVERALL integer score from 0-10:  
+  0-2 = very poor, 3-4 = poor, 5-6 = fair, 7-8 = good, 9 = excellent, 10 = perfect.  
+
+<schema>
+You MUST ALWAYS RESPOND WITH VALID JSON. Your entire response MUST be a single JSON object with this exact structure:
+###
+{{
+    "explanation": "one concise paragraph ≤80 words explaining the evaluation.",
+    "score": <0-10 integer score>
+}}
+###
+</schema>
 """
 
 import logging

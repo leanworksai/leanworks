@@ -35,15 +35,15 @@ def main():
             bq_client_wrapper,
             user_id="yanfu@leanworks.ai",
             session_id="cdpwgeof",
-            clear_conversation=True  # Change to True to reset conversation each time
+            clear_conversation=False  # Change to True to reset conversation each time
         )
         
         # Process a user message
         user_message = '''
-         summarize the progress team has made in the last 3 weeks.
+         show me progress updates from Vijay in the last 3 days
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
-        response = agent.process_message(user_message, deep_research=True)
+        response = agent.process_message(user_message, deep_research=False)
         
         return response
     except Exception as e:
