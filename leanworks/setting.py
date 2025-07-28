@@ -8,7 +8,7 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-GENERATION_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -106,10 +106,14 @@ Task: grade one assistant answer to a user's question.
 {LAST_RESPONSE}
 </last_response>
 
-Judge on the four criteria below, weighting them equally:
+<sources>
+{SOURCES}
+</sources>
 
-1. Relevance  – addresses every part of the user's request  
-2. Depth & Insight – completeness, useful details, edge-cases  
+Judge on the four criteria below, weighting them equally:
+1. Correctness & Factuality – Is every non-trivial claim attributable to the provided sources?
+2. Relevance  – addresses every part of the user's request  
+3. Depth & Insight – completeness, useful details, edge-cases  
 
 Process:
 • Deduct points for any major flaw in a criterion.  
@@ -120,7 +124,7 @@ Process:
 You MUST ALWAYS RESPOND WITH VALID JSON. Your entire response MUST be a single JSON object with this exact structure:
 ###
 {{
-    "explanation": "one concise paragraph ≤80 words explaining the evaluation. Make sure to reveal the gap in the answer, if any",
+    "explanation": "one concise paragraph ≤80 words explaining the evaluation.",
     "score": <0-10 integer score>
 }}
 ###

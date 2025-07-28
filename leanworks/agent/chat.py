@@ -1,7 +1,7 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from datetime import datetime
 from leanworks.agent.conversation import ConversationManager
-from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT
+from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, GENERATION_MODEL
 import traceback
 import logging
 
@@ -81,7 +81,7 @@ class ChatAgent:
         )
         
         self.api_params = {
-            "model": "claude-3-5-haiku-20241022",
+            "model": GENERATION_MODEL,
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": self.tool_use.tools,
@@ -263,6 +263,34 @@ class ChatAgent:
             "data_sources": unique_sources
         }
     
+    def _extract_source_content_from_conversation(self):
+        """
+        Extract the actual content from tool results in the conversation history
+        along with their corresponding data sources.
+        Returns formatted content with source attribution.
+        """
+        source_content_with_attribution = []
+        source_index = 0
+        
+        # Look through conversation history for tool_result messages
+        for message in self.conversation.conversation:
+            if message.get("role") == "user" and isinstance(message.get("content"), list):
+                for content_block in message["content"]:
+                    if content_block.get("type") == "tool_result":
+                        tool_content = content_block.get("content", "")
+                        if tool_content and not tool_content.startswith("Error"):
+                            # Get corresponding data source if available
+                            data_source = ""
+                            if source_index < len(self.data_sources):
+                                data_source = f"[Source: {self.data_sources[source_index]}]\n"
+                                source_index += 1
+                            
+                            # Combine source attribution with content
+                            attributed_content = f"{data_source}{tool_content}"
+                            source_content_with_attribution.append(attributed_content)
+        
+        return "\n\n---\n\n".join(source_content_with_attribution) if source_content_with_attribution else "No source content available."
+
     def _perform_evaluation(self, response_text):
         """
         Performs evaluation on the response using a separate evaluation LLM.
@@ -282,17 +310,19 @@ class ChatAgent:
             
             logger.info(f"Using stored original user query for evaluation: {self.original_user_query}")
             
-            # Create evaluation conversation
+            # Extract actual source content from tool results in conversation
+            sources_content = self._extract_source_content_from_conversation()
+            
             eval_conversation = [
                 {
                     "role": "user", 
-                    "content": [{"type": "text", "text": EVALUATION_PROMPT.format(USER_QUERY=self.original_user_query, LAST_RESPONSE=response_text)}]
+                    "content": [{"type": "text", "text": EVALUATION_PROMPT.format(USER_QUERY=self.original_user_query, LAST_RESPONSE=response_text, SOURCES=sources_content)}]
                 }
             ]
             
             # Create evaluation parameters
             eval_params = {
-                "model": "claude-3-5-haiku-latest",
+                "model": GENERATION_MODEL,
                 "messages": eval_conversation,
                 "max_tokens": 512,
                 "temperature": 0.1,
@@ -306,9 +336,36 @@ class ChatAgent:
             # Parse evaluation JSON
             try:
                 import json
-                eval_feedback = json.loads(eval_text)
+                
+                # Extract JSON portion from the response (handle cases where there's extra text)
+                json_text = eval_text.strip()
+                
+                # Find the JSON object boundaries
+                json_start = json_text.find('{')
+                if json_start != -1:
+                    # Find the matching closing brace
+                    brace_count = 0
+                    json_end = -1
+                    for i in range(json_start, len(json_text)):
+                        if json_text[i] == '{':
+                            brace_count += 1
+                        elif json_text[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                json_end = i + 1
+                                break
+                    
+                    if json_end != -1:
+                        json_only = json_text[json_start:json_end]
+                        eval_feedback = json.loads(json_only)
+                        logger.info(f"Evaluation feedback: {eval_feedback}")
+                        return eval_feedback
+                
+                # Fallback: try parsing the entire text
+                eval_feedback = json.loads(json_text)
                 logger.info(f"Evaluation feedback: {eval_feedback}")
                 return eval_feedback
+                
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse evaluation JSON: {eval_text}")
                 return None

@@ -40,10 +40,10 @@ def main():
         
         # Process a user message
         user_message = '''
-         summarize interview notes with Alan, Alex and Sandy
+         show me progress updates from Vijay in the last 3 days
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
-        response = agent.process_message(user_message, deep_research=True)
+        response = agent.process_message(user_message, deep_research=False)
         
         return response
     except Exception as e:
