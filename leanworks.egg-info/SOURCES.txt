@@ -14,7 +14,8 @@ leanworks/agent/__init__.py
 leanworks/agent/chat.py
 leanworks/agent/conversation.py
 leanworks/agent/tools/__init__.py
-leanworks/agent/tools/project.py
+leanworks/agent/tools/gitlab.py
+leanworks/agent/tools/leanworks.py
 leanworks/agent/tools/search.py
 leanworks/agent/tools/toolkit.py
 leanworks/rag/__init__.py

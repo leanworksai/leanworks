@@ -8,7 +8,8 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-GENERATION_MODEL = "claude-sonnet-4-20250514"
+GENERATION_MODEL = "claude-3-5-haiku-latest"
+# GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -36,20 +37,28 @@ You are **SearchQueryRewriter‑MQR**, a large‑language‑model agent that cre
 
 ## Instructions
 1. Read the **Original Query**.
-2. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
-3. Follow these rewriting strategies *at least once each*  
-a. **Equality** – preserve all meaning; just de‑chatify the wording.  
-b. **Expansion** – add missing context a domain expert would expect  
-    (e.g., synonyms, acronyms, date ranges, entity types).  
-c. **Reduction** – strip to the absolute core keywords.  
-d. *(Optional if N > 2)* Other creative perspectives that could surface
-    different documents (e.g., broader background, comparison terms).
-4. **Constraints**  
-• ≤ 20 tokens per rewrite.  
-• Remove pronouns/ellipsis; name all entities explicitly.  
-• Avoid stop‑words unless essential (e.g., "of", "in").  
-• No duplicate semantic meaning across rewrites.
-5. Return a **valid JSON** object ONLY without any other text:
+2. **Entity Analysis**: Identify if the query mentions multiple people, companies, projects, or entities. If so, prioritize creating individual rewrites for each entity.
+3. **Problem Breakdown**: Analyze if the query involves complex problems that can be broken down into subproblems. If so, create rewrites that target specific subproblems.
+4. Produce **{{N}}** DISTINCT rewrites (do **NOT** answer the question).
+5. Follow these rewriting strategies *at least once each*:  
+   a. **Equality** – preserve all meaning; just de‑chatify the wording.  
+   b. **Expansion** – add missing context a domain expert would expect  
+       (e.g., synonyms, acronyms, date ranges, entity types).  
+   c. **Reduction** – strip to the absolute core keywords.  
+   d. **Individual Entity Focus** – create separate queries for each person/entity mentioned
+       (e.g., "Alan interview notes", "Alex interview notes", "Sandy interview notes").
+   e. **Subproblem Breakdown** – break complex problems into specific subproblems
+       (e.g., "project planning" → "project scope definition", "timeline creation", "resource allocation").
+   f. *(Optional if N > 4)* Other creative perspectives that could surface
+       different documents (e.g., broader background, comparison terms).
+6. **Constraints**  
+   • ≤ 20 tokens per rewrite.  
+   • Remove pronouns/ellipsis; name all entities explicitly.  
+   • Avoid stop‑words unless essential (e.g., "of", "in").  
+   • No duplicate semantic meaning across rewrites.
+   • For individual entity rewrites, use the person/entity name directly.
+   • For subproblem breakdowns, focus on actionable, specific aspects.
+7. Return a **valid JSON** object ONLY without any other text:
 
 ```json
 { "rewrites": [" ... ", " ... ", ...] }
@@ -76,11 +85,18 @@ AGENT_SYSTEM_PROMPT = """
     If the user supplies a block delimited by <cited_context>, treat that block as authoritative background for their next question. Ground your answer in it and cite it when relevant. If no such block appears, answer normally.
     </communication>
 
-    <tool_calling> You have tools (list_projects,list_tasks,list_progress_updates,add_task,list_users,search_knowledge) at your disposal to answer project management related questions. Follow these rules regarding tool calls:
-    ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
-    The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.
-    NEVER refer to tool names when speaking to the USER. For example, instead of saying 'I need to use the list_projects tool to list all projects', just say 'I will list all projects'.
-    list_projects/list_tasks/list_progress_updates are used to retrieve information from the database. search_knowledge is used to search the knowledge base.
+    <tool_calling>
+    You have below tools at your disposal to answer project management related questions.
+    Leanworks tools: list_projects,list_tasks,list_progress_updates,add_task,list_users,search_knowledge
+    Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
+    
+    Tool Usage Guidelines:
+    - Leanworks tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
+    - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - search_knowledge is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
+    - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
+    - The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.
+    - NEVER refer to tool names when speaking to the USER. For example, instead of saying 'I need to use the list_projects tool to list all projects', just say 'I will list all projects'.    
     DON'T put search quality reflection or score in your response after you call the search_knowledge tool for any purpose.
     </tool_calling>
 """
@@ -106,14 +122,14 @@ Task: grade one assistant answer to a user's question.
 {LAST_RESPONSE}
 </last_response>
 
-<sources>
-{SOURCES}
-</sources>
+<source_context>
+{SOURCE_CONTEXT}
+</source_context>
 
-Judge on the four criteria below, weighting them equally:
-1. Correctness & Factuality – Is every non-trivial claim attributable to the provided sources?
+Judge on the three criteria below, weighting them equally:
+1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context?
 2. Relevance  – addresses every part of the user's request  
-3. Depth & Insight – completeness, useful details, edge-cases  
+3. Depth & Insight – completeness, useful details, edge-cases
 
 Process:
 • Deduct points for any major flaw in a criterion.  
@@ -130,6 +146,18 @@ You MUST ALWAYS RESPOND WITH VALID JSON. Your entire response MUST be a single J
 ###
 </schema>
 """
+
+CRITIQUE_MESSAGE = """
+The previous response scored {eval_score}/10. 
+
+Evaluation feedback: {eval_explanation}
+
+Please improve your response by addressing the feedback above. Focus on:
+1. Ensuring all claims are supported by the provided sources
+2. Addressing every part of the user's request  
+3. Providing more complete and insightful details
+
+Generate an improved response now."""
 
 import logging
 logger = logging.getLogger(__name__)

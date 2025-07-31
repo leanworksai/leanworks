@@ -6,6 +6,7 @@ from google.cloud import bigquery
 import logging
 import traceback
 from leanworks.setting import get_client_name
+from gitlab import Gitlab
 logger = logging.getLogger(__name__)
 # Configure logging
 logging.basicConfig(
@@ -14,13 +15,18 @@ logging.basicConfig(
 )
 
 def main():
+    user_id = "yanfu@leanworks.ai"
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-        client_name = get_client_name(bq_client, "yanfu@leanworks.ai")
+        client_name = get_client_name(bq_client, user_id)
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
-
+        # gitlab_auth = {
+        #     "gitlab_url": secret_client.get("GITLAB_DOMAIN"),
+        #     "gitlab_token": secret_client.get("GITLAB_KEY")
+        # }
+        gitlab_auth = None
         class BigQueryClient:
             def __init__(self, bq_client, client_name):
                 self.bq_client = bq_client
@@ -29,18 +35,18 @@ def main():
         bq_client_wrapper = BigQueryClient(bq_client, client_name)
         # Initialize the chat agent with BigQuery client
         agent = ChatAgent(
-            storage_client,
-            secret_client,
-            model_client,
-            bq_client_wrapper,
-            user_id="yanfu@leanworks.ai",
-            session_id="cdpwgeof",
-            clear_conversation=False  # Change to True to reset conversation each time
+            storage_client=storage_client,
+            secret_client=secret_client,
+            model_client=model_client,
+            bq_client_wrapper=bq_client_wrapper,
+            user_id=user_id,
+            session_id="dheo3gft",
+            clear_conversation=True
         )
         
         # Process a user message
         user_message = '''
-         show me progress updates from Vijay in the last 3 days
+         summarize interview notes that we had with Alex (google)
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message, deep_research=False)

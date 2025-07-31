@@ -5,7 +5,7 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-class ProjectTool:
+class LeanworksTool:
     def __init__(self, bq_client_wrapper):
         """
         Initialize ProjectTool with a BigQuery client that contains dataset_id.
