@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: leanworks
-Version: 0.2.7
+Version: 0.3.0
 Summary: Internal LeanWorks package
 Home-page: https://github.com/LeanWorks-ai/leanworks
 Author: Yanfu Zhu
@@ -24,6 +24,7 @@ Requires-Dist: numpy==1.26.0
 Requires-Dist: tiktoken==0.9.0
 Requires-Dist: pyyaml==6.0.2
 Requires-Dist: google-cloud-bigquery==3.34.0
+Requires-Dist: python-gitlab==4.13.0
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
