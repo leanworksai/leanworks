@@ -48,8 +48,8 @@ class ChatAgent:
         if tools and 'gitlab' in tools:
             try:
                 gitlab_auth = {
-                    'gitlab_url': secret_client.get_secret('gitlab_url'),
-                    'gitlab_token': secret_client.get_secret('gitlab_token')
+                    'gitlab_url': secret_client.get('GITLAB_DOMAIN'),
+                    'gitlab_token': secret_client.get('GITLAB_KEY')
                 }
                 logger.info("Retrieved gitlab credentials from secret client")
             except Exception as e:

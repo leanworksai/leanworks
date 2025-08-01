@@ -22,11 +22,6 @@ def main():
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
-        # gitlab_auth = {
-        #     "gitlab_url": secret_client.get("GITLAB_DOMAIN"),
-        #     "gitlab_token": secret_client.get("GITLAB_KEY")
-        # }
-        gitlab_auth = None
         class BigQueryClient:
             def __init__(self, bq_client, client_name):
                 self.bq_client = bq_client
@@ -46,7 +41,7 @@ def main():
         
         # Process a user message
         user_message = '''
-         summarize interview notes that we had with Alex (google)
+         summarize client interviews that we had with Alan, Sandy (JPMC) and Alex (Google)
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message, deep_research=False)
