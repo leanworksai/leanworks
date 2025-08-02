@@ -159,8 +159,8 @@ Please improve your response by addressing the feedback above. Focus on:
 
 Generate an improved response now."""
 
-import json
 import logging
+import json
 logger = logging.getLogger(__name__)
 
 def get_client_info(bq_client, user_id: str) -> str:
@@ -181,18 +181,11 @@ def get_client_info(bq_client, user_id: str) -> str:
     LIMIT 1
     """
     
-    try:
-        query_job = bq_client.query(query)
-        results = query_job.result()
-        
-        for row in results:
+    query_job = bq_client.query(query)
+    results = query_job.result()
+    for row in results:
+        if row.available_tools:
+            available_tools = json.loads(row.available_tools)
+        else:
             available_tools = []
-            if row.available_tools:
-                available_tools = json.loads(row.available_tools)
-            return row.client_name, available_tools
-            
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error querying client name: {str(e)}")
-        return None
+        return row.client_name, available_tools
