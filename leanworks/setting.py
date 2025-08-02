@@ -159,10 +159,11 @@ Please improve your response by addressing the feedback above. Focus on:
 
 Generate an improved response now."""
 
+import json
 import logging
 logger = logging.getLogger(__name__)
 
-def get_client_name(bq_client, user_id: str) -> str:
+def get_client_info(bq_client, user_id: str) -> str:
     """
     Get client name from BigQuery table for a given user_id.
     
@@ -171,10 +172,10 @@ def get_client_name(bq_client, user_id: str) -> str:
         user_id: ID of the user
         
     Returns:
-        Client name as string
+        Client name as string, available tools as list of strings
     """
     query = f"""
-    SELECT client_name 
+    SELECT client_name, available_tools
     FROM `leanworks.clients.config`
     WHERE domain = '{user_id.split("@")[1]}'
     LIMIT 1
@@ -185,7 +186,10 @@ def get_client_name(bq_client, user_id: str) -> str:
         results = query_job.result()
         
         for row in results:
-            return row.client_name
+            available_tools = []
+            if row.available_tools:
+                available_tools = json.loads(row.available_tools)
+            return row.client_name, available_tools
             
         return None
         

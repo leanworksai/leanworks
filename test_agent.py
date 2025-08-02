@@ -5,7 +5,7 @@ from anthropic import Anthropic
 from google.cloud import bigquery
 import logging
 import traceback
-from leanworks.setting import get_client_name
+from leanworks.setting import get_client_info
 from gitlab import Gitlab
 logger = logging.getLogger(__name__)
 # Configure logging
@@ -18,7 +18,7 @@ def main():
     user_id = "yanfu@leanworks.ai"
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-        client_name = get_client_name(bq_client, user_id)
+        client_name, _ = get_client_info(bq_client, user_id)
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
