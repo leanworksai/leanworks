@@ -185,7 +185,7 @@ def get_client_info(bq_client, user_id: str) -> str:
     results = query_job.result()
     for row in results:
         if row.available_tools:
-            available_tools = json.loads(row.available_tools)
+            available_tools = row.available_tools.split(",")
         else:
             available_tools = []
         return row.client_name, available_tools
