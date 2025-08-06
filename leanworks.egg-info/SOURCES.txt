@@ -13,6 +13,7 @@ leanworks.egg-info/top_level.txt
 leanworks/agent/__init__.py
 leanworks/agent/chat.py
 leanworks/agent/conversation.py
+leanworks/agent/memory.py
 leanworks/agent/tools/__init__.py
 leanworks/agent/tools/gitlab.py
 leanworks/agent/tools/leanworks.py
@@ -22,7 +23,6 @@ leanworks/rag/__init__.py
 leanworks/rag/chat.py
 leanworks/rag/embedding.py
 leanworks/rag/filters.py
-leanworks/rag/memory.py
 leanworks/rag/query.py
 leanworks/rag/reranker.py
 leanworks/rag/vectordb.py
