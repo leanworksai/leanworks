@@ -221,6 +221,66 @@ class GitlabTool:
             "input_schema": {
                 "type": "object",
                 "properties": {
+                    "assignee_id": {
+                        "type": "integer",
+                        "description": "Return issues assigned to the given user id. Mutually exclusive with assignee_username. None returns unassigned issues. Any returns issues with an assignee."
+                    },
+                    "assignee_username": {
+                        "type": "string",
+                        "description": "Return issues assigned to the given username. Similar to assignee_id and mutually exclusive with assignee_id. In GitLab CE, the assignee_username array should only contain a single value."
+                    },
+                    "author_id": {
+                        "type": "integer",
+                        "description": "Return issues created by the given user id. Mutually exclusive with author_username. Combine with scope=all or scope=assigned_to_me."
+                    },
+                    "author_username": {
+                        "type": "string",
+                        "description": "Return issues created by the given username. Similar to author_id and mutually exclusive with author_id."
+                    },
+                    "created_after": {
+                        "type": "string",
+                        "description": "Return issues created on or after the given time. Expected in ISO 8601 format (2019-03-15T08:00:00Z)."
+                    },
+                    "created_before": {
+                        "type": "string",
+                        "description": "Return issues created on or before the given time. Expected in ISO 8601 format (2019-03-15T08:00:00Z)."
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Return issues that have no due date, are overdue, or whose due date is this week, this month, or between two weeks ago and next month. Accepts: 0 (no due date), any, today, tomorrow, overdue, week, month, next_month_and_previous_two_weeks."
+                    },
+                    "epic_id": {
+                        "type": "integer",
+                        "description": "Return issues associated with the given epic ID. None returns issues that are not associated with an epic. Any returns issues that are associated with an epic. Premium and Ultimate only."
+                    },
+                    "health_status": {
+                        "type": "string",
+                        "description": "Return issues with the specified health_status. None returns issues with no health status assigned, and Any returns issues with a health status assigned. Ultimate only."
+                    },
+                    "in": {
+                        "type": "string",
+                        "description": "Modify the scope of the search attribute. title, description, or a string joining them with comma. Default is title,description."
+                    },
+                    "issue_type": {
+                        "type": "string",
+                        "description": "Filter to a given type of issue. One of issue, incident, test_case or task."
+                    },
+                    "labels": {
+                        "type": "string",
+                        "description": "Comma-separated list of case-sensitive label names to filter by (e.g., 'bug,urgent')"
+                    },
+                    "milestone": {
+                        "type": "string",
+                        "description": "Return issues for a specific milestone. None returns issues that do not belong to a milestone. Any returns issues that belong to a milestone."
+                    },
+                    "not": {
+                        "type": "object",
+                        "description": "Return issues that do not match the parameters supplied. Accepts: assignee_id, assignee_username, author_id, author_username, confidential, created_after, created_before, due_date, epic_id, health_status, iids, issue_type, iteration_id, iteration_title, labels, milestone, my_reaction_emoji, non_archived, not, order_by, scope, search, state, updated_after, updated_before, weight."
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "Return issues ordered by created_at, updated_at, priority, due_date, relative_position, label_priority, milestone_due, popularity, weight fields. Default is created_at."
+                    },
                     "project_id": {
                         "type": "string",
                         "description": "GitLab project ID (not the project name) or comma-separated list of project IDs."
@@ -229,22 +289,38 @@ class GitlabTool:
                         "type": "string",
                         "description": "GitLab group ID (not the group name) or comma-separated list of group IDs."
                     },
+                    "scope": {
+                        "type": "string",
+                        "description": "Return issues for given scope: created_by_me, assigned_to_me or all. Defaults to created_by_me."
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Search term for issue title or description"
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "Return issues sorted in asc or desc order. Default is desc."
+                    },
                     "state": {
                         "type": "string",
                         "description": "Filter by issue state: 'opened' (default), 'closed', or 'all'",
                         "default": "opened"
                     },
-                    "assignee_username": {
+                    "updated_after": {
                         "type": "string",
-                        "description": "Filter by assignee username (GitLab username, not display name)"
+                        "description": "Return issues updated on or after the given time. Expected in ISO 8601 format (2019-03-15T08:00:00Z)."
                     },
-                    "labels": {
+                    "updated_before": {
                         "type": "string",
-                        "description": "Comma-separated list of case-sensitive label names to filter by (e.g., 'bug,urgent')"
+                        "description": "Return issues updated on or before the given time. Expected in ISO 8601 format (2019-03-15T08:00:00Z)."
                     },
-                    "search": {
-                        "type": "string",
-                        "description": "Search term for issue title or description"
+                    "weight": {
+                        "type": "integer",
+                        "description": "Return issues with the specified weight. None returns issues with no weight assigned. Any returns issues with a weight assigned."
+                    },
+                    "with_labels_details": {
+                        "type": "boolean",
+                        "description": "If true, response returns more details for each label in labels field: :name, :color, :description, :description_html, :text_color. Default is false."
                     }
                 }
             }
@@ -324,8 +400,16 @@ class GitlabTool:
         return all_issues
     
     def list_gitlab_issues(self, project_id: str = None, group_id: str = None, state: str = "opened", 
-                          assignee_username: str = None, labels: str = None, search: str = None):
-        logger.info(f"list_gitlab_issues called with parameters: project_id={project_id}, group_id={group_id}, state={state}, assignee_username={assignee_username}, labels={labels}, search={search}")
+                          assignee_username: str = None, labels: str = None, search: str = None,
+                          assignee_id: int = None, author_id: int = None, author_username: str = None,
+                          created_after: str = None, created_before: str = None,
+                          due_date: str = None, epic_id: int = None, health_status: str = None,
+                          in_scope: str = None, issue_type: str = None,
+                          milestone: str = None, not_params: dict = None,
+                          order_by: str = None, scope: str = None, sort: str = None,
+                          updated_after: str = None, updated_before: str = None, weight: int = None,
+                          with_labels_details: bool = None):
+        logger.info(f"list_gitlab_issues called with parameters: project_id={project_id}, group_id={group_id}, state={state}, assignee_username={assignee_username}, labels={labels}, search={search}, assignee_id={assignee_id}, author_id={author_id}, author_username={author_username}, created_after={created_after}, created_before={created_before}, due_date={due_date}, epic_id={epic_id}, health_status={health_status}, in_scope={in_scope}, issue_type={issue_type}, milestone={milestone}, not_params={not_params}, order_by={order_by}, scope={scope}, sort={sort}, updated_after={updated_after}, updated_before={updated_before}, weight={weight}, with_labels_details={with_labels_details}")
         
         try:
             # Validate that both project_id and group_id are not provided simultaneously
@@ -340,16 +424,56 @@ class GitlabTool:
                 state = 'opened'
             
             params = {'state': state}
+            
+            # Add all the new parameters to the request
+            if assignee_id is not None:
+                params['assignee_id'] = assignee_id
             if assignee_username:
                 params['assignee_username'] = assignee_username
+            if author_id is not None:
+                params['author_id'] = author_id
+            if author_username:
+                params['author_username'] = author_username
+            if created_after:
+                params['created_after'] = created_after
+            if created_before:
+                params['created_before'] = created_before
+            if due_date:
+                params['due_date'] = due_date
+            if epic_id is not None:
+                params['epic_id'] = epic_id
+            if health_status:
+                params['health_status'] = health_status
+            if in_scope:
+                params['in'] = in_scope
+            if issue_type:
+                params['issue_type'] = issue_type
             if labels:
                 # Validate labels format (should be comma-separated)
                 if isinstance(labels, str):
                     params['labels'] = labels
                 else:
                     logger.warning(f"Labels should be a comma-separated string, got: {type(labels)}")
+            if milestone:
+                params['milestone'] = milestone
+            if not_params:
+                params['not'] = not_params
+            if order_by:
+                params['order_by'] = order_by
+            if scope:
+                params['scope'] = scope
             if search:
                 params['search'] = search
+            if sort:
+                params['sort'] = sort
+            if updated_after:
+                params['updated_after'] = updated_after
+            if updated_before:
+                params['updated_before'] = updated_before
+            if weight is not None:
+                params['weight'] = weight
+            if with_labels_details is not None:
+                params['with_labels_details'] = with_labels_details
                 
             all_issues = []
             import urllib.parse

@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 def main():
-    user_id = "yanfu@leanworks.ai"
+    user_id = "bharathkumar.l@sbnasoftware.com"
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
         client_name, _ = get_client_info(bq_client, user_id)
@@ -36,12 +36,13 @@ def main():
             bq_client_wrapper=bq_client_wrapper,
             user_id=user_id,
             session_id="dheo3gft",
-            clear_conversation=True
+            clear_conversation=True,
+            tools=["gitlab"]
         )
         
         # Process a user message
         user_message = '''
-         summarize client interviews that we had with Alan, Sandy (JPMC) and Alex (Google)
+         How many tickets are there in the active milestone of the CCXAI group? List them based on project weightage and assignee.
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message, deep_research=False)
