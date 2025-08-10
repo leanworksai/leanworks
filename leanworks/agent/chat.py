@@ -543,7 +543,6 @@ class ChatAgent:
                     SOURCE_CONTEXT=source_content
                 )}]
             })
-            logger.info(f"Evaluation messages: {eval_messages}")
             # Create evaluation parameters with separate conversation
             eval_params = {
                 "model": GENERATION_MODEL,

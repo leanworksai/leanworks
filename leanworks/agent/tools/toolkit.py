@@ -111,12 +111,14 @@ class ToolUse:
             self.tools.extend([
                 self.gitlab_tool.list_gitlab_projects_property,
                 self.gitlab_tool.list_gitlab_issues_property,
+                self.gitlab_tool.list_gitlab_milestones_property,
                 self.gitlab_tool.find_gitlab_user_by_email_property,
                 self.gitlab_tool.list_gitlab_project_members_property,
                 self.gitlab_tool.get_gitlab_project_detail_property,
                 self.gitlab_tool.list_gitlab_groups_property,
                 self.gitlab_tool.get_gitlab_group_detail_property,
-                self.gitlab_tool.get_issue_detail_property
+                self.gitlab_tool.get_issue_detail_property,
+                self.gitlab_tool.get_issues_statistics_property
             ])
             
         # Add Outlook tools if available and enabled
@@ -150,12 +152,14 @@ class ToolUse:
             self.function_map.update({
                 "list_gitlab_projects": self.gitlab_tool.list_gitlab_projects,
                 "list_gitlab_issues": self.gitlab_tool.list_gitlab_issues,
+                "list_gitlab_milestones": self.gitlab_tool.list_gitlab_milestones,
                 "find_gitlab_user_by_email": self.gitlab_tool.find_gitlab_user_by_email,
                 "list_gitlab_project_members": self.gitlab_tool.list_gitlab_project_members,
                 "get_gitlab_project_detail": self.gitlab_tool.get_gitlab_project_detail,
                 "list_gitlab_groups": self.gitlab_tool.list_gitlab_groups,
                 "get_gitlab_group_detail": self.gitlab_tool.get_gitlab_group_detail,
-                "get_issue_detail": self.gitlab_tool.get_issue_detail
+                "get_issue_detail": self.gitlab_tool.get_issue_detail,
+                "get_issues_statistics": self.gitlab_tool.get_issues_statistics
             })
             
         # Add Outlook functions if available and enabled

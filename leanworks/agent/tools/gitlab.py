@@ -144,6 +144,15 @@ class GitlabTool:
         
         return False, None, 0
         
+    def _make_single_request_with_params(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
+        """Make a GET request to GitLab API for a single JSON object with query params."""
+        url = f"{self.gitlab_url}/api/v4{endpoint}"
+        success, data, status_code = self._make_request_with_retry(url, params)
+        if success:
+            return data
+        logger.error(f"Failed to fetch data from {url}: HTTP {status_code}")
+        return None
+
     @property
     def list_gitlab_projects_property(self):
         description = """
@@ -206,12 +215,12 @@ class GitlabTool:
     @property
     def list_gitlab_issues_property(self):
         description = """
-        List issues from GitLab projects or groups. The response will be a list of dictionaries containing issue details such as id, iid, title, description, state, created_at, updated_at, author, assignee, labels, and milestone.
-        This tool should be called to retrieve issue information when issue details are needed to answer questions and might be complimentary to list_tasks tool.
-        You can filter issues by project id(s) or group id(s), state (opened, closed), assignee, labels, or search by title/description.
-        If neither project_id nor group_id is provided, issues from all accessible projects will be returned.
+        List tasks from GitLab projects or groups. The response will be a list of dictionaries containing task details such as id, iid, title, description, state, created_at, updated_at, author, assignee, labels, and milestone.
+        This tool should be only called to retrieve task/issue details. If you want to just know the task/issue count statistics, you should call get_issues_statistics tool instead.
+        You can filter tasks/issues by project id(s) or group id(s), state (opened, closed), assignee, labels, or search by title/description.
+        If neither project_id nor group_id is provided, tasks/issues from all accessible projects will be returned.
         IDs can be single values or comma-separated lists to query multiple projects/groups.
-        Since this tool only provides basic issue information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific issue.
+        Since this tool only provides basic task/issue information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific task/issue.
         You might need to call list_gitlab_projects or list_gitlab_groups before or after to understand the relationships.
         """
         return {
@@ -686,6 +695,165 @@ class GitlabTool:
             return None
 
     @property
+    def get_issues_statistics_property(self):
+        description = """
+        Get GitLab issues count statistics. Supports global scope, or scoped to a specific project or group.
+        Returns counts for all, opened, and closed issues. Accepts standard filter parameters like labels, state,
+        milestone, scope, author/assignee filters, date ranges, and search options.
+        """
+        return {
+            "type": "custom",
+            "name": "get_issues_statistics",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "GitLab project ID or path. Comma-separated to aggregate across multiple."},
+                    "group_id": {"type": "string", "description": "GitLab group ID or path. Comma-separated to aggregate across multiple."},
+                    "labels": {"type": "string", "description": "Comma-separated label names"},
+                    "milestone": {"type": "string"},
+                    "scope": {"type": "string", "description": "created_by_me, assigned_to_me, or all"},
+                    "author_id": {"type": "integer"},
+                    "author_username": {"type": "string"},
+                    "assignee_id": {"type": "integer"},
+                    "assignee_username": {"type": "string"},
+                    "my_reaction_emoji": {"type": "string"},
+                    "iids": {"type": "array", "items": {"type": "integer"}},
+                    "search": {"type": "string"},
+                    "in_scope": {"type": "string", "description": "title, description, or title,description"},
+                    "created_after": {"type": "string"},
+                    "created_before": {"type": "string"},
+                    "updated_after": {"type": "string"},
+                    "updated_before": {"type": "string"},
+                    "confidential": {"type": "boolean"},
+                    "state": {"type": "string", "description": "opened, closed, or all"}
+                }
+            }
+        }
+
+    def get_issues_statistics(
+        self,
+        project_id: str = None,
+        group_id: str = None,
+        labels: str = None,
+        milestone: str = None,
+        scope: str = None,
+        author_id: int = None,
+        author_username: str = None,
+        assignee_id: int = None,
+        assignee_username: str = None,
+        my_reaction_emoji: str = None,
+        iids: List[int] = None,
+        search: str = None,
+        in_scope: str = None,
+        created_after: str = None,
+        created_before: str = None,
+        updated_after: str = None,
+        updated_before: str = None,
+        confidential: bool = None,
+        state: str = None,
+    ) -> Dict[str, Any]:
+        logger.info(
+            "get_issues_statistics called with params: project_id=%s, group_id=%s, labels=%s, milestone=%s, scope=%s, author_id=%s, author_username=%s, assignee_id=%s, assignee_username=%s, my_reaction_emoji=%s, iids=%s, search=%s, in_scope=%s, created_after=%s, created_before=%s, updated_after=%s, updated_before=%s, confidential=%s, state=%s",
+            project_id, group_id, labels, milestone, scope, author_id, author_username, assignee_id, assignee_username, my_reaction_emoji, iids, search, in_scope, created_after, created_before, updated_after, updated_before, confidential, state,
+        )
+
+        try:
+            # If both provided, prefer project scope
+            if project_id and group_id:
+                logger.warning("Both project_id and group_id provided. Using project_id and ignoring group_id.")
+                group_id = None
+
+            params: Dict[str, Any] = {}
+            if labels:
+                params["labels"] = labels
+            if milestone:
+                params["milestone"] = milestone
+            if scope:
+                params["scope"] = scope
+            if author_id is not None:
+                params["author_id"] = author_id
+            if author_username:
+                params["author_username"] = author_username
+            if assignee_id is not None:
+                params["assignee_id"] = assignee_id
+            if assignee_username:
+                params["assignee_username"] = assignee_username
+            if my_reaction_emoji:
+                params["my_reaction_emoji"] = my_reaction_emoji
+            if iids:
+                # GitLab expects repeated iids[]=42&iids[]=43
+                # requests encodes list properly if key is 'iids[]'
+                params["iids[]"] = iids
+            if search:
+                params["search"] = search
+            if in_scope:
+                params["in"] = in_scope
+            if created_after:
+                params["created_after"] = created_after
+            if created_before:
+                params["created_before"] = created_before
+            if updated_after:
+                params["updated_after"] = updated_after
+            if updated_before:
+                params["updated_before"] = updated_before
+            if confidential is not None:
+                params["confidential"] = confidential
+            if state:
+                params["state"] = state
+
+            def merge_counts(acc: Dict[str, int], counts: Dict[str, int]) -> Dict[str, int]:
+                for key in ("all", "opened", "closed"):
+                    acc[key] = acc.get(key, 0) + int(counts.get(key, 0))
+                return acc
+
+            import urllib.parse
+
+            # Determine scope and fetch
+            detail_breakdown = []
+            aggregated_counts: Dict[str, int] = {}
+
+            if project_id:
+                project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
+                logger.info(f"Fetching issues statistics for projects: {project_ids}")
+                for pid in project_ids:
+                    encoded = urllib.parse.quote(pid, safe='')
+                    data = self._make_single_request_with_params(f"/projects/{encoded}/issues_statistics", params)
+                    if not data:
+                        logger.warning(f"Failed to fetch statistics for project {pid}")
+                        continue
+                    counts = (data.get("statistics") or {}).get("counts") or {}
+                    aggregated_counts = merge_counts(aggregated_counts, counts)
+                    detail_breakdown.append({"project_id": pid, "counts": counts})
+                return {"scope": "project", "counts": aggregated_counts, "details": detail_breakdown}
+
+            if group_id:
+                group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
+                logger.info(f"Fetching issues statistics for groups: {group_ids}")
+                for gid in group_ids:
+                    encoded = urllib.parse.quote(gid, safe='')
+                    data = self._make_single_request_with_params(f"/groups/{encoded}/issues_statistics", params)
+                    if not data:
+                        logger.warning(f"Failed to fetch statistics for group {gid}")
+                        continue
+                    counts = (data.get("statistics") or {}).get("counts") or {}
+                    aggregated_counts = merge_counts(aggregated_counts, counts)
+                    detail_breakdown.append({"group_id": gid, "counts": counts})
+                return {"scope": "group", "counts": aggregated_counts, "details": detail_breakdown}
+
+            # Global scope
+            logger.info("Fetching global issues statistics")
+            data = self._make_single_request_with_params("/issues_statistics", params)
+            if not data:
+                return {"scope": "global", "counts": {"all": 0, "opened": 0, "closed": 0}}
+            counts = (data.get("statistics") or {}).get("counts") or {}
+            return {"scope": "global", "counts": counts}
+
+        except Exception as e:
+            logger.error(f"Error in get_issues_statistics: {str(e)}")
+            return {"scope": "unknown", "counts": {"all": 0, "opened": 0, "closed": 0}}
+
+    @property
     def find_gitlab_user_by_email_property(self):
         description = """
         Find GitLab user information by email address. The response will be a dictionary containing user details such as id, username, name, email, and profile information.
@@ -863,6 +1031,125 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in list_gitlab_project_members: {str(e)}")
+            return []
+
+    @property
+    def list_gitlab_milestones_property(self):
+        description = """
+        List milestones for a GitLab project. Returns a list with fields like id, iid, project_id, title, description,
+        due_date, start_date, state, updated_at, created_at, and expired. Accepts optional filters such as iids, state,
+        title, search, include_ancestors, updated_before, and updated_after. The project can be specified by numeric ID
+        or by URL-encoded path (group/subgroup/project).
+        """
+        return {
+            "type": "custom",
+            "name": "list_gitlab_milestones",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "GitLab project ID or URL-encoded path (e.g., group/project)"
+                    },
+                    "iids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Return only milestones having the given iid(s)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Filter by milestone state: active or closed"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Return only milestones with the given title"
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Return milestones where title or description matches the string"
+                    },
+                    "include_ancestors": {
+                        "type": "boolean",
+                        "description": "Include milestones from parent groups"
+                    },
+                    "updated_before": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime. Return milestones updated before this time"
+                    },
+                    "updated_after": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime. Return milestones updated after this time"
+                    }
+                },
+                "required": ["project_id"]
+            }
+        }
+
+    def list_gitlab_milestones(
+        self,
+        project_id: str,
+        iids: List[int] = None,
+        state: str = None,
+        title: str = None,
+        search: str = None,
+        include_ancestors: bool = None,
+        updated_before: str = None,
+        updated_after: str = None,
+    ) -> List[Dict[str, Any]]:
+        logger.info(
+            "list_gitlab_milestones called with params: project_id=%s, iids=%s, state=%s, title=%s, search=%s, include_ancestors=%s, updated_before=%s, updated_after=%s",
+            project_id, iids, state, title, search, include_ancestors, updated_before, updated_after,
+        )
+        try:
+            import urllib.parse
+            encoded_project_id = urllib.parse.quote(project_id, safe='')
+
+            params: Dict[str, Any] = {}
+            if iids:
+                params["iids[]"] = iids
+            if state:
+                # GitLab expects 'active' or 'closed'
+                if state not in ("active", "closed"):
+                    logger.warning("Invalid state '%s' for milestones. Expected 'active' or 'closed'", state)
+                else:
+                    params["state"] = state
+            if title:
+                params["title"] = title
+            if search:
+                params["search"] = search
+            if include_ancestors is not None:
+                params["include_ancestors"] = include_ancestors
+            if updated_before:
+                params["updated_before"] = updated_before
+            if updated_after:
+                params["updated_after"] = updated_after
+
+            logger.info(f"Querying milestones for project: {project_id} with params: {params}")
+            milestones = self._make_request(f"/projects/{encoded_project_id}/milestones", params)
+            logger.info(f"Retrieved {len(milestones)} milestones from GitLab")
+
+            result: List[Dict[str, Any]] = []
+            for m in milestones:
+                result.append({
+                    "id": m.get("id"),
+                    "iid": m.get("iid"),
+                    "project_id": m.get("project_id"),
+                    "title": m.get("title"),
+                    "description": m.get("description", ""),
+                    "due_date": m.get("due_date"),
+                    "start_date": m.get("start_date"),
+                    "state": m.get("state"),
+                    "updated_at": m.get("updated_at"),
+                    "created_at": m.get("created_at"),
+                    "expired": m.get("expired", False),
+                    "web_url": m.get("web_url", "")
+                })
+
+            logger.info(f"Returning {len(result)} formatted milestone records")
+            return result
+        except Exception as e:
+            logger.error(f"Error in list_gitlab_milestones: {str(e)}")
             return []
 
     @property
