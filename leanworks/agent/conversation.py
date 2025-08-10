@@ -253,6 +253,16 @@ class ConversationManager:
                             }
                             data_sources.append(f"BigQuery table: {table_mapping[tool_name]}")
                         
+                        elif tool_name in ["find_available_slots", "list_upcoming_meetings"]:
+                            # For Outlook/calendar tools, add calendar data source
+                            data_sources.append("Outlook Calendar")
+                        
+                        elif tool_name in ["list_gitlab_projects", "list_gitlab_issues", "find_gitlab_user_by_email", 
+                                          "list_gitlab_project_members", "get_gitlab_project_detail", 
+                                          "list_gitlab_groups", "get_gitlab_group_detail", "get_issue_detail"]:
+                            # For GitLab tools, add GitLab data source
+                            data_sources.append("GitLab")
+                        
                         elif tool_name == "search_knowledge":
                             # For search_knowledge, use the data sources directly from the result
                             if hasattr(result, '_search_data_sources'):

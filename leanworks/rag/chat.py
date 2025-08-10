@@ -504,8 +504,9 @@ class AsyncChat(Chat):
             data_source = match.metadata["data_source"]
             links.add(match.metadata["link"])
             
-            # Get timestamp if available
+            # Get timestamp if available and convert to ISO format
             timestamp = match.metadata.get("timestamp")
+            timestamp = datetime.datetime.fromtimestamp(float(timestamp), tz=datetime.timezone.utc).isoformat()
             
             # Extract context text directly from metadata
             context_text = match.metadata.get("chunk_text", "")

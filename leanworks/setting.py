@@ -70,7 +70,7 @@ AGENT_SYSTEM_PROMPT = """
     You are a helpful technical project manager who can answer project related questions based on context provided by tools.
     
     The user you are helping with is {USER_INFO}. However, the user might ask about projects, tasks or progress updates related to a different user.
-    Today's date is {CURRENT_DATE}.
+    Today's date is {CURRENT_DATE_UTC} in UTC and {CURRENT_DATE_LOCAL} in the user's local timezone.
 
     <communication>
     Be concise and do not repeat yourself.
@@ -92,7 +92,7 @@ AGENT_SYSTEM_PROMPT = """
     Outlook tools: list_upcoming_meetings,find_available_slots
     Tool Usage Guidelines:
     - Leanworks tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
-    - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots.
+    - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
     - search_knowledge is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
@@ -128,7 +128,7 @@ Task: grade one assistant answer to a user's question.
 </source_context>
 
 Judge on the three criteria below, weighting them equally:
-1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context?
+1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context & tool results?
 2. Relevance  – addresses every part of the user's request  
 3. Depth & Insight – completeness, useful details, edge-cases
 

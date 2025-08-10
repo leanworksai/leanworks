@@ -1,11 +1,12 @@
 import asyncio
 import datetime
 from openai import OpenAI
-from leanworks.rag.chat import AsyncChat
-from leanworks.rag.vectordb import PineconeHybridIndex
-from leanworks.rag.embedding import GoogleEmbedding
 import logging
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K, APPLY_FILTERS
+from leanworks.rag.embedding import GoogleEmbedding
+from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.chat import AsyncChat
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class SearchTool:
     def __init__(self, storage_client, secret_client):
         
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        
+        # Use the module-level imports directly
         embedding_model_client = GoogleEmbedding(secret_client.get("GEMINI_API_KEY"))
         
         # Initialize vector database client
@@ -149,27 +152,14 @@ class SearchTool:
         
         formatted_context = ""
         # Add document context
-        for i, ctx in enumerate(context):
-            # Convert timestamp to ISO UTC format if available
-            timestamp_str = ""
-            if ctx.get("timestamp"):
-                try:
-                    # Convert timestamp to ISO format
-                    timestamp = datetime.datetime.fromtimestamp(ctx["timestamp"], tz=datetime.timezone.utc)
-                    timestamp_str = f" (from {timestamp.isoformat()})"
-                except (TypeError, ValueError):
-                    logger.warning(f"Failed to convert timestamp: {ctx.get('timestamp')}")
-                    # If conversion fails, don't include timestamp
-                    pass
-            
+        for ctx in context:
             # Add source information if available
             source_str = ""
             if ctx.get("data_source"):
-                source_str = f" - Source: {ctx['data_source']}"
+                source_str = ctx['data_source']
             
-            # Add recency indicator - earlier items are more recent
-            recency_indicator = f"[DOCUMENT - Date: {timestamp_str}{source_str}]: "
-            formatted_context += recency_indicator + ctx["context"] + "\n\n"
+            title = f"DOCUMENT - Date: {ctx['timestamp']}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
+            formatted_context += f"{title}\n{ctx['context']}\n\n"
         
         # Return both formatted context and data sources
         return {

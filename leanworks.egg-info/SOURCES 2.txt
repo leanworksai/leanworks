@@ -6,14 +6,9 @@ leanworks/__init__.py
 leanworks/secret.py
 leanworks/setting.py
 leanworks.egg-info/PKG-INFO
-leanworks.egg-info/PKG-INFO 2
-leanworks.egg-info/SOURCES 2.txt
 leanworks.egg-info/SOURCES.txt
-leanworks.egg-info/dependency_links 2.txt
 leanworks.egg-info/dependency_links.txt
-leanworks.egg-info/requires 2.txt
 leanworks.egg-info/requires.txt
-leanworks.egg-info/top_level 2.txt
 leanworks.egg-info/top_level.txt
 leanworks/agent/__init__.py
 leanworks/agent/chat.py

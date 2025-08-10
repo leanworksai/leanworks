@@ -1,11 +1,11 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from datetime import datetime
+from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 import traceback
 import logging
-
+import pytz
 logger = logging.getLogger(__name__)
 
 class ChatAgent:
@@ -92,11 +92,13 @@ class ChatAgent:
         
         # Get user info from BigQuery
         user_info = self._get_user_info()
-        
+        user_timezone = user_info.get("timezone", "UTC")
+        user_timezone = pytz.timezone(user_timezone)
         # Set up API parameters for main model
         self.system_prompt = AGENT_SYSTEM_PROMPT.format(
             USER_INFO=user_info, 
-            CURRENT_DATE=datetime.now().strftime("%Y-%m-%d")
+            CURRENT_DATE_UTC=datetime.now(timezone.utc).isoformat(),
+            CURRENT_DATE_LOCAL=datetime.now(user_timezone).isoformat()
         )
         
         # Set the system prompt and user profile for memory manager
@@ -126,7 +128,7 @@ class ChatAgent:
                 return {"user_id": "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
             
             query = f"""
-            SELECT user_id, alias_email, first_name, last_name 
+            SELECT user_id, alias_email, first_name, last_name, timezone 
             FROM `leanworks.{self.bq_client_wrapper.client_name}.user_config` 
             WHERE user_id = '{self.user_id}'
             """
@@ -140,7 +142,8 @@ class ChatAgent:
                     "user_id": row.user_id or "",
                     "alias_email": row.alias_email or "",
                     "first_name": row.first_name or "",
-                    "last_name": row.last_name or ""
+                    "last_name": row.last_name or "",
+                    "timezone": row.timezone or "UTC"
                 }
                 logger.info(f"Retrieved user info: {user_info}")
                 return user_info
@@ -450,7 +453,26 @@ class ChatAgent:
         """
         source_content_with_attribution = []
         source_index = 0
-        
+
+        # Build a map from tool_use_id -> {name, input} by scanning assistant tool_use blocks
+        tool_use_meta = {}
+        try:
+            for message in self.conversation.conversation:
+                if message.get("role") == "assistant" and isinstance(message.get("content"), list):
+                    for block in message["content"]:
+                        if block.get("type") == "tool_use":
+                            tool_id = block.get("id")
+                            tool_name = block.get("name")
+                            tool_input = block.get("input")
+                            if tool_id:
+                                tool_use_meta[tool_id] = {
+                                    "name": tool_name,
+                                    "input": tool_input
+                                }
+        except Exception:
+            # If anything goes wrong, proceed without tool meta
+            pass
+
         # Look through conversation history for tool_result messages
         for message in self.conversation.conversation:
             if message.get("role") == "user" and isinstance(message.get("content"), list):
@@ -463,11 +485,30 @@ class ChatAgent:
                             if source_index < len(self.data_sources):
                                 data_source = f"[Source: {self.data_sources[source_index]}]\n"
                                 source_index += 1
-                            
-                            # Combine source attribution with content
-                            attributed_content = f"{data_source}{tool_content}"
+
+                            # Create a descriptive title including tool name and input parameters (if available)
+                            title = ""
+                            try:
+                                tool_use_id = content_block.get("tool_use_id")
+                                meta = tool_use_meta.get(tool_use_id, {})
+                                tool_name = meta.get("name") or "unknown_tool"
+                                tool_input = meta.get("input")
+                                if tool_input is not None:
+                                    import json as _json
+                                    inputs_str = _json.dumps(tool_input, ensure_ascii=False)
+                                else:
+                                    inputs_str = "{}"
+                                title = f"TOOL RESULT - Tool: {tool_name}, Inputs: {inputs_str}"
+                            except Exception:
+                                title = ""
+
+                            # Combine source attribution with title and content
+                            if title:
+                                attributed_content = f"{data_source}{title}\n{tool_content}"
+                            else:
+                                attributed_content = f"{data_source}{tool_content}"
                             source_content_with_attribution.append(attributed_content)
-        
+
         return "\n\n---\n\n".join(source_content_with_attribution) if source_content_with_attribution else "No source content available."
 
     def _perform_evaluation(self, response_text, source_content=""):
@@ -502,7 +543,7 @@ class ChatAgent:
                     SOURCE_CONTEXT=source_content
                 )}]
             })
-            
+            logger.info(f"Evaluation messages: {eval_messages}")
             # Create evaluation parameters with separate conversation
             eval_params = {
                 "model": GENERATION_MODEL,
