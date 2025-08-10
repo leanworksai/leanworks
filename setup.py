@@ -18,7 +18,8 @@ setup(
         "numpy==1.26.0",
         "tiktoken==0.9.0",
         "pyyaml==6.0.2",
-        "google-cloud-bigquery==3.34.0"
+        "google-cloud-bigquery==3.34.0",
+        "pytz==2024.1"
     ],
     author="Yanfu Zhu",
     author_email="yanfu@leanworks.ai",
