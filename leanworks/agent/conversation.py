@@ -1,6 +1,9 @@
 import json
 import re
 import copy
+import logging
+
+logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
@@ -140,6 +143,10 @@ class ConversationManager:
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         
+                        # Log tool call result preview
+                        result_preview = self._get_result_preview(result)
+                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        
                         # Format the result to have proper content structure
                         formatted_result = []
                         if isinstance(result, list):
@@ -218,6 +225,10 @@ class ConversationManager:
                     try:
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
+                        
+                        # Log tool call result preview
+                        result_preview = self._get_result_preview(result)
+                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
                         
                         # Track data sources based on tool type
                         if tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
@@ -320,6 +331,55 @@ class ConversationManager:
                     })
         
         return tool_results
+
+    def _get_result_preview(self, result):
+        """
+        Generate a preview of the tool call result for logging purposes.
+        
+        Args:
+            result: The result from a tool call
+            
+        Returns:
+            str: A preview string of the result
+        """
+        try:
+            if isinstance(result, list):
+                if len(result) == 0:
+                    return "Empty list"
+                elif len(result) == 1:
+                    return f"List with 1 item: {self._truncate_preview(str(result[0]))}"
+                else:
+                    return f"List with {len(result)} items: {self._truncate_preview(str(result[0]))} ..."
+            elif isinstance(result, dict):
+                if len(result) == 0:
+                    return "Empty dict"
+                else:
+                    # Get first key-value pair for preview
+                    first_key = next(iter(result))
+                    first_value = self._truncate_preview(str(result[first_key]))
+                    return f"Dict with {len(result)} keys: {first_key}={first_value} ..."
+            elif isinstance(result, str):
+                return self._truncate_preview(result)
+            else:
+                return self._truncate_preview(str(result))
+        except Exception as e:
+            return f"Error generating preview: {str(e)}"
+    
+    def _truncate_preview(self, text, max_length=200):
+        """
+        Truncate text to a maximum length for preview purposes.
+        
+        Args:
+            text: The text to truncate
+            max_length: Maximum length for the preview
+            
+        Returns:
+            str: Truncated text with ellipsis if needed
+        """
+        if len(text) <= max_length:
+            return text
+        else:
+            return text[:max_length] + "..."
 
     def extract_json_from_text(self, text):
         """

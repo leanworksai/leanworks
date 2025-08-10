@@ -17,6 +17,7 @@ leanworks/agent/memory.py
 leanworks/agent/tools/__init__.py
 leanworks/agent/tools/gitlab.py
 leanworks/agent/tools/leanworks.py
+leanworks/agent/tools/outlook.py
 leanworks/agent/tools/search.py
 leanworks/agent/tools/toolkit.py
 leanworks/rag/__init__.py
@@ -28,3 +29,8 @@ leanworks/rag/reranker.py
 leanworks/rag/vectordb.py
 leanworks/storage/__init__.py
 leanworks/storage/gcs.py
+tests/test_agent.py
+tests/test_memory.py
+tests/test_outlook.py
+tests/test_rag.py
+tests/test_retriever.py

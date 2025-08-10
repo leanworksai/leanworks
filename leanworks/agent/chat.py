@@ -43,18 +43,6 @@ class ChatAgent:
         self.model_client = model_client
         self.bq_client_wrapper = bq_client_wrapper
         
-        # Get gitlab_auth from secret client if gitlab is in tools
-        gitlab_auth = None
-        if tools and 'gitlab' in tools:
-            try:
-                gitlab_auth = {
-                    'gitlab_url': secret_client.get('GITLAB_DOMAIN'),
-                    'gitlab_token': secret_client.get('GITLAB_KEY')
-                }
-                logger.info("Retrieved gitlab credentials from secret client")
-            except Exception as e:
-                logger.error(f"Failed to retrieve gitlab credentials from secret client: {str(e)}")
-                raise ValueError(f"gitlab_auth is required when 'gitlab' is in tools, but failed to retrieve from secret client: {str(e)}")
         # Set parameters
         self.user_id = user_id
         self.session_id = session_id
@@ -65,8 +53,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with BigQuery client and tools (ToolUse handles tool processing)
-        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, gitlab_auth, tools=tools)
+        # Initialize tool use with BigQuery client and tools (ToolUse handles tool processing and credential retrieval)
+        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools)
         
 
         

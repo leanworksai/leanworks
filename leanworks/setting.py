@@ -89,9 +89,10 @@ AGENT_SYSTEM_PROMPT = """
     You have below tools at your disposal to answer project management related questions.
     Leanworks tools: list_projects,list_tasks,list_progress_updates,add_task,list_users,search_knowledge
     Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
-    
+    Outlook tools: list_upcoming_meetings,find_available_slots
     Tool Usage Guidelines:
     - Leanworks tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
+    - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots.
     - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
     - search_knowledge is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.

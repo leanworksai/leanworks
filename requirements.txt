@@ -13,3 +13,6 @@ tiktoken==0.9.0
 pyyaml==6.0.2
 google-cloud-bigquery==3.34.0
 requests==2.32.4
+msal==1.33.0
+python-dotenv==1.0.1
+pytz==2024.1

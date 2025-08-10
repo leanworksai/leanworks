@@ -1,12 +1,13 @@
 from leanworks.agent.tools.leanworks import LeanworksTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.gitlab import GitlabTool
+from leanworks.agent.tools.outlook import OutlookTool
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, gitlab_auth=None, tools=None):
+    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None):
         """
         Initialize ToolUse with various client connections.
         
@@ -15,7 +16,6 @@ class ToolUse:
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            gitlab_auth: Dictionary containing gitlab_url and gitlab_token
             tools: List of additional tools to enable. These will be added to the default tools ['leanworks', 'search']
         """
         # Set default tools if not provided
@@ -50,10 +50,14 @@ class ToolUse:
         elif 'search' in requested_tools:
             logger.warning("SearchTool not initialized: missing storage_client or secret_client")
             
-        # Initialize GitlabTool with error handling  
+        # Initialize GitlabTool with error handling - get credentials from secret_client
         self.gitlab_tool = None
-        if 'gitlab' in requested_tools and gitlab_auth:
+        if 'gitlab' in requested_tools and secret_client:
             try:
+                gitlab_auth = {
+                    'gitlab_url': secret_client.get('GITLAB_DOMAIN'),
+                    'gitlab_token': secret_client.get('GITLAB_KEY')
+                }
                 self.gitlab_tool = GitlabTool(gitlab_auth)
                 self.enabled_tools.append('gitlab')
                 logger.info("GitlabTool initialized successfully")
@@ -61,7 +65,29 @@ class ToolUse:
                 logger.error(f"Failed to initialize GitlabTool: {str(e)}")
                 self.gitlab_tool = None
         elif 'gitlab' in requested_tools:
-            logger.warning("GitlabTool not initialized: missing gitlab_auth")
+            logger.warning("GitlabTool not initialized: missing secret_client")
+            
+        # Initialize OutlookTool with error handling - get credentials from secret_client
+        self.outlook_tool = None
+        if 'outlook' in requested_tools and secret_client:
+            try:
+                outlook_auth = {
+                    'azure_client_id': secret_client.get('AD_CLIENT_ID'),
+                    'azure_client_secret': secret_client.get('AD_CLIENT_SECRET'),
+                    'azure_tenant_id': secret_client.get('AD_TENANT_ID')
+                }
+                self.outlook_tool = OutlookTool(
+                    client_id=outlook_auth.get('azure_client_id'),
+                    client_secret=outlook_auth.get('azure_client_secret'),
+                    tenant_id=outlook_auth.get('azure_tenant_id')
+                )
+                self.enabled_tools.append('outlook')
+                logger.info("OutlookTool initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize OutlookTool: {str(e)}")
+                self.outlook_tool = None
+        elif 'outlook' in requested_tools:
+            logger.warning("OutlookTool not initialized: missing secret_client")
             
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         
@@ -92,6 +118,14 @@ class ToolUse:
                 self.gitlab_tool.get_gitlab_group_detail_property,
                 self.gitlab_tool.get_issue_detail_property
             ])
+            
+        # Add Outlook tools if available and enabled
+        if self.outlook_tool:
+            self.tools.extend([
+                self.outlook_tool.list_upcoming_meetings_property,
+                self.outlook_tool.find_available_slots_property
+            ])
+            logger.info("Outlook tools added to tools list")
         
         # Define function map based on successfully initialized tools
         self.function_map = {}
@@ -123,6 +157,14 @@ class ToolUse:
                 "get_gitlab_group_detail": self.gitlab_tool.get_gitlab_group_detail,
                 "get_issue_detail": self.gitlab_tool.get_issue_detail
             })
+            
+        # Add Outlook functions if available and enabled
+        if self.outlook_tool:
+            self.function_map.update({
+                "list_upcoming_meetings": self.outlook_tool.list_upcoming_meetings,
+                "find_available_slots": self.outlook_tool.find_available_slots
+            })
+            logger.info("Outlook functions added to function_map")
 
         # Log final tool availability for debugging
         logger.info(f"Requested tools: {requested_tools}")
