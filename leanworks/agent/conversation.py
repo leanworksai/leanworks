@@ -147,6 +147,16 @@ class ConversationManager:
                         result_preview = self._get_result_preview(result)
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
                         
+                        # If tool returns an error object, surface just the error message
+                        if isinstance(result, dict) and "error" in result:
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": str(result["error"]),
+                                "is_error": True
+                            })
+                            continue
+
                         # Format the result to have proper content structure
                         formatted_result = []
                         if isinstance(result, list):
@@ -292,6 +302,16 @@ class ConversationManager:
                                             except Exception as e:
                                                 logger.warning(f"Error parsing source from line: {line}, error: {e}")
                         
+                        # If tool returns an error object, surface just the error message
+                        if isinstance(result, dict) and "error" in result:
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": str(result["error"]),
+                                "is_error": True
+                            })
+                            continue
+
                         # Format the result to have proper content structure
                         formatted_result = []
                         if isinstance(result, list):

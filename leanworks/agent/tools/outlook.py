@@ -135,7 +135,7 @@ class OutlookTool:
             
             if response.status_code != 200:
                 logger.error(f"Graph API error: {response.status_code} - {response.text}")
-                return {"error": f"Graph API error: {response.status_code}"}
+                return {"error": f"Graph API error: {response.status_code}: {response.text}"}
             
             events_data = response.json()
             events = events_data.get('value', [])
@@ -332,6 +332,14 @@ class OutlookTool:
                     
                     if response.status_code != 200:
                         logger.warning(f"Could not retrieve calendar for {user_email}: {response.status_code}")
+                        # Surface the error for this user while continuing others
+                        all_busy_times.append({
+                            'start': start_datetime_user_tz,
+                            'end': start_datetime_user_tz,
+                            'user': user_email,
+                            'user_timezone': user_tz,
+                            'error': f"Graph API error: {response.status_code}: {response.text}"
+                        })
                         continue
                     
                     events_data = response.json()
@@ -366,6 +374,13 @@ class OutlookTool:
                             
                 except Exception as e:
                     logger.warning(f"Could not retrieve calendar for {user_email}: {str(e)}")
+                    all_busy_times.append({
+                        'start': start_dt,
+                        'end': start_dt,
+                        'user': user_email,
+                        'user_timezone': 'UTC',
+                        'error': f"Failed to retrieve calendar: {str(e)}"
+                    })
                     continue
             
             # Sort busy times by start time

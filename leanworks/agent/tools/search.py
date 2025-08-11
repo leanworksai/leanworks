@@ -30,7 +30,7 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, storage_client, secret_client):
+    def __init__(self, storage_client, secret_client, read_document_ids: set | None = None):
         
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
         
@@ -54,18 +54,20 @@ class SearchTool:
             storage_client=storage_client,
             model_client=model_client
         )
+        # Shared deduplication set used across searches
+        self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         
     @property
-    def search_knowledge_property(self):
+    def search_documents_property(self):
         description = """
         Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
         You MUST ALWAYS use this tool as the fallback when any of these conditions occur:
         - Other tools are not suitable to answer the question
         - Other tools return empty or insufficient results
-        - You have used the search_knowledge tool before and the answer is still not satisfactory. 
+        - You have used the search_documents tool before and the answer is still not satisfactory. 
         - You have ANY uncertainty about the quality of your answer
         - More detailed information is needed to answer the question
-        When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_knowledge tool) with a different query 
+        When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_documents tool) with a different query 
         so that it can surface more information to help refine your answer.
         You might need to use this tool multiple times with different queries to fully answer the question.
         NEVER skip this tool if the above conditions are met.
@@ -73,7 +75,7 @@ class SearchTool:
         """
         return {
             "type": "custom",
-            "name": "search_knowledge",
+            "name": "search_documents",
             "description": description,
             "input_schema": {
                 "type": "object",
@@ -81,13 +83,25 @@ class SearchTool:
                     "query": {
                         "type": "string",
                         "description": "Query to search the knowledge base"
+                    },
+                    "data_source": {
+                        "type": "string",
+                        "description": "Optional data source name to filter documents (e.g., Confluence, GitLab, GoogleDrive)"
+                    },
+                    "start_timestamp": {
+                        "type": "string",
+                        "description": "Optional start of time range in ISO 8601 (e.g., 2025-06-01T00:00:00Z)"
+                    },
+                    "end_timestamp": {
+                        "type": "string",
+                        "description": "Optional end of time range in ISO 8601 (e.g., 2025-06-30T23:59:59Z)"
                     }
                 },
                 "required": ["query"]
             }
         }
 
-    async def async_search_knowledge(self, query: str, read_document_ids: set = None):
+    async def async_search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -98,12 +112,6 @@ class SearchTool:
             # Task 1: Generate query rewrites if needed
             rewrites_task = asyncio.create_task(self.chat.async_rewrite_query(query))
             tasks.append(rewrites_task)
-            
-            # Task 2: Extract time filters if APPLY_FILTERS is enabled
-            filters_task = None
-            if APPLY_FILTERS:
-                filters_task = asyncio.create_task(self.chat.async_extract_time_filters(query))
-                tasks.append(filters_task)
                 
             # Wait for all tasks to complete
             if tasks:
@@ -118,15 +126,45 @@ class SearchTool:
             except Exception as e:
                 logger.error(f"Error getting query rewrites: {str(e)}")
                     
-            # Get time filters for retrieval
-            filters = None
-            if APPLY_FILTERS and filters_task:
-                try:
-                    filters = filters_task.result()
-                    logger.info(f"Time filters for '{query}': {filters}")
-                except Exception as e:
-                    logger.error(f"Error getting time filters: {str(e)}")
             
+            # Build filters from explicit arguments
+            filters = {}
+            if data_source:
+                filters["data_source"] = {"$eq": data_source}
+            # Build timestamp filter
+            def _parse_to_unix_seconds(value):
+                try:
+                    # Allow ints/floats or numeric strings directly
+                    if isinstance(value, (int, float)):
+                        return int(value)
+                    if isinstance(value, str):
+                        stripped = value.strip()
+                        # Numeric string
+                        if stripped.isdigit():
+                            return int(stripped)
+                        # ISO 8601 parsing; accept trailing 'Z'
+                        iso_str = stripped.replace('Z', '+00:00') if stripped.endswith('Z') else stripped
+                        dt = datetime.datetime.fromisoformat(iso_str)
+                        # If naive, assume UTC
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=datetime.timezone.utc)
+                        return int(dt.timestamp())
+                except Exception as e:
+                    logger.warning(f"Failed to parse timestamp '{value}': {e}")
+                return None
+
+            ts_filter = {}
+            if start_timestamp is not None:
+                parsed_start = _parse_to_unix_seconds(start_timestamp)
+                if parsed_start is not None:
+                    ts_filter["$gte"] = parsed_start
+            if end_timestamp is not None:
+                parsed_end = _parse_to_unix_seconds(end_timestamp)
+                if parsed_end is not None:
+                    ts_filter["$lte"] = parsed_end
+            if ts_filter:
+                filters["timestamp"] = ts_filter
+
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
             loop = asyncio.get_event_loop()
             nodes = await loop.run_in_executor(
@@ -142,14 +180,15 @@ class SearchTool:
                 apply_filters=True, 
                 use_reranker=True, 
                 rerank_top_k=RERANK_TOP_K,
-                read_document_ids=read_document_ids
+                read_document_ids=self.read_document_ids
             )
             print(f"context: {context}")
             logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
             logger.info(f"Retrieved data sources: {data_sources}")
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
-        
+            return {"error": f"async context retrieval failed: {str(e)}"}
+
         formatted_context = ""
         # Add document context
         for ctx in context:
@@ -167,22 +206,21 @@ class SearchTool:
             "data_sources": data_sources
         }
         
-    def search_knowledge(self, query: str, read_document_ids: set = None):
+    def search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
         """
-        Synchronous wrapper for the async search_knowledge method.
+        Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
         
         Args:
             query: The search query
+            data_source: Optional data source name to filter
+            start_timestamp: Optional start of time range (Unix timestamp)
+            end_timestamp: Optional end of time range (Unix timestamp)
             read_document_ids: Set of document IDs already read to skip duplicates
         """
         try:
-            logger.info(f"Executing search_knowledge with query: {query}")
-            logger.info(f"Received read_document_ids: {read_document_ids}")
-            logger.info(f"read_document_ids is None: {read_document_ids is None}")
-            if read_document_ids is not None:
-                logger.info(f"read_document_ids length: {len(read_document_ids)}")
-                logger.info(f"read_document_ids id: {id(read_document_ids)}")
+            logger.info(f"Executing search_documents with query: {query}")
+            logger.info(f"Using shared read_document_ids length: {len(self.read_document_ids)}")
             # Get or create an event loop
             try:
                 loop = asyncio.get_event_loop()
@@ -192,8 +230,18 @@ class SearchTool:
                 asyncio.set_event_loop(loop)
             
             # Run the async method in the event loop
-            result = loop.run_until_complete(self.async_search_knowledge(query, read_document_ids))
+            result = loop.run_until_complete(self.async_search_documents(
+                query=query,
+                data_source=data_source,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp
+            ))
             
+            # If async layer returned an error, surface it directly
+            if isinstance(result, dict) and "error" in result:
+                error_message = f"Error: {result['error']}"
+                return SearchResult(error_message, [])
+
             # Extract the formatted context for backward compatibility
             formatted_context = result["formatted_context"]
             
@@ -205,6 +253,6 @@ class SearchTool:
             return SearchResult(formatted_context, result["data_sources"])
             
         except Exception as e:
-            logger.error(f"Error in synchronous search_knowledge: {str(e)}")
-            error_message = f"Error occurred during knowledge search: {str(e)}"
+            logger.error(f"Error in synchronous search_documents: {str(e)}")
+            error_message = f"Error occurred during documents search: {str(e)}"
             return SearchResult(error_message, [])
