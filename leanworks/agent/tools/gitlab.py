@@ -210,18 +210,22 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_projects: {str(e)}")
-            return []
+            return {"error": f"list_gitlab_projects failed: {str(e)}"}
         
     @property
     def list_gitlab_issues_property(self):
         description = """
-        List tasks from GitLab projects or groups. The response will be a list of dictionaries containing task details such as id, iid, title, description, state, created_at, updated_at, author, assignee, labels, and milestone.
-        This tool should be only called to retrieve task/issue details. If you want to just know the task/issue count statistics, you should call get_issues_statistics tool instead.
-        You can filter tasks/issues by project id(s) or group id(s), state (opened, closed), assignee, labels, or search by title/description.
-        If neither project_id nor group_id is provided, tasks/issues from all accessible projects will be returned.
-        IDs can be single values or comma-separated lists to query multiple projects/groups.
-        Since this tool only provides basic task/issue information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific task/issue.
-        You might need to call list_gitlab_projects or list_gitlab_groups before or after to understand the relationships.
+        List issues from GitLab projects or groups.
+
+        Response fields:
+          - total_issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 30 issues match.
+          - first_30_issues: the first 30 issues according to the requested ordering (or the full list if 30 or fewer).
+          - total_issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
+
+        Use this to retrieve issue details along with statistics. You can filter by project id(s) or group id(s), state (opened, closed), assignee, labels, and search by title/description.
+        If neither project_id nor group_id is provided, issues from all accessible projects will be returned. IDs can be single values or comma-separated lists to query multiple projects/groups.
+        For deeper details on a specific issue, call get_issue_detail after locating it here.
+        You might also call list_gitlab_projects or list_gitlab_groups to understand relationships.
         """
         return {
             "type": "custom",
@@ -565,11 +569,45 @@ class GitlabTool:
                 result.append(issue_dict)
             
             logger.info(f"Returning {len(result)} formatted issue records")
-            return result
+
+            # Also compute statistics using the same filters so callers receive both issues and counts together
+            try:
+                statistics = self.get_issues_statistics(
+                    project_id=project_id,
+                    group_id=group_id,
+                    labels=labels,
+                    milestone=milestone,
+                    scope=scope,
+                    author_id=author_id,
+                    author_username=author_username,
+                    assignee_id=assignee_id,
+                    assignee_username=assignee_username,
+                    my_reaction_emoji=None,
+                    iids=None,
+                    search=search,
+                    in_scope=in_scope,
+                    created_after=created_after,
+                    created_before=created_before,
+                    updated_after=updated_after,
+                    updated_before=updated_before,
+                    confidential=None,
+                    state=state,
+                )
+            except Exception as stats_error:
+                logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
+                statistics = {"error": f"issues statistics failed: {str(stats_error)}"}
+
+            if len(result) > 30:
+                total_issues_value = 'too large to display'
+                first_30_issues = result[:30]
+            else:
+                total_issues_value = result
+                first_30_issues = result
+
+            return {"total_issues": total_issues_value, "first_30_issues": first_30_issues, "total_issues_statistics": statistics}
         except Exception as e:
             logger.error(f"Error in list_gitlab_issues: {str(e)}")
-            # Return empty list for consistency but log the full error for debugging
-            return []
+            return {"error": f"list_gitlab_issues failed: {str(e)}"}
 
     @property
     def get_issue_detail_property(self):
@@ -605,7 +643,7 @@ class GitlabTool:
             
             if not issue_detail:
                 logger.warning(f"Issue {issue_id} not found or not accessible")
-                return None
+                return {"error": f"Issue {issue_id} not found or not accessible"}
             
             # Extract comprehensive issue information
             author_info = issue_detail.get('author', {})
@@ -692,44 +730,7 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_issue_detail: {str(e)}")
-            return None
-
-    @property
-    def get_issues_statistics_property(self):
-        description = """
-        Get GitLab issues count statistics. Supports global scope, or scoped to a specific project or group.
-        Returns counts for all, opened, and closed issues. Accepts standard filter parameters like labels, state,
-        milestone, scope, author/assignee filters, date ranges, and search options.
-        """
-        return {
-            "type": "custom",
-            "name": "get_issues_statistics",
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "description": "GitLab project ID or path. Comma-separated to aggregate across multiple."},
-                    "group_id": {"type": "string", "description": "GitLab group ID or path. Comma-separated to aggregate across multiple."},
-                    "labels": {"type": "string", "description": "Comma-separated label names"},
-                    "milestone": {"type": "string"},
-                    "scope": {"type": "string", "description": "created_by_me, assigned_to_me, or all"},
-                    "author_id": {"type": "integer"},
-                    "author_username": {"type": "string"},
-                    "assignee_id": {"type": "integer"},
-                    "assignee_username": {"type": "string"},
-                    "my_reaction_emoji": {"type": "string"},
-                    "iids": {"type": "array", "items": {"type": "integer"}},
-                    "search": {"type": "string"},
-                    "in_scope": {"type": "string", "description": "title, description, or title,description"},
-                    "created_after": {"type": "string"},
-                    "created_before": {"type": "string"},
-                    "updated_after": {"type": "string"},
-                    "updated_before": {"type": "string"},
-                    "confidential": {"type": "boolean"},
-                    "state": {"type": "string", "description": "opened, closed, or all"}
-                }
-            }
-        }
+            return {"error": f"get_issue_detail failed: {str(e)}"}
 
     def get_issues_statistics(
         self,
@@ -845,13 +846,13 @@ class GitlabTool:
             logger.info("Fetching global issues statistics")
             data = self._make_single_request_with_params("/issues_statistics", params)
             if not data:
-                return {"scope": "global", "counts": {"all": 0, "opened": 0, "closed": 0}}
+                return {"error": "issues_statistics request returned no data"}
             counts = (data.get("statistics") or {}).get("counts") or {}
             return {"scope": "global", "counts": counts}
 
         except Exception as e:
             logger.error(f"Error in get_issues_statistics: {str(e)}")
-            return {"scope": "unknown", "counts": {"all": 0, "opened": 0, "closed": 0}}
+            return {"error": f"get_issues_statistics failed: {str(e)}"}
 
     @property
     def find_gitlab_user_by_email_property(self):
@@ -943,11 +944,11 @@ class GitlabTool:
                 return matching_users
             else:
                 logger.info(f"No user found with email: {email}")
-                return None
+                return {"error": f"No user found with email: {email}"}
                 
         except Exception as e:
             logger.error(f"Error in find_gitlab_user_by_email: {str(e)}")
-            return None
+            return {"error": f"find_gitlab_user_by_email failed: {str(e)}"}
 
     def verify_project_access(self, project_id: str):
         """
@@ -983,11 +984,11 @@ class GitlabTool:
                 }
             else:
                 logger.warning(f"Project {project_id} not found or not accessible")
-                return None
+                return {"error": f"Project {project_id} not found or not accessible"}
                 
         except Exception as e:
             logger.error(f"Error verifying project access: {str(e)}")
-            return None
+            return {"error": f"verify_project_access failed: {str(e)}"}
 
     def list_gitlab_project_members(self, project_id: str):
         logger.info(f"list_gitlab_project_members called with project_id: {project_id}")
@@ -1031,7 +1032,7 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in list_gitlab_project_members: {str(e)}")
-            return []
+            return {"error": f"list_gitlab_project_members failed: {str(e)}"}
 
     @property
     def list_gitlab_milestones_property(self):
@@ -1150,7 +1151,7 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_milestones: {str(e)}")
-            return []
+            return {"error": f"list_gitlab_milestones failed: {str(e)}"}
 
     @property
     def get_gitlab_project_detail_property(self):
@@ -1199,7 +1200,7 @@ class GitlabTool:
             
             if not project_detail:
                 logger.warning(f"Project {project_id} not found or not accessible")
-                return None
+                return {"error": f"Project {project_id} not found or not accessible"}
             
             # Extract essential project information
             result = {
@@ -1265,7 +1266,7 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_project_detail: {str(e)}")
-            return None
+            return {"error": f"get_gitlab_project_detail failed: {str(e)}"}
 
     @property
     def list_gitlab_groups_property(self):
@@ -1336,7 +1337,7 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_groups: {str(e)}")
-            return []
+            return {"error": f"list_gitlab_groups failed: {str(e)}"}
 
     @property
     def get_gitlab_group_detail_property(self):
@@ -1385,7 +1386,7 @@ class GitlabTool:
             
             if not group_detail:
                 logger.warning(f"Group {group_id} not found or not accessible")
-                return None
+                return {"error": f"Group {group_id} not found or not accessible"}
             
             # Extract essential group information
             result = {
@@ -1450,8 +1451,7 @@ class GitlabTool:
                 
             except Exception as e:
                 logger.error(f"Error retrieving group members: {str(e)}")
-                result['members'] = []
-                result['members_count'] = 0
+                result['members_error'] = f"group members failed: {str(e)}"
             
             # Get group projects if requested
             if include_projects:
@@ -1481,8 +1481,7 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving group projects: {str(e)}")
-                    result['projects'] = []
-                    result['projects_count'] = 0
+                    result['projects_error'] = f"group projects failed: {str(e)}"
             
             # Get subgroups if requested
             if include_subgroups:
@@ -1511,12 +1510,11 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving subgroups: {str(e)}")
-                    result['subgroups'] = []
-                    result['subgroups_count'] = 0
+                    result['subgroups_error'] = f"group subgroups failed: {str(e)}"
             
             logger.info(f"Successfully retrieved detailed information for group: {group_detail.get('name')}")
             return result
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_group_detail: {str(e)}")
-            return None
+            return {"error": f"get_gitlab_group_detail failed: {str(e)}"}

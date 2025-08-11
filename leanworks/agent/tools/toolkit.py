@@ -41,7 +41,10 @@ class ToolUse:
         self.search_tool = None
         if 'search' in requested_tools and storage_client and secret_client:
             try:
-                self.search_tool = SearchTool(storage_client, secret_client)
+                # Pass shared read_document_ids so deduplication persists across searches
+                # Ensure read_document_ids is initialized before passing
+                self.read_document_ids = read_document_ids if read_document_ids is not None else set()
+                self.search_tool = SearchTool(storage_client, secret_client, read_document_ids=self.read_document_ids)
                 self.enabled_tools.append('search')
                 logger.info("SearchTool initialized successfully")
             except Exception as e:
@@ -89,7 +92,9 @@ class ToolUse:
         elif 'outlook' in requested_tools:
             logger.warning("OutlookTool not initialized: missing secret_client")
             
-        self.read_document_ids = read_document_ids if read_document_ids is not None else set()
+        # Ensure read_document_ids exists even if search tool not initialized above
+        if not hasattr(self, 'read_document_ids'):
+            self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         
         # Initialize tools list based on successfully initialized tools
         self.tools = []
@@ -103,8 +108,8 @@ class ToolUse:
             ])
         
         if self.search_tool:
-            self.tools.append(self.search_tool.search_knowledge_property)
-            logger.info("search_knowledge tool added to tools list")
+            self.tools.append(self.search_tool.search_documents_property)
+            logger.info("search_documents tool added to tools list")
             
         # Add GitLab tools if available and enabled
         if self.gitlab_tool:
@@ -117,8 +122,7 @@ class ToolUse:
                 self.gitlab_tool.get_gitlab_project_detail_property,
                 self.gitlab_tool.list_gitlab_groups_property,
                 self.gitlab_tool.get_gitlab_group_detail_property,
-                self.gitlab_tool.get_issue_detail_property,
-                self.gitlab_tool.get_issues_statistics_property
+                self.gitlab_tool.get_issue_detail_property
             ])
             
         # Add Outlook tools if available and enabled
@@ -144,8 +148,8 @@ class ToolUse:
         
         # Add search function if available and enabled
         if self.search_tool:
-            self.function_map["search_knowledge"] = self._search_knowledge_with_deduplication
-            logger.info("search_knowledge function added to function_map")
+            self.function_map["search_documents"] = self.search_tool.search_documents
+            logger.info("search_documents function added to function_map (direct)")
             
         # Add GitLab functions if available and enabled
         if self.gitlab_tool:
@@ -158,8 +162,7 @@ class ToolUse:
                 "get_gitlab_project_detail": self.gitlab_tool.get_gitlab_project_detail,
                 "list_gitlab_groups": self.gitlab_tool.list_gitlab_groups,
                 "get_gitlab_group_detail": self.gitlab_tool.get_gitlab_group_detail,
-                "get_issue_detail": self.gitlab_tool.get_issue_detail,
-                "get_issues_statistics": self.gitlab_tool.get_issues_statistics
+                "get_issue_detail": self.gitlab_tool.get_issue_detail
             })
             
         # Add Outlook functions if available and enabled
@@ -177,14 +180,4 @@ class ToolUse:
         logger.info(f"Available functions: {list(self.function_map.keys())}")
 
     
-    def _search_knowledge_with_deduplication(self, query: str):
-        """
-        Wrapper for search_knowledge that passes the read document IDs for deduplication.
-        
-        Args:
-            query: The search query
-            
-        Returns:
-            SearchResult object with formatted context and data sources
-        """
-        return self.search_tool.search_knowledge(query, self.read_document_ids)
+    
