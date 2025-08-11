@@ -8,8 +8,8 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
+# GENERATION_MODEL = "claude-3-5-haiku-latest"
 GENERATION_MODEL = "claude-sonnet-4-20250514"
-# GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -128,7 +128,7 @@ Task: grade one assistant answer to a user's question.
 </source_context>
 
 Judge on the three criteria below, weighting them equally:
-1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context? You should treat information from source text as authoritative.
+1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context? You should treat information from source context as authoritative, even though sometimes it might be incomplete.
 2. Relevance  – addresses every part of the user's request  
 3. Depth & Insight – completeness, useful details, edge-cases
 
