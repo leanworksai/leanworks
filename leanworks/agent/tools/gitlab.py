@@ -597,14 +597,12 @@ class GitlabTool:
                 logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
                 statistics = {"error": f"issues statistics failed: {str(stats_error)}"}
 
-            if len(result) > 30:
+            if len(result) > 15:
                 total_issues_value = 'too large to display'
-                first_30_issues = result[:30]
             else:
                 total_issues_value = result
-                first_30_issues = result
 
-            return {"total_issues": total_issues_value, "first_30_issues": first_30_issues, "total_issues_statistics": statistics}
+            return {"issues": total_issues_value, "issues_statistics": statistics}
         except Exception as e:
             logger.error(f"Error in list_gitlab_issues: {str(e)}")
             return {"error": f"list_gitlab_issues failed: {str(e)}"}
@@ -753,7 +751,7 @@ class GitlabTool:
         updated_before: str = None,
         confidential: bool = None,
         state: str = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         logger.info(
             "get_issues_statistics called with params: project_id=%s, group_id=%s, labels=%s, milestone=%s, scope=%s, author_id=%s, author_username=%s, assignee_id=%s, assignee_username=%s, my_reaction_emoji=%s, iids=%s, search=%s, in_scope=%s, created_after=%s, created_before=%s, updated_after=%s, updated_before=%s, confidential=%s, state=%s",
             project_id, group_id, labels, milestone, scope, author_id, author_username, assignee_id, assignee_username, my_reaction_emoji, iids, search, in_scope, created_after, created_before, updated_after, updated_before, confidential, state,
@@ -814,6 +812,44 @@ class GitlabTool:
             detail_breakdown = []
             aggregated_counts: Dict[str, int] = {}
 
+            # Build a clear, human-readable description of filters
+            filter_parts = []
+            if state:
+                filter_parts.append(f"state={state}")
+            if labels:
+                filter_parts.append(f"labels={labels}")
+            if milestone:
+                filter_parts.append(f"milestone={milestone}")
+            if scope:
+                filter_parts.append(f"scope={scope}")
+            if author_id is not None:
+                filter_parts.append(f"author_id={author_id}")
+            if author_username:
+                filter_parts.append(f"author_username={author_username}")
+            if assignee_id is not None:
+                filter_parts.append(f"assignee_id={assignee_id}")
+            if assignee_username:
+                filter_parts.append(f"assignee_username={assignee_username}")
+            if my_reaction_emoji:
+                filter_parts.append(f"my_reaction_emoji={my_reaction_emoji}")
+            if iids:
+                filter_parts.append(f"iids={','.join(str(x) for x in iids)}")
+            if search:
+                filter_parts.append(f"search={search}")
+            if in_scope:
+                filter_parts.append(f"in={in_scope}")
+            if created_after:
+                filter_parts.append(f"created_after={created_after}")
+            if created_before:
+                filter_parts.append(f"created_before={created_before}")
+            if updated_after:
+                filter_parts.append(f"updated_after={updated_after}")
+            if updated_before:
+                filter_parts.append(f"updated_before={updated_before}")
+            if confidential is not None:
+                filter_parts.append(f"confidential={confidential}")
+            filters_desc = ", ".join(filter_parts) if filter_parts else "no additional filters"
+
             if project_id:
                 project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
                 logger.info(f"Fetching issues statistics for projects: {project_ids}")
@@ -826,7 +862,21 @@ class GitlabTool:
                     counts = (data.get("statistics") or {}).get("counts") or {}
                     aggregated_counts = merge_counts(aggregated_counts, counts)
                     detail_breakdown.append({"project_id": pid, "counts": counts})
-                return {"scope": "project", "counts": aggregated_counts, "details": detail_breakdown}
+                # Compose human-readable string
+                total_all = int(aggregated_counts.get("all", 0))
+                total_open = int(aggregated_counts.get("opened", 0))
+                total_closed = int(aggregated_counts.get("closed", 0))
+                parts = [
+                    f"GitLab issues statistics for project(s) {', '.join(project_ids)} with {filters_desc} — All: {total_all}, Open: {total_open}, Closed: {total_closed}"
+                ]
+                if detail_breakdown:
+                    parts.append("Breakdown:")
+                    for entry in detail_breakdown:
+                        c = entry.get("counts", {}) or {}
+                        parts.append(
+                            f"- Project {entry.get('project_id')}: All {int(c.get('all', 0))}, Open {int(c.get('opened', 0))}, Closed {int(c.get('closed', 0))}"
+                        )
+                return "\n".join(parts)
 
             if group_id:
                 group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
@@ -840,19 +890,38 @@ class GitlabTool:
                     counts = (data.get("statistics") or {}).get("counts") or {}
                     aggregated_counts = merge_counts(aggregated_counts, counts)
                     detail_breakdown.append({"group_id": gid, "counts": counts})
-                return {"scope": "group", "counts": aggregated_counts, "details": detail_breakdown}
+                total_all = int(aggregated_counts.get("all", 0))
+                total_open = int(aggregated_counts.get("opened", 0))
+                total_closed = int(aggregated_counts.get("closed", 0))
+                parts = [
+                    f"GitLab issues statistics for group(s) {', '.join(group_ids)} with {filters_desc} — All: {total_all}, Open: {total_open}, Closed: {total_closed}"
+                ]
+                if detail_breakdown:
+                    parts.append("Breakdown:")
+                    for entry in detail_breakdown:
+                        c = entry.get("counts", {}) or {}
+                        parts.append(
+                            f"- Group {entry.get('group_id')}: All {int(c.get('all', 0))}, Open {int(c.get('opened', 0))}, Closed {int(c.get('closed', 0))}"
+                        )
+                return "\n".join(parts)
 
             # Global scope
             logger.info("Fetching global issues statistics")
             data = self._make_single_request_with_params("/issues_statistics", params)
             if not data:
-                return {"error": "issues_statistics request returned no data"}
+                return "Error: issues_statistics request returned no data"
             counts = (data.get("statistics") or {}).get("counts") or {}
-            return {"scope": "global", "counts": counts}
+            total_all = int(counts.get("all", 0))
+            total_open = int(counts.get("opened", 0))
+            total_closed = int(counts.get("closed", 0))
+            return (
+                f"GitLab issues statistics (all accessible projects) with {filters_desc} — "
+                f"All: {total_all}, Open: {total_open}, Closed: {total_closed}"
+            )
 
         except Exception as e:
             logger.error(f"Error in get_issues_statistics: {str(e)}")
-            return {"error": f"get_issues_statistics failed: {str(e)}"}
+            return f"Error: get_issues_statistics failed: {str(e)}"
 
     @property
     def find_gitlab_user_by_email_property(self):

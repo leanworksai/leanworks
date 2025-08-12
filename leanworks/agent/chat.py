@@ -381,27 +381,27 @@ class ChatAgent:
                         EVALUATION_FEEDBACK=eval_explanation
                     ))
 
-                    # Find the search_knowledge tool specifically
-                    search_knowledge_tool = None
+                    # Find the search_documents tool specifically
+                    search_documents_tool = None
                     for tool in self.tool_use.tools:
-                        if tool.get("name") == "search_knowledge":
-                            search_knowledge_tool = tool
+                        if tool.get("name") == "search_documents":
+                            search_documents_tool = tool
                             break
                     
-                    if not search_knowledge_tool:
-                        logger.error("search_knowledge tool not found in available tools")
-                        response_text = "Error: search_knowledge tool not available"
+                    if not search_documents_tool:
+                        logger.error("search_documents tool not found in available tools")
+                        response_text = "Error: search_documents tool not available"
                         break
                     
-                    # Create and immediately use forced search_knowledge parameters
+                    # Create and immediately use forced search_documents parameters
                     forced_params = self.conversation.create_params_copy(
                         self.api_params,
                         messages=self.conversation.conversation,
-                        tools=[search_knowledge_tool],
-                        tool_choice={"type": "tool", "name": "search_knowledge"}
+                        tools=[search_documents_tool],
+                        tool_choice={"type": "tool", "name": "search_documents"}
                     )
                     
-                    # Make API call with forced search_knowledge
+                    # Make API call with forced search_documents
                     response = self.model_client.messages.create(**forced_params)
                     
                     # Process the forced tool call
@@ -543,6 +543,7 @@ class ChatAgent:
                     SOURCE_CONTEXT=source_content
                 )}]
             })
+            logger.info(f"Evaluation messages: {eval_messages}")
             # Create evaluation parameters with separate conversation
             eval_params = {
                 "model": GENERATION_MODEL,

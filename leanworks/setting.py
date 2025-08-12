@@ -8,8 +8,8 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-# GENERATION_MODEL = "claude-3-5-haiku-latest"
-GENERATION_MODEL = "claude-sonnet-4-20250514"
+GENERATION_MODEL = "claude-3-5-haiku-latest"
+# GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -102,10 +102,10 @@ AGENT_SYSTEM_PROMPT = """
     </tool_calling>
 """
 
-# Query for using search_knowledge as a fallback
+# Query for using search_documents as a fallback
 SEARCH_KNOWLEDGE_QUERY = """
 Given the user query: {USER_QUERY}, the response: {LAST_RESPONSE}, and the response evaluation feedback: {EVALUATION_FEEDBACK}, 
-generate a new query to search (call search_knowledge tool) so that it can surface more information and use the new information to refine your last response.
+generate a new query to search (call search_documents tool) so that it can surface more information and use the new information to refine your last response.
 Do not reflect on the quality of the returned search results in your response
 Output ONLY the final answer text—no explanations, no reasoning, no headings.
 """
@@ -123,12 +123,12 @@ Task: grade one assistant answer to a user's question.
 {LAST_RESPONSE}
 </last_response>
 
-<source_context>
+<source>
 {SOURCE_CONTEXT}
-</source_context>
+</source>
 
 Judge on the three criteria below, weighting them equally:
-1. Correctness & Factuality – Is every non-trivial claim attributable to the provided source context? You should treat information from source context as authoritative, even though sometimes it might be incomplete.
+1. Correctness & Factuality – Every non-trivial claim should be attributable to the provided tool results in source. You should treat information from source as authoritative, even though sometimes it might be incomplete. In some cases, source information won't give you the direct answer. But if you can infer the answer from the source information, it is also acceptable.
 2. Relevance  – addresses every part of the user's request  
 3. Depth & Insight – completeness, useful details, edge-cases
 
