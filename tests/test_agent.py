@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 def main():
-    user_id = "bharathkumar.l@sbnasoftware.com"
+    user_id = "yanfu@leanworks.ai"
     try:
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
         client_name, _ = get_client_info(bq_client, user_id)
@@ -35,17 +35,17 @@ def main():
             model_client=model_client,
             bq_client_wrapper=bq_client_wrapper,
             user_id=user_id,
-            session_id="dheo3gft",
+            session_id="jfwp3gy9",
             clear_conversation=True,
-            tools=["gitlab"]
+            tools=["outlook"]
         )
         
         # Process a user message
         user_message = '''
-         How many tickets are there in CCX active milestone?
+         how is our conversation with Alan going?
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
-        response = agent.process_message(user_message, deep_research=False)
+        response = agent.process_message(user_message, thinking=True)
         
         return response
     except Exception as e:

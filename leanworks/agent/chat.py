@@ -158,13 +158,14 @@ class ChatAgent:
             return {"user_id": self.user_id or "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
 
 
-    def process_message(self, user_message, cited_context=None, deep_research=False):
+    def process_message(self, user_message, cited_context=None, thinking=False):
         """
         Process a user message and handle the conversation flow.
         
         Args:
             user_message (str): The user's message content
             cited_context (str): The cited context for the user message
+            thinking (bool): When True, enable evaluation-and-critique loop. When False, skip evaluation and return the first direct response.
         Returns:
             dict: Dictionary with 'content' (response text) and 'data_sources' (list of sources)
         """
@@ -230,7 +231,7 @@ class ChatAgent:
         # Maximum number of iterations to prevent infinite loops
         unanswered_count = 0
         response_text = ""
-        max_unanswered_num = 2 if not deep_research else 5
+        max_unanswered_num = 2
         
         # Reset retry flag for new message processing
         self._retry_attempted = False
@@ -264,6 +265,19 @@ class ChatAgent:
                 else:
                     # Assign the actual response text
                     response_text = text_content
+                    
+                    # If not thinking, skip evaluation and return response directly
+                    if not thinking:
+                        logger.info("Thinking disabled: skipping evaluation and critique. Returning response directly.")
+                        assistant_message_obj = {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": response_text}]
+                        }
+                        if self.memory_manager:
+                            self.memory_manager.update_assistant_response(assistant_message_obj)
+                            logger.info(f"Updated assistant response in memory manager. Stats: {self.memory_manager.get_memory_stats()}")
+                        self.conversation.add_assistant_message(response_text)
+                        break
                     
                     # Extract source content for evaluation
                     source_content = self._extract_source_content_from_conversation()

@@ -165,7 +165,7 @@ class SearchTool:
                     ts_filter["$lte"] = parsed_end
             if ts_filter:
                 filters["timestamp"] = ts_filter
-
+            logger.info(f"Search filters: {filters}")
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
             loop = asyncio.get_event_loop()
             nodes = await loop.run_in_executor(
