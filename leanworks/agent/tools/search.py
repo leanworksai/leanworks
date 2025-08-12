@@ -61,12 +61,13 @@ class SearchTool:
     def search_documents_property(self):
         description = """
         Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
-        You MUST ALWAYS use this tool as the fallback when any of these conditions occur:
+        You should use this tool as when any of these conditions occur:
         - Other tools are not suitable to answer the question
-        - Other tools return empty or insufficient results
+        - Other tools return empty, error or insufficient results
         - You have used the search_documents tool before and the answer is still not satisfactory. 
         - You have ANY uncertainty about the quality of your answer
         - More detailed information is needed to answer the question
+        - You need to perform search for details of a specific data source when the corresponding tool result is too large to display
         When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_documents tool) with a different query 
         so that it can surface more information to help refine your answer.
         You might need to use this tool multiple times with different queries to fully answer the question.
@@ -86,7 +87,7 @@ class SearchTool:
                     },
                     "data_source": {
                         "type": "string",
-                        "description": "Optional data source name to filter documents (e.g., Confluence, GitLab, GoogleDrive)"
+                        "description": "Optional data source name to filter documents. Can only be one of the following: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
                     },
                     "start_timestamp": {
                         "type": "string",

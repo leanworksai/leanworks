@@ -273,8 +273,8 @@ class ConversationManager:
                             # For GitLab tools, add GitLab data source
                             data_sources.append("GitLab")
                         
-                        elif tool_name == "search_knowledge":
-                            # For search_knowledge, use the data sources directly from the result
+                        elif tool_name == "search_documents":
+                            # For search_documents, use the data sources directly from the result
                             if hasattr(result, '_search_data_sources'):
                                 # Use the actual data sources returned by the search tool
                                 for source in result._search_data_sources:

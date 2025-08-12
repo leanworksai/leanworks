@@ -23,7 +23,7 @@ class LeanworksTool:
         If the user id is not given or is not in the format of email address, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         Sometimes, a user will come in asking for projects for a specific user. In this case, you MUST call this tool with the user_id set to the email address of the other user, instead of your own email address.
         Sometimes, a user will come in asking for projects for multiple users. In this case, you need to call this tool without setting the user_id.
-        Since this tool only provide basic project information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific project.
+        Since this tool only provide basic project information, you are recommended to call search_documents tool after if you want to dive deeper into a specific project.
         project_id can be used to link the projects to tasks and progress updates.
         You might need to call list_tasks or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id.       
         """
@@ -82,7 +82,7 @@ class LeanworksTool:
         If the project id is not given, you need to list tasks across all projects for the user by calling this tool without setting the project_id.
         If the user id is not given, you need to call this tool without setting the user_id. DON'T invent a user id or email address.
         If the user id is given in terms of first name or last name, call list_users tool to fetch the user_id and then call this tool with the user_id.
-        Since this tool only provide basic task information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific task.
+        Since this tool only provide basic task information, you are recommended to call search_documents tool after if you want to dive deeper into a specific task.
         project_id can be used to link the tasks to projects.
         task_id can be used to link the tasks to progress updates.
         You might need to call list_projects or list_progress_updates before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
@@ -160,7 +160,7 @@ class LeanworksTool:
         Sometimes, a user will come in asking for progress updates for multiple users. In this case, you need to call this tool without setting the user_id.
         If the project id is not given, you need to list progress updates across all projects for the user by calling this tool without setting the project_id.
         If start_date or end_date is not explicitly specified or inferred from the query, you need to list progress updates for last 7 days. Don't it them up.
-        Since this tool only provide basic progress update information, you are recommended to call search_knowledge tool after if you want to dive deeper into a specific progress update.
+        Since this tool only provide basic progress update information, you are recommended to call search_documents tool after if you want to dive deeper into a specific progress update.
         project_id can be used to link the progress updates to projects.
         associated_tasks (a list of task_id) can be used to link the progress updates to tasks.
         You might need to call list_projects or list_tasks before or after to understand the relationship among projects, tasks and progress updates through project_id or task_id.
