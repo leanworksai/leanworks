@@ -1163,7 +1163,7 @@ class GitlabTool:
         state: str = None,
         title: str = None,
         search: str = None,
-        include_ancestors: bool = None,
+        include_ancestors: bool = True,
         updated_before: str = None,
         updated_after: str = None,
     ) -> List[Dict[str, Any]]:
@@ -1188,8 +1188,8 @@ class GitlabTool:
                 params["title"] = title
             if search:
                 params["search"] = search
-            if include_ancestors is not None:
-                params["include_ancestors"] = include_ancestors
+            # Always include ancestors so group-level milestones are visible from project queries
+            params["include_ancestors"] = True
             if updated_before:
                 params["updated_before"] = updated_before
             if updated_after:
