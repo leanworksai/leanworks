@@ -1,4 +1,5 @@
 from leanworks.agent.tools.leanworks import LeanworksTool
+from leanworks.agent.tools.bigquery import BigQueryTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.gitlab import GitlabTool
 from leanworks.agent.tools.outlook import OutlookTool
@@ -16,14 +17,14 @@ class ToolUse:
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of additional tools to enable. These will be added to the default tools ['leanworks', 'search']
+            tools: List of additional tools to enable. These will be added to the default tools ['search', 'bigquery']
         """
         # Set default tools if not provided
         if tools is None:
-            requested_tools = ['leanworks', 'search']
+            requested_tools = ['search', 'bigquery']
         else:
             # Add provided tools to default tools (with deduplication)
-            default_tools = ['leanworks', 'search']
+            default_tools = ['search', 'bigquery']
             requested_tools = list(set(default_tools + tools))  # Remove duplicates while preserving functionality
         
         # Track which tools are actually enabled (successfully initialized)
@@ -31,11 +32,23 @@ class ToolUse:
         
         # Initialize tool instances based on requested tools and available clients
         self.leanworks_tool = None
+        self.bigquery_tool = None
         if 'leanworks' in requested_tools and bq_client_wrapper:
             self.leanworks_tool = LeanworksTool(bq_client_wrapper)
             self.enabled_tools.append('leanworks')
         elif 'leanworks' in requested_tools:
             logger.warning("LeanworksTool not initialized: missing bq_client_wrapper")
+
+        if 'bigquery' in requested_tools and bq_client_wrapper:
+            try:
+                self.bigquery_tool = BigQueryTool(bq_client_wrapper)
+                self.enabled_tools.append('bigquery')
+                logger.info("BigQueryTool initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
+                self.bigquery_tool = None
+        elif 'bigquery' in requested_tools:
+            logger.warning("BigQueryTool not initialized: missing bq_client_wrapper")
         
         # Initialize SearchTool with error handling
         self.search_tool = None
@@ -98,13 +111,9 @@ class ToolUse:
         
         # Initialize tools list based on successfully initialized tools
         self.tools = []
-        if self.leanworks_tool:
+        if self.bigquery_tool:
             self.tools.extend([
-                self.leanworks_tool.list_projects_property,
-                self.leanworks_tool.list_tasks_property,
-                self.leanworks_tool.list_progress_updates_property,
-                self.leanworks_tool.add_task_property,
-                self.leanworks_tool.list_users_property,
+                self.bigquery_tool.query_bigquery_property,
             ])
         
         if self.search_tool:
@@ -136,14 +145,9 @@ class ToolUse:
         # Define function map based on successfully initialized tools
         self.function_map = {}
         
-        # Add leanworks functions if available and enabled
-        if self.leanworks_tool:
+        if self.bigquery_tool:
             self.function_map.update({
-                "list_projects": self.leanworks_tool.list_projects,
-                "list_tasks": self.leanworks_tool.list_tasks,
-                "list_progress_updates": self.leanworks_tool.list_progress_updates,
-                "add_task": self.leanworks_tool.add_task,
-                "list_users": self.leanworks_tool.list_users,
+                "query_bigquery": self.bigquery_tool.query_bigquery,
             })
         
         # Add search function if available and enabled

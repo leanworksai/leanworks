@@ -26,8 +26,10 @@ def main():
             def __init__(self, bq_client, client_name):
                 self.bq_client = bq_client
                 self.client_name = client_name
+                self.table_schemas = {}
                 
         bq_client_wrapper = BigQueryClient(bq_client, client_name)
+        
         # Initialize the chat agent with BigQuery client
         agent = ChatAgent(
             storage_client=storage_client,
@@ -42,7 +44,7 @@ def main():
         
         # Process a user message
         user_message = '''
-         how is our conversation with Alan going?
+         what is our engagement with Alan going?
 '''
         # cited_context = "task_id: 0722343a-464f-4a60-9ebf-ac6774755ff7"
         response = agent.process_message(user_message, thinking=True)
