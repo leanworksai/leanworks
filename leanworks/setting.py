@@ -99,10 +99,12 @@ AGENT_SYSTEM_PROMPT = """
     Search tools: search_documents
     Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_milestones,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
     Outlook tools: list_upcoming_meetings,find_available_slots
+    DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
     - Bigquery tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database. This tool should only be used if tool result statistics is insufficient to answer the question.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
     - The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.

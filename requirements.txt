@@ -16,3 +16,4 @@ requests==2.32.4
 msal==1.33.0
 python-dotenv==1.0.1
 pytz==2024.1
+duckdb==1.1.3

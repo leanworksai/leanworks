@@ -1,4 +1,5 @@
 from leanworks.agent.tools.toolkit import ToolUse
+from leanworks.agent.tools.duckdb import cleanup_session, clear_session_response_ids
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
@@ -35,7 +36,7 @@ class ChatAgent:
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
-            tools (list): List of additional tools to enable. These will be added to the default tools ['leanworks', 'search']. ToolUse handles the processing and filtering.
+            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']. ToolUse handles the processing and filtering.
         """
         # Initialize clients
         self.storage_client = storage_client
@@ -53,8 +54,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with BigQuery client and tools (ToolUse handles tool processing and credential retrieval)
-        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools)
+        # Initialize tool use with BigQuery client and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
         
 
         
@@ -171,6 +172,9 @@ class ChatAgent:
         """
         # Reset data sources for new message
         self.data_sources = []
+        
+        # Clear any previously tracked response IDs for cleanup
+        clear_session_response_ids()
         
         # Store the original user query for evaluation (before adding cited context)
         self.original_user_query = user_message
@@ -454,10 +458,16 @@ class ChatAgent:
             logger.info(f"Memory stats: {self.memory_manager.get_memory_stats()}")
         
         # Return dictionary with content and data sources
-        return {
+        result = {
             "content": response_text,
             "data_sources": unique_sources
         }
+        try:
+            if self.user_id and self.session_id:
+                cleanup_session(self.user_id, self.session_id)
+        except Exception:
+            pass
+        return result
     
     def _extract_source_content_from_conversation(self):
         """

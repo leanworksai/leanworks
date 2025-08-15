@@ -324,9 +324,11 @@ class BigQueryTool:
     @property
     def query_bigquery_property(self):
         description = f"""
-        Run a BigQuery against your dataset `leanworks.{self.bq_client_wrapper.client_name}` that contains critical data about projects, tasks, progress updates and users.
+        Run a BigQuery query against `leanworks.{self.bq_client_wrapper.client_name}`.
 
-        Provide `spec`: a JSON QuerySpec that the tool compiles into safe SQL.
+        This tool is strictly READ-ONLY. It will NEVER delete, update, insert, merge, truncate, create, drop, alter, or otherwise write to any table. It only compiles and executes SELECT queries derived from the provided QuerySpec.
+
+        Provide `spec`: a JSON QuerySpec that the tool compiles into safe SELECT SQL.
 
         QuerySpec fields (JSON):
         - from: [ {{"table": "orders", "alias": "o"}} ]
@@ -338,6 +340,7 @@ class BigQueryTool:
         - limit: 1000
 
         Notes:
+        - Read-only: do not attempt any DML or DDL (INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE, DROP, ALTER). Only SELECT with joins/filters/aggregations/ordering/limits is allowed.
         - All tables are fully qualified to `leanworks.{self.bq_client_wrapper.client_name}`.
         - If a column's description contains 'Unix timestamp' and the column is stored as FLOAT, provide ISO 8601 strings in the QuerySpec (e.g., "2025-08-01T00:00:00Z"). The compiler converts them to UNIX_SECONDS/UNIX_MILLIS and CASTs to FLOAT64 for correct comparisons (including BETWEEN and IN).
 

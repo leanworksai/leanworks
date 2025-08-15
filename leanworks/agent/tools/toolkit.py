@@ -1,14 +1,15 @@
-from leanworks.agent.tools.leanworks import LeanworksTool
+
 from leanworks.agent.tools.bigquery import BigQueryTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.gitlab import GitlabTool
 from leanworks.agent.tools.outlook import OutlookTool
+from leanworks.agent.tools.duckdb import DuckDBTool
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None):
+    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
         """
         Initialize ToolUse with various client connections.
         
@@ -17,27 +18,25 @@ class ToolUse:
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of additional tools to enable. These will be added to the default tools ['search', 'bigquery']
+            tools: List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']
         """
         # Set default tools if not provided
         if tools is None:
-            requested_tools = ['search', 'bigquery']
+            requested_tools = ['search', 'bigquery', 'duckdb']
         else:
             # Add provided tools to default tools (with deduplication)
-            default_tools = ['search', 'bigquery']
+            default_tools = ['search', 'bigquery', 'duckdb']
             requested_tools = list(set(default_tools + tools))  # Remove duplicates while preserving functionality
         
         # Track which tools are actually enabled (successfully initialized)
         self.enabled_tools = []
+
+        # Persist session context for tools that can leverage it (e.g., DuckDB-backed persistence)
+        self.user_id = user_id
+        self.session_id = session_id
         
         # Initialize tool instances based on requested tools and available clients
-        self.leanworks_tool = None
         self.bigquery_tool = None
-        if 'leanworks' in requested_tools and bq_client_wrapper:
-            self.leanworks_tool = LeanworksTool(bq_client_wrapper)
-            self.enabled_tools.append('leanworks')
-        elif 'leanworks' in requested_tools:
-            logger.warning("LeanworksTool not initialized: missing bq_client_wrapper")
 
         if 'bigquery' in requested_tools and bq_client_wrapper:
             try:
@@ -104,6 +103,11 @@ class ToolUse:
                 self.outlook_tool = None
         elif 'outlook' in requested_tools:
             logger.warning("OutlookTool not initialized: missing secret_client")
+
+        # Register DuckDB tools (stateless wrappers; no instance required)
+        if 'duckdb' in requested_tools:
+            self.enabled_tools.append('duckdb')
+            logger.info("DuckDB tools registered (stateless)")
             
         # Ensure read_document_ids exists even if search tool not initialized above
         if not hasattr(self, 'read_document_ids'):
@@ -141,6 +145,15 @@ class ToolUse:
                 self.outlook_tool.find_available_slots_property
             ])
             logger.info("Outlook tools added to tools list")
+
+        # Add DuckDB tools (response-scoped tools only)
+        if 'duckdb' in requested_tools:
+            from leanworks.agent.tools.duckdb import query_response_duckdb_property, get_response_schema_property
+            self.tools.extend([
+                query_response_duckdb_property(),
+                get_response_schema_property()
+            ])
+            logger.info("DuckDB tools added to tools list (query_response, get_schema)")
         
         # Define function map based on successfully initialized tools
         self.function_map = {}
@@ -157,9 +170,26 @@ class ToolUse:
             
         # Add GitLab functions if available and enabled
         if self.gitlab_tool:
+            # Wrapper to auto-inject session info for large results persistence
+            def _list_gitlab_issues_with_session(**kwargs):
+                try:
+                    save_flag = kwargs.get("save_large_to_duckdb", True)
+                    if save_flag:
+                        # Do not expose session identifiers via tool args; instead, set them on the tool instance
+                        if hasattr(self.gitlab_tool, "_session_context") is False:
+                            self.gitlab_tool._session_context = {}
+                        self.gitlab_tool._session_context.update({
+                            "user_id": self.user_id,
+                            "session_id": self.session_id,
+                        })
+                except Exception:
+                    # Best-effort injection; continue without blocking
+                    pass
+                return self.gitlab_tool.list_gitlab_issues(**kwargs)
+
             self.function_map.update({
                 "list_gitlab_projects": self.gitlab_tool.list_gitlab_projects,
-                "list_gitlab_issues": self.gitlab_tool.list_gitlab_issues,
+                "list_gitlab_issues": _list_gitlab_issues_with_session,
                 "list_gitlab_milestones": self.gitlab_tool.list_gitlab_milestones,
                 "find_gitlab_user_by_email": self.gitlab_tool.find_gitlab_user_by_email,
                 "list_gitlab_project_members": self.gitlab_tool.list_gitlab_project_members,
@@ -176,6 +206,14 @@ class ToolUse:
                 "find_available_slots": self.outlook_tool.find_available_slots
             })
             logger.info("Outlook functions added to function_map")
+
+        # Add DuckDB function mapping (response-scoped functions only)
+        if 'duckdb' in requested_tools:
+            from leanworks.agent.tools.duckdb import query_response_duckdb, get_response_schema
+            self.function_map.update({
+                "query_response_duckdb": query_response_duckdb,
+                "get_response_schema": get_response_schema
+            })
 
         # Log final tool availability for debugging
         logger.info(f"Requested tools: {requested_tools}")

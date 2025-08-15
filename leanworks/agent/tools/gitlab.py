@@ -2,6 +2,7 @@ import requests
 import logging
 import datetime
 from typing import Optional, List, Dict, Any
+from leanworks.agent.tools.duckdb import save_data, get_response_schema
 
 logger = logging.getLogger(__name__)
 
@@ -218,14 +219,17 @@ class GitlabTool:
         List issues from GitLab projects or groups.
 
         Response fields:
-          - total_issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 30 issues match.
-          - first_30_issues: the first 30 issues according to the requested ordering (or the full list if 30 or fewer).
-          - total_issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
+          - issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 15 issues match.
+          - issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
+          - handle: a handle to the response id that can be used to query the duckdb response database later.
 
         Use this to retrieve issue details along with statistics. You can filter by project id(s) or group id(s), state (opened, closed), assignee, labels, and search by title/description.
         If neither project_id nor group_id is provided, issues from all accessible projects will be returned. IDs can be single values or comma-separated lists to query multiple projects/groups.
         For deeper details on a specific issue, call get_issue_detail after locating it here.
         You might also call list_gitlab_projects or list_gitlab_groups to understand relationships.
+
+        If the result set is very large and session context is available, the tool will persist the full result in a session-scoped DuckDB and include a handle
+        response_id so the query tool can retrieve details later. You may optionally provide a custom response_id to label the saved content.
         """
         return {
             "type": "custom",
@@ -597,12 +601,40 @@ class GitlabTool:
                 logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
                 statistics = {"error": f"issues statistics failed: {str(stats_error)}"}
 
-            if len(result) > 15:
-                total_issues_value = 'too large to display'
+            duckdb_handle = None
+            threshold = 15
+
+            if len(result) > threshold:
+                total_issues_value = 'Too large to display. Please use the duckdb_handle to retrieve the full result.'
+                # Pull session context directly from tool instance if available
+                context = getattr(self, "_session_context", {}) or {}
+                user_id = context.get("user_id")
+                session_id = context.get("session_id")
+                if user_id and session_id:
+                    try:
+                        import json as _json
+                        content = _json.dumps(result, ensure_ascii=False)
+                        rid = save_data(
+                            data=content,
+                            table_name="gitlab_issues",
+                            response_id=f"{user_id}_{session_id}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                        )
+                        try:
+                            schema = get_response_schema(response_id=rid)
+                        except Exception as schema_error:
+                            logger.error(f"Failed to infer DuckDB schema for response {rid}: {str(schema_error)}")
+                            schema = None
+                        duckdb_handle = {
+                            "response_id": rid,
+                            "file_schema": schema,
+                        }
+                    except Exception as persist_error:
+                        logger.error(f"Failed to persist large GitLab issues result to DuckDB: {str(persist_error)}")
+                        duckdb_handle = None
             else:
                 total_issues_value = result
 
-            return {"issues": total_issues_value, "issues_statistics": statistics}
+            return {"issues": total_issues_value, "issues_statistics": statistics, "duckdb_handle": duckdb_handle}
         except Exception as e:
             logger.error(f"Error in list_gitlab_issues: {str(e)}")
             return {"error": f"list_gitlab_issues failed: {str(e)}"}
