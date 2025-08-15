@@ -8,7 +8,6 @@ from leanworks.agent.tools.duckdb import (
     save_data,
     query_response_duckdb,
     get_response_schema,
-    cleanup_session,
     cleanup_responses,
     clear_session_response_ids,
 )
@@ -23,7 +22,6 @@ __all__ = [
     'save_data',
     'query_response_duckdb',
     'get_response_schema',
-    'cleanup_session',
     'cleanup_responses',
     'clear_session_response_ids',
 ]

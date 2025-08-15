@@ -211,7 +211,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_projects: {str(e)}")
-            return {"error": f"list_gitlab_projects failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
         
     @property
     def list_gitlab_issues_property(self):
@@ -221,7 +223,7 @@ class GitlabTool:
         Response fields:
           - issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 15 issues match.
           - issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
-          - handle: a handle to the response id that can be used to query the duckdb response database later.
+          - handle: a handle to the response id that can be used to query the duckdb response database later. But if issues_statistics is enough to answer the question, you don't need to use this handle.
 
         Use this to retrieve issue details along with statistics. You can filter by project id(s) or group id(s), state (opened, closed), assignee, labels, and search by title/description.
         If neither project_id nor group_id is provided, issues from all accessible projects will be returned. IDs can be single values or comma-separated lists to query multiple projects/groups.
@@ -288,7 +290,7 @@ class GitlabTool:
                     },
                     "milestone": {
                         "type": "string",
-                        "description": "Return issues for a specific milestone. None returns issues that do not belong to a milestone. Any returns issues that belong to a milestone."
+                        "description": "Milestone id. Return issues for a specific milestone. None returns issues that do not belong to a milestone. Any returns issues that belong to a milestone."
                     },
                     "not": {
                         "type": "object",
@@ -599,7 +601,9 @@ class GitlabTool:
                 )
             except Exception as stats_error:
                 logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
-                statistics = {"error": f"issues statistics failed: {str(stats_error)}"}
+                # Return only the error message without full details
+                error_msg = str(stats_error).split('\n')[0] if '\n' in str(stats_error) else str(stats_error)
+                statistics = {"error": error_msg}
 
             duckdb_handle = None
             threshold = 15
@@ -637,7 +641,9 @@ class GitlabTool:
             return {"issues": total_issues_value, "issues_statistics": statistics, "duckdb_handle": duckdb_handle}
         except Exception as e:
             logger.error(f"Error in list_gitlab_issues: {str(e)}")
-            return {"error": f"list_gitlab_issues failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_issue_detail_property(self):
@@ -760,7 +766,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_issue_detail: {str(e)}")
-            return {"error": f"get_issue_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def get_issues_statistics(
         self,
@@ -953,7 +961,9 @@ class GitlabTool:
 
         except Exception as e:
             logger.error(f"Error in get_issues_statistics: {str(e)}")
-            return f"Error: get_issues_statistics failed: {str(e)}"
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return f"Error: {error_msg}"
 
     @property
     def find_gitlab_user_by_email_property(self):
@@ -1049,7 +1059,9 @@ class GitlabTool:
                 
         except Exception as e:
             logger.error(f"Error in find_gitlab_user_by_email: {str(e)}")
-            return {"error": f"find_gitlab_user_by_email failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def verify_project_access(self, project_id: str):
         """
@@ -1089,7 +1101,9 @@ class GitlabTool:
                 
         except Exception as e:
             logger.error(f"Error verifying project access: {str(e)}")
-            return {"error": f"verify_project_access failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def list_gitlab_project_members(self, project_id: str):
         logger.info(f"list_gitlab_project_members called with project_id: {project_id}")
@@ -1133,7 +1147,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in list_gitlab_project_members: {str(e)}")
-            return {"error": f"list_gitlab_project_members failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def list_gitlab_milestones_property(self):
@@ -1157,7 +1173,7 @@ class GitlabTool:
                     "iids": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "Return only milestones having the given iid(s)"
+                        "description": "Return only milestones having the given iid(s). Iid is a unique identifier for a milestone in a project."
                     },
                     "state": {
                         "type": "string",
@@ -1252,7 +1268,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_milestones: {str(e)}")
-            return {"error": f"list_gitlab_milestones failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_gitlab_project_detail_property(self):
@@ -1367,7 +1385,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_project_detail: {str(e)}")
-            return {"error": f"get_gitlab_project_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def list_gitlab_groups_property(self):
@@ -1438,7 +1458,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_groups: {str(e)}")
-            return {"error": f"list_gitlab_groups failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_gitlab_group_detail_property(self):
@@ -1552,7 +1574,9 @@ class GitlabTool:
                 
             except Exception as e:
                 logger.error(f"Error retrieving group members: {str(e)}")
-                result['members_error'] = f"group members failed: {str(e)}"
+                # Return only the error message without full details
+                error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                result['members_error'] = error_msg
             
             # Get group projects if requested
             if include_projects:
@@ -1582,7 +1606,9 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving group projects: {str(e)}")
-                    result['projects_error'] = f"group projects failed: {str(e)}"
+                    # Return only the error message without full details
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                    result['projects_error'] = error_msg
             
             # Get subgroups if requested
             if include_subgroups:
@@ -1611,11 +1637,15 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving subgroups: {str(e)}")
-                    result['subgroups_error'] = f"group subgroups failed: {str(e)}"
+                    # Return only the error message without full details
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                    result['subgroups_error'] = error_msg
             
             logger.info(f"Successfully retrieved detailed information for group: {group_detail.get('name')}")
             return result
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_group_detail: {str(e)}")
-            return {"error": f"get_gitlab_group_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}

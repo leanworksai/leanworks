@@ -158,7 +158,8 @@ class DuckDBTool:
         import json
         
         if if_exists not in {"replace", "append"}:
-            raise ValueError("if_exists must be 'replace' or 'append'")
+            logger.error(f"Invalid if_exists value: {if_exists}")
+            return {"error": "if_exists must be 'replace' or 'append'"}
         
         # Ensure JSON extension is available for nested JSON support
         self._ensure_json_extension()
@@ -282,8 +283,13 @@ class DuckDBTool:
             self._conn.execute(f"INSERT INTO {table_name} (data_json, record_count) VALUES (?, ?)", 
                              [json_data, len(records)])
             
-        logger.info("Successfully saved data to table '%s'", table_name)
-        return table_name
+            logger.info("Successfully saved data to table '%s'", table_name)
+            return table_name
+        except Exception as e:
+            logger.error(f"DuckDB save_data_to_duckdb failed: {str(e)}")
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
     
     def _ensure_json_extension(self) -> None:
         """
@@ -328,45 +334,51 @@ class DuckDBTool:
         return result[0] > 0
 
     def query_duckdb(self, sql: str) -> List[Dict[str, Any]]:
-        if not isinstance(sql, str) or sql.strip() == "":
-            raise ValueError("sql must be a non-empty string")
+        try:
+            if not isinstance(sql, str) or sql.strip() == "":
+                raise ValueError("sql must be a non-empty string")
 
-        sql_lower = sql.strip().lower()
-        forbidden = [
-            "insert",
-            "update",
-            "delete",
-            "merge",
-            "truncate",
-            "create",
-            "drop",
-            "alter",
-            "pragma",
-            "copy",
-            "attach",
-            "detach",
-            "replace",
-        ]
-        if not (sql_lower.startswith("select") or sql_lower.startswith("with")) or any(
-            w in sql_lower for w in forbidden
-        ):
-            raise ValueError("Only read-only SELECT/WITH queries are allowed")
+            sql_lower = sql.strip().lower()
+            forbidden = [
+                "insert",
+                "update",
+                "delete",
+                "merge",
+                "truncate",
+                "create",
+                "drop",
+                "alter",
+                "pragma",
+                "copy",
+                "attach",
+                "detach",
+                "replace",
+            ]
+            if not (sql_lower.startswith("select") or sql_lower.startswith("with")) or any(
+                w in sql_lower for w in forbidden
+            ):
+                raise ValueError("Only read-only SELECT/WITH queries are allowed")
 
-        logger.info("Executing DuckDB query: %s", sql.replace("\n", " ")[:500])
-        cur = self._conn.execute(sql)
-        cols = [d[0] for d in cur.description or []]
-        rows = cur.fetchall()
+            logger.info("Executing DuckDB query: %s", sql.replace("\n", " ")[:500])
+            cur = self._conn.execute(sql)
+            cols = [d[0] for d in cur.description or []]
+            rows = cur.fetchall()
 
-        result: List[Dict[str, Any]] = []
-        for row in rows:
-            item: Dict[str, Any] = {}
-            for name, value in zip(cols, row):
-                if isinstance(value, (datetime.date, datetime.datetime)):
-                    item[name] = value.isoformat()
-                else:
-                    item[name] = value
-            result.append(item)
-        return result
+            result: List[Dict[str, Any]] = []
+            for row in rows:
+                item: Dict[str, Any] = {}
+                for name, value in zip(cols, row):
+                    if isinstance(value, (datetime.date, datetime.datetime)):
+                        item[name] = value.isoformat()
+                    else:
+                        item[name] = value
+                result.append(item)
+            return result
+        except Exception as e:
+            logger.error(f"DuckDB query failed: {str(e)}")
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def close(self) -> None:
         try:
@@ -387,6 +399,7 @@ def query_response_duckdb_property() -> Dict[str, Any]:
     - Unnest arrays: SELECT unnest(tags) as tag FROM table_name
     - Use SHOW TABLES or DESCRIBE table_name to explore the schema.
 
+    Use this tool when previous tool result statistics is insufficient to answer the question.
     Only SELECT/WITH queries are allowed. DML/DDL/PRAGMA/COPY are rejected. Don't query the whole table, only query the data or statistics you need.
     """
     return {
@@ -414,7 +427,7 @@ def get_response_schema_property() -> Dict[str, Any]:
     - Column names, data types, and nullable status for each table
     - Support for nested JSON structures and complex data types
     
-    Use this tool first to explore the data structure, then use query_response_duckdb to run queries.
+    Use this tool when previous tool result statistics is insufficient to answer the question. First to explore the data structure, then use query_response_duckdb to run queries.
     """
     return {
         "type": "custom",
@@ -623,16 +636,6 @@ def cleanup_responses(response_ids: Optional[set] = None) -> None:
         logger.error(f"Error during DuckDB response cleanup: {str(e)}")
 
 
-def cleanup_session(user_id: str, session_id: str) -> None:
-    """
-    Legacy function for backward compatibility.
-    Now delegates to cleanup_responses() which uses tracked response IDs.
-    
-    Args:
-        user_id: User identifier (unused, kept for compatibility)
-        session_id: Session identifier (unused, kept for compatibility)
-    """
-    logger.info(f"Legacy cleanup_session called for user {user_id}, session {session_id} - delegating to cleanup_responses()")
-    cleanup_responses()
+
 
 

@@ -1,5 +1,5 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from leanworks.agent.tools.duckdb import cleanup_session, clear_session_response_ids
+from leanworks.agent.tools.duckdb import cleanup_responses, clear_session_response_ids
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
@@ -463,8 +463,7 @@ class ChatAgent:
             "data_sources": unique_sources
         }
         try:
-            if self.user_id and self.session_id:
-                cleanup_session(self.user_id, self.session_id)
+            cleanup_responses()
         except Exception:
             pass
         return result

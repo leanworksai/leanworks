@@ -73,19 +73,23 @@ class BigQueryTool:
             path = entry.get("bq_table_path", "")
             if not path:
                 continue
-            cols = []
+            
+            # Add table name as header
+            merged_lines.append(f"\n**Table: {path}**")
+            
+            # Add each column on its own line with proper indentation
             for f in entry.get("schema", []):
                 try:
                     name = f.get("name", "")
                     ftype = f.get("type", "")
                     desc = f.get("description") or ""
                     if desc:
-                        cols.append(f"{name} {ftype} - {desc}".strip())
+                        merged_lines.append(f"  - {name} ({ftype}) - {desc}")
                     else:
-                        cols.append(f"{name} {ftype}".strip())
+                        merged_lines.append(f"  - {name} ({ftype})")
                 except Exception:
-                    cols.append(str(f))
-            merged_lines.append(f"- {path}: {', '.join(cols)}")
+                    merged_lines.append(f"  - {str(f)}")
+        
         self.tables_and_schemas = "\n".join(merged_lines)
 
         # Build a set of column names that are Unix timestamps (by description), and detect units
@@ -194,7 +198,7 @@ class BigQueryTool:
 
     def _compile_query_spec(self, spec: dict) -> str:
         if not isinstance(spec, dict):
-            raise ValueError("spec must be an object")
+            raise ValueError(f"spec must be an object, got {type(spec)}: {spec}")
         from_items = spec.get("from", []) or []
         if not from_items:
             raise ValueError("spec.from must contain at least one table")
@@ -317,8 +321,6 @@ class BigQueryTool:
             if re.search(rf"(?i)(?<![\w\.]){re.escape(col)}(?![\w])", sql):
                 sql = make_replacement(col, unit, sql)
 
-        if sql != original_sql:
-            logger.info("Rewrote SQL for Unix timestamp columns. New SQL: %s", sql)
         return sql
         
     @property
@@ -340,6 +342,9 @@ class BigQueryTool:
         - limit: 1000
 
         Notes:
+        - Most of the time, user won't directly give you any 'id' but rather a 'name'. You should try to get the mapping from name to id first (for example, project name to project id and user name to user id), and then filter the table using the id.
+        - When you filter by a 'name' column, you should always use 'LIKE' instead of '=' and lower case everything.
+        - If your response is empty, it means either you are filtering the table using a wrong value or the result is empty. In either case, you should try to query the first 5 rows of the table to see if the result is empty. If it is not empty, then use those sample data to have a better understanding of the table schema. After that, you can take another attempt to query the table with the correct filters (if the filter is the problem).
         - Read-only: do not attempt any DML or DDL (INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE, DROP, ALTER). Only SELECT with joins/filters/aggregations/ordering/limits is allowed.
         - All tables are fully qualified to `leanworks.{self.bq_client_wrapper.client_name}`.
         - If a column's description contains 'Unix timestamp' and the column is stored as FLOAT, provide ISO 8601 strings in the QuerySpec (e.g., "2025-08-01T00:00:00Z"). The compiler converts them to UNIX_SECONDS/UNIX_MILLIS and CASTs to FLOAT64 for correct comparisons (including BETWEEN and IN).
@@ -363,17 +368,21 @@ class BigQueryTool:
             }
         }
 
-    def query_bigquery(self, spec: dict):
+    def query_bigquery(self, spec=None, **kwargs):
         sql = None
         try:
+            
+            # Handle case where spec might be passed in kwargs
+            if spec is None and 'spec' in kwargs:
+                spec = kwargs['spec']
+            elif spec is None:
+                # If no spec provided at all, this is an error
+                raise ValueError("spec parameter is required")
+                
             sql = self._compile_query_spec(spec)
             client_name = getattr(self.bq_client_wrapper, 'client_name', 'unknown')
             project = getattr(getattr(self.bq_client_wrapper, 'bq_client', None), 'project', 'unknown')
             start_time = datetime.datetime.now()
-
-            logger.info(
-                f"BigQuery tool call: project={project}, dataset=leanworks.{client_name}, sql={sql}"
-            )
 
             # Rewrite SQL to handle comparisons against Unix timestamp integer columns
             sql = self._rewrite_sql_for_unix_timestamp(sql)
@@ -390,9 +399,6 @@ class BigQueryTool:
                 results.append(row_dict)
             duration_ms = int((datetime.datetime.now() - start_time).total_seconds() * 1000)
             job_id = getattr(query_job, 'job_id', 'unknown')
-            logger.info(
-                f"BigQuery tool completed: job_id={job_id}, rows={len(results)}, duration_ms={duration_ms}"
-            )
             return results
         except Exception as e:
             client_name = getattr(self.bq_client_wrapper, 'client_name', 'unknown')
@@ -402,6 +408,8 @@ class BigQueryTool:
             except Exception:
                 sql_snippet = ""
             logger.error(f"BigQuery tool failed: project={project}, dataset=leanworks.{client_name}, error={str(e)}{sql_snippet}")
-            return {"error": f"query_bigquery failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
 
