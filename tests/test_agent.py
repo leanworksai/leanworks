@@ -47,7 +47,7 @@ def main():
         agent_init_start = time.time()
 
         additional_context = """
-        You company primarily uses both gitlab and bigquery to store project management data. So, to answer questions about the project, you might need to show results from each source separately.
+        Your team primarily uses both gitlab and bigquery to store project management data. So, to answer questions about the project, you might need to show results from each source separately.
         """
         
         agent = ChatAgent(
