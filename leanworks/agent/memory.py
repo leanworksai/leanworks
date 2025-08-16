@@ -1,5 +1,7 @@
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -64,6 +66,13 @@ class MemoryManager:
         
         # Storage path for memory state
         self.memory_path = f"memory_store/{self.user_id}/{self.session_id}_memory.json"
+        
+        # Background processing setup
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory-bg")
+        self._token_count_cache = 0  # Cached token count
+        self._token_count_future = None  # Future for ongoing token calculation
+        self._token_count_lock = threading.Lock()  # Thread safety
+        self._last_token_calculation_turns = 0  # Track when we last calculated
         
         # Load existing memory state
         self.load_memory_state()
@@ -302,7 +311,7 @@ class MemoryManager:
     def add_turn(self, user_message: Dict[str, Any], assistant_message: Dict[str, Any] = None):
         """
         Add a conversation turn (user message + optional assistant response).
-        Triggers summarization if token threshold is exceeded.
+        Triggers background token calculation and non-blocking summarization if needed.
         """
         turn = {
             "user_message": user_message,
@@ -312,20 +321,36 @@ class MemoryManager:
         
         self.conversation_turns.append(turn)
         
-        # Check if we need to summarize
+        # Invalidate token cache since we added content
+        with self._token_count_lock:
+            self._token_count_cache = 0
+            self._last_token_calculation_turns = 0
+        
+        # Start background token calculation for next time
+        self._start_background_token_calculation()
+        
+        # Check if we need to summarize (non-blocking)
         if self._should_trigger_summarization():
-            logger.info("Token threshold exceeded, triggering summarization")
-            self._perform_summarization()
+            logger.info("Token threshold exceeded, triggering background summarization")
+            self._perform_summarization_background()
     
     def update_assistant_response(self, assistant_message: Dict[str, Any]):
         """Update the assistant response for the most recent turn."""
         if self.conversation_turns:
             self.conversation_turns[-1]["assistant_message"] = assistant_message
             
-            # Check if we need to summarize after adding the response
+            # Invalidate token cache since we updated content
+            with self._token_count_lock:
+                self._token_count_cache = 0
+                self._last_token_calculation_turns = 0
+            
+            # Start background token calculation for next time
+            self._start_background_token_calculation()
+            
+            # Check if we need to summarize after adding the response (non-blocking)
             if self._should_trigger_summarization():
-                logger.info("Token threshold exceeded after assistant response, triggering summarization")
-                self._perform_summarization()
+                logger.info("Token threshold exceeded after assistant response, triggering background summarization")
+                self._perform_summarization_background()
     
     def _should_trigger_summarization(self) -> bool:
         """Check if summarization should be triggered based on token count."""
@@ -337,8 +362,41 @@ class MemoryManager:
         return current_tokens >= self.trigger_threshold
     
     def _calculate_current_tokens(self) -> int:
-        """Calculate current total token usage using Claude's accurate token counting when possible."""
-        
+        """
+        Calculate current total token usage using background processing when possible.
+        Falls back to synchronous calculation if needed.
+        """
+        with self._token_count_lock:
+            current_turns = len(self.conversation_turns)
+            
+            # If we have a recent calculation and turns haven't changed much, use cache
+            if (self._token_count_cache > 0 and 
+                abs(current_turns - self._last_token_calculation_turns) <= 1):
+                logger.debug(f"Using cached token count: {self._token_count_cache}")
+                return self._token_count_cache
+            
+            # Check if background calculation is complete
+            if self._token_count_future and self._token_count_future.done():
+                try:
+                    self._token_count_cache = self._token_count_future.result()
+                    self._last_token_calculation_turns = current_turns
+                    logger.debug(f"Retrieved background token count: {self._token_count_cache}")
+                    return self._token_count_cache
+                except Exception as e:
+                    logger.warning(f"Background token calculation failed: {e}")
+                    self._token_count_future = None
+            
+            # If no background calculation is running, start one for next time
+            if not self._token_count_future or self._token_count_future.done():
+                self._start_background_token_calculation()
+            
+            # For immediate needs, use fast estimation
+            estimated_tokens = self._estimate_current_tokens_fast()
+            logger.debug(f"Using estimated token count: {estimated_tokens}")
+            return estimated_tokens
+    
+    def _calculate_current_tokens_sync(self) -> int:
+        """Synchronous token calculation (original implementation)."""
         # Build the complete context as it would be sent to Claude
         context_parts = []
         
@@ -367,6 +425,47 @@ class MemoryManager:
         else:
             # No messages yet, just count system context
             return self.estimate_tokens(combined_system_prompt)
+    
+    def _estimate_current_tokens_fast(self) -> int:
+        """Fast token estimation for immediate use."""
+        total_tokens = 0
+        
+        # System context estimation
+        if self.system_prompt:
+            total_tokens += self.estimate_tokens(self.system_prompt)
+        if self.user_profile:
+            total_tokens += self.estimate_tokens(self.user_profile)
+        if self.running_summary:
+            total_tokens += self.estimate_tokens(self.running_summary)
+        
+        # Conversation turns estimation
+        for turn in self.conversation_turns:
+            total_tokens += self.estimate_message_tokens(turn["user_message"])
+            if turn["assistant_message"]:
+                total_tokens += self.estimate_message_tokens(turn["assistant_message"])
+        
+        return total_tokens
+    
+    def _start_background_token_calculation(self):
+        """Start background token calculation for next time."""
+        try:
+            self._token_count_future = self._executor.submit(self._calculate_current_tokens_sync)
+            logger.debug("Started background token calculation")
+        except Exception as e:
+            logger.warning(f"Failed to start background token calculation: {e}")
+            self._token_count_future = None
+    
+    def _perform_summarization_background(self):
+        """
+        Trigger background summarization without blocking the main thread.
+        """
+        try:
+            self._executor.submit(self._perform_summarization)
+            logger.debug("Started background summarization")
+        except Exception as e:
+            logger.warning(f"Failed to start background summarization: {e}")
+            # Fallback to synchronous summarization
+            self._perform_summarization()
     
     def _perform_summarization(self):
         """
@@ -404,13 +503,19 @@ class MemoryManager:
             if new_summary:
                 self.running_summary = new_summary
                 self.conversation_turns = recent_turns
+                
+                # Invalidate token cache after summarization
+                with self._token_count_lock:
+                    self._token_count_cache = 0
+                    self._last_token_calculation_turns = 0
+                
                 self.save_memory_state()
-                logger.info(f"Summarization completed. New summary length: {len(new_summary)}, turns reduced from {len(turns_to_summarize) + len(recent_turns)} to {len(recent_turns)}")
+                logger.info(f"Background summarization completed. New summary length: {len(new_summary)}, turns reduced from {len(turns_to_summarize) + len(recent_turns)} to {len(recent_turns)}")
             else:
                 logger.error("Summarization failed - no summary text received")
                 
         except Exception as e:
-            logger.error(f"Error during summarization: {str(e)}")
+            logger.error(f"Error during background summarization: {str(e)}")
             # Don't drop conversation turns if summarization fails
     
     def _turns_to_text(self, turns: List[Dict[str, Any]]) -> str:
@@ -525,12 +630,32 @@ Please provide an updated running summary that incorporates both the existing su
         self.conversation_turns = []
         self.system_prompt = ""
         self.user_profile = ""
+        
+        # Clear background processing state
+        with self._token_count_lock:
+            self._token_count_cache = 0
+            self._last_token_calculation_turns = 0
+            if self._token_count_future:
+                self._token_count_future.cancel()
+                self._token_count_future = None
+        
         self.save_memory_state()
         logger.info("Memory cleared")
     
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about current memory usage."""
         current_tokens = self._calculate_current_tokens()
+        
+        # Check background processing status
+        with self._token_count_lock:
+            bg_calculation_status = "idle"
+            if self._token_count_future:
+                if self._token_count_future.running():
+                    bg_calculation_status = "calculating"
+                elif self._token_count_future.done():
+                    bg_calculation_status = "completed"
+                else:
+                    bg_calculation_status = "pending"
         
         return {
             "total_tokens": current_tokens,
@@ -540,5 +665,31 @@ Please provide an updated running summary that incorporates both the existing su
             "max_context_tokens": self.max_context_tokens,
             "tokens_until_trigger": max(0, self.trigger_threshold - current_tokens),
             "summary_length": len(self.running_summary),
-            "last_summarization": "Never" if not self.running_summary else "Has summary"
+            "last_summarization": "Never" if not self.running_summary else "Has summary",
+            "background_token_calculation": bg_calculation_status,
+            "token_cache_valid": self._token_count_cache > 0
         }
+    
+    def shutdown(self):
+        """Shutdown the memory manager and clean up background threads."""
+        try:
+            # Cancel any pending operations
+            if hasattr(self, '_token_count_lock'):
+                with self._token_count_lock:
+                    if self._token_count_future:
+                        self._token_count_future.cancel()
+                        self._token_count_future = None
+            
+            # Shutdown the executor
+            if hasattr(self, '_executor'):
+                self._executor.shutdown(wait=True)
+                logger.info("MemoryManager shutdown completed")
+        except Exception as e:
+            logger.error(f"Error during MemoryManager shutdown: {e}")
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        try:
+            self.shutdown()
+        except Exception:
+            pass  # Ignore errors during cleanup

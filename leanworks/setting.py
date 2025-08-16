@@ -2,14 +2,14 @@ RETRIEVE_TOP_K = 20
 INCLUDE_MEMORY = True
 USE_RERANKER = True
 APPLY_FILTERS = False
-RERANK_TOP_K = 8
+RERANK_TOP_K = 5
 MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-GENERATION_MODEL = "claude-3-5-haiku-latest"
-# GENERATION_MODEL = "claude-sonnet-4-20250514"
+# GENERATION_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
@@ -95,15 +95,19 @@ AGENT_SYSTEM_PROMPT = """
 
     <tool_calling>
     You have below tools at your disposal to answer project management related questions.
-    Leanworks tools: list_projects,list_tasks,list_progress_updates,add_task,list_users,search_documents
+    Bigquery tools: query_bigquery
+    Search tools: search_documents
     Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_milestones,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
     Outlook tools: list_upcoming_meetings,find_available_slots
+    DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Leanworks tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
+    - Bigquery tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
+    - Sometimes the tool will return a high level statistics of the result that might not give you a direct answer. In this case, you should try to infer the answer from the statistics first using simple math (sum, count, average, etc.). If you can't infer the answer from the statistics, then it's time to use DuckDB tool,
     - The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.
     - NEVER refer to tool names when speaking to the USER. For example, instead of saying 'I need to use the list_projects tool to list all projects', just say 'I will list all projects'.    
     DON'T put search quality reflection or score in your response after you call the search_documents tool for any purpose.

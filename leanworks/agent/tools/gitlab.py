@@ -2,6 +2,8 @@ import requests
 import logging
 import datetime
 from typing import Optional, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from leanworks.agent.tools.duckdb import save_data, get_response_schema
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +212,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_projects: {str(e)}")
-            return {"error": f"list_gitlab_projects failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
         
     @property
     def list_gitlab_issues_property(self):
@@ -218,14 +222,17 @@ class GitlabTool:
         List issues from GitLab projects or groups.
 
         Response fields:
-          - total_issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 30 issues match.
-          - first_30_issues: the first 30 issues according to the requested ordering (or the full list if 30 or fewer).
-          - total_issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
+          - issues: either the full list of issue dictionaries (each with id, iid, project_id, title, description, state, created_at, updated_at, author, assignee, labels, milestone, weight, web_url), or the string 'too large to display' if more than 15 issues match.
+          - issues_statistics: aggregated statistics (e.g., counts for all/opened/closed) computed with the same filters/scope.
+          - handle: a handle to the response id that can be used to query the duckdb response database later. But if issues_statistics is enough to answer the question, you don't need to use this handle.
 
         Use this to retrieve issue details along with statistics. You can filter by project id(s) or group id(s), state (opened, closed), assignee, labels, and search by title/description.
         If neither project_id nor group_id is provided, issues from all accessible projects will be returned. IDs can be single values or comma-separated lists to query multiple projects/groups.
         For deeper details on a specific issue, call get_issue_detail after locating it here.
         You might also call list_gitlab_projects or list_gitlab_groups to understand relationships.
+
+        If the result set is very large and session context is available, the tool will persist the full result in a session-scoped DuckDB and include a handle
+        response_id so the query tool can retrieve details later. You may optionally provide a custom response_id to label the saved content.
         """
         return {
             "type": "custom",
@@ -284,7 +291,7 @@ class GitlabTool:
                     },
                     "milestone": {
                         "type": "string",
-                        "description": "Return issues for a specific milestone. None returns issues that do not belong to a milestone. Any returns issues that belong to a milestone."
+                        "description": "Milestone id. Return issues for a specific milestone. None returns issues that do not belong to a milestone. Any returns issues that belong to a milestone."
                     },
                     "not": {
                         "type": "object",
@@ -488,45 +495,109 @@ class GitlabTool:
             if with_labels_details is not None:
                 params['with_labels_details'] = with_labels_details
                 
-            all_issues = []
-            import urllib.parse
+            # Define functions for parallel execution
+            def fetch_issues():
+                """Fetch issues based on the provided parameters"""
+                import urllib.parse
+                
+                if project_id:
+                    # Parse project_id to handle multiple projects (comma-separated)
+                    project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
+                    logger.info(f"Parsed project IDs: {project_ids}")
+                    
+                    # Optimize for single project (avoid threading overhead)
+                    if len(project_ids) == 1:
+                        encoded_project_id = urllib.parse.quote(project_ids[0], safe='')
+                        endpoint = f'/projects/{encoded_project_id}/issues'
+                        logger.info(f"Single project optimization: querying {project_ids[0]}")
+                        return self._make_request(endpoint, params)
+                    else:
+                        # Get issues from multiple projects in parallel
+                        return self._fetch_issues_parallel(project_ids, params, 'projects')
+                        
+                elif group_id:
+                    # Parse group_id to handle multiple groups (comma-separated)
+                    group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
+                    logger.info(f"Parsed group IDs: {group_ids}")
+                    
+                    # Optimize for single group (avoid threading overhead)
+                    if len(group_ids) == 1:
+                        encoded_group_id = urllib.parse.quote(group_ids[0], safe='')
+                        endpoint = f'/groups/{encoded_group_id}/issues'
+                        logger.info(f"Single group optimization: querying {group_ids[0]}")
+                        return self._make_request(endpoint, params)
+                    else:
+                        # Get issues from multiple groups in parallel
+                        return self._fetch_issues_parallel(group_ids, params, 'groups')
+                        
+                else:
+                    # Get issues from all projects
+                    logger.info("Retrieving issues from all accessible projects")
+                    params_copy = params.copy()
+                    params_copy['scope'] = 'all'
+                    logger.info(f"Querying all issues with params: {params_copy}")
+                    return self._make_request('/issues', params_copy)
             
-            if project_id:
-                # Parse project_id to handle multiple projects (comma-separated)
-                project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
-                logger.info(f"Parsed project IDs: {project_ids}")
+            def fetch_statistics():
+                """Fetch issue statistics using the same filters"""
+                return self.get_issues_statistics(
+                    project_id=project_id,
+                    group_id=group_id,
+                    labels=labels,
+                    milestone=milestone,
+                    scope=scope,
+                    author_id=author_id,
+                    author_username=author_username,
+                    assignee_id=assignee_id,
+                    assignee_username=assignee_username,
+                    my_reaction_emoji=None,
+                    iids=None,
+                    search=search,
+                    in_scope=in_scope,
+                    created_after=created_after,
+                    created_before=created_before,
+                    updated_after=updated_after,
+                    updated_before=updated_before,
+                    confidential=None,
+                    state=state,
+                )
+            
+            # Execute both API calls in parallel
+            all_issues = []
+            statistics = None
+            
+            import time
+            start_time = time.time()
+            logger.info("Starting parallel execution of issues list and statistics APIs")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                issues_future = executor.submit(fetch_issues)
+                stats_future = executor.submit(fetch_statistics)
                 
-                # Optimize for single project (avoid threading overhead)
-                if len(project_ids) == 1:
-                    encoded_project_id = urllib.parse.quote(project_ids[0], safe='')
-                    endpoint = f'/projects/{encoded_project_id}/issues'
-                    logger.info(f"Single project optimization: querying {project_ids[0]}")
-                    all_issues = self._make_request(endpoint, params)
-                else:
-                    # Get issues from multiple projects in parallel
-                    all_issues = self._fetch_issues_parallel(project_ids, params, 'projects')
-                    
-            elif group_id:
-                # Parse group_id to handle multiple groups (comma-separated)
-                group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
-                logger.info(f"Parsed group IDs: {group_ids}")
-                
-                # Optimize for single group (avoid threading overhead)
-                if len(group_ids) == 1:
-                    encoded_group_id = urllib.parse.quote(group_ids[0], safe='')
-                    endpoint = f'/groups/{encoded_group_id}/issues'
-                    logger.info(f"Single group optimization: querying {group_ids[0]}")
-                    all_issues = self._make_request(endpoint, params)
-                else:
-                    # Get issues from multiple groups in parallel
-                    all_issues = self._fetch_issues_parallel(group_ids, params, 'groups')
-                    
-            else:
-                # Get issues from all projects
-                logger.info("Retrieving issues from all accessible projects")
-                params['scope'] = 'all'
-                logger.info(f"Querying all issues with params: {params}")
-                all_issues = self._make_request('/issues', params)
+                # Collect results as they complete
+                for future in as_completed([issues_future, stats_future]):
+                    try:
+                        if future == issues_future:
+                            all_issues = future.result()
+                            logger.info(f"Issues fetch completed: {len(all_issues)} issues retrieved")
+                        elif future == stats_future:
+                            statistics = future.result()
+                            logger.info("Statistics fetch completed successfully")
+                    except Exception as e:
+                        if future == issues_future:
+                            logger.error(f"Failed to fetch issues: {str(e)}")
+                            # Return error for issues as it's critical
+                            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                            return {"error": f"Failed to fetch issues: {error_msg}"}
+                        elif future == stats_future:
+                            logger.error(f"Failed to fetch statistics: {str(e)}")
+                            # Continue with empty statistics for non-critical failure
+                            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                            statistics = {"error": error_msg}
+            
+            end_time = time.time()
+            parallel_duration = end_time - start_time
+            logger.info(f"Parallel API execution completed in {parallel_duration:.2f} seconds")
             
             # Deduplicate issues based on issue ID (in case same issue appears in multiple groups/projects)
             seen_issue_ids = set()
@@ -570,42 +641,47 @@ class GitlabTool:
             
             logger.info(f"Returning {len(result)} formatted issue records")
 
-            # Also compute statistics using the same filters so callers receive both issues and counts together
-            try:
-                statistics = self.get_issues_statistics(
-                    project_id=project_id,
-                    group_id=group_id,
-                    labels=labels,
-                    milestone=milestone,
-                    scope=scope,
-                    author_id=author_id,
-                    author_username=author_username,
-                    assignee_id=assignee_id,
-                    assignee_username=assignee_username,
-                    my_reaction_emoji=None,
-                    iids=None,
-                    search=search,
-                    in_scope=in_scope,
-                    created_after=created_after,
-                    created_before=created_before,
-                    updated_after=updated_after,
-                    updated_before=updated_before,
-                    confidential=None,
-                    state=state,
-                )
-            except Exception as stats_error:
-                logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
-                statistics = {"error": f"issues statistics failed: {str(stats_error)}"}
+            # Statistics were already fetched in parallel above, no need to fetch again
 
-            if len(result) > 15:
-                total_issues_value = 'too large to display'
+            duckdb_handle = None
+            threshold = 15
+
+            if len(result) > threshold:
+                total_issues_value = 'Too large to display. Please use the duckdb_handle to retrieve the full result.'
+                # Pull session context directly from tool instance if available
+                context = getattr(self, "_session_context", {}) or {}
+                user_id = context.get("user_id")
+                session_id = context.get("session_id")
+                if user_id and session_id:
+                    try:
+                        import json as _json
+                        content = _json.dumps(result, ensure_ascii=False)
+                        rid = save_data(
+                            data=content,
+                            table_name="gitlab_issues",
+                            response_id=f"{user_id}_{session_id}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                        )
+                        try:
+                            schema = get_response_schema(response_id=rid)
+                        except Exception as schema_error:
+                            logger.error(f"Failed to infer DuckDB schema for response {rid}: {str(schema_error)}")
+                            schema = None
+                        duckdb_handle = {
+                            "response_id": rid,
+                            "file_schema": schema,
+                        }
+                    except Exception as persist_error:
+                        logger.error(f"Failed to persist large GitLab issues result to DuckDB: {str(persist_error)}")
+                        duckdb_handle = None
             else:
                 total_issues_value = result
 
-            return {"issues": total_issues_value, "issues_statistics": statistics}
+            return {"issues": total_issues_value, "issues_statistics": statistics, "duckdb_handle": duckdb_handle}
         except Exception as e:
             logger.error(f"Error in list_gitlab_issues: {str(e)}")
-            return {"error": f"list_gitlab_issues failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_issue_detail_property(self):
@@ -728,7 +804,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_issue_detail: {str(e)}")
-            return {"error": f"get_issue_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def get_issues_statistics(
         self,
@@ -921,7 +999,9 @@ class GitlabTool:
 
         except Exception as e:
             logger.error(f"Error in get_issues_statistics: {str(e)}")
-            return f"Error: get_issues_statistics failed: {str(e)}"
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return f"Error: {error_msg}"
 
     @property
     def find_gitlab_user_by_email_property(self):
@@ -1017,7 +1097,9 @@ class GitlabTool:
                 
         except Exception as e:
             logger.error(f"Error in find_gitlab_user_by_email: {str(e)}")
-            return {"error": f"find_gitlab_user_by_email failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def verify_project_access(self, project_id: str):
         """
@@ -1057,7 +1139,9 @@ class GitlabTool:
                 
         except Exception as e:
             logger.error(f"Error verifying project access: {str(e)}")
-            return {"error": f"verify_project_access failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     def list_gitlab_project_members(self, project_id: str):
         logger.info(f"list_gitlab_project_members called with project_id: {project_id}")
@@ -1101,7 +1185,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in list_gitlab_project_members: {str(e)}")
-            return {"error": f"list_gitlab_project_members failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def list_gitlab_milestones_property(self):
@@ -1125,7 +1211,7 @@ class GitlabTool:
                     "iids": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "Return only milestones having the given iid(s)"
+                        "description": "Return only milestones having the given iid(s). Iid is a unique identifier for a milestone in a project."
                     },
                     "state": {
                         "type": "string",
@@ -1220,7 +1306,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_milestones: {str(e)}")
-            return {"error": f"list_gitlab_milestones failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_gitlab_project_detail_property(self):
@@ -1335,7 +1423,9 @@ class GitlabTool:
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_project_detail: {str(e)}")
-            return {"error": f"get_gitlab_project_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def list_gitlab_groups_property(self):
@@ -1406,7 +1496,9 @@ class GitlabTool:
             return result
         except Exception as e:
             logger.error(f"Error in list_gitlab_groups: {str(e)}")
-            return {"error": f"list_gitlab_groups failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
     @property
     def get_gitlab_group_detail_property(self):
@@ -1520,7 +1612,9 @@ class GitlabTool:
                 
             except Exception as e:
                 logger.error(f"Error retrieving group members: {str(e)}")
-                result['members_error'] = f"group members failed: {str(e)}"
+                # Return only the error message without full details
+                error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                result['members_error'] = error_msg
             
             # Get group projects if requested
             if include_projects:
@@ -1550,7 +1644,9 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving group projects: {str(e)}")
-                    result['projects_error'] = f"group projects failed: {str(e)}"
+                    # Return only the error message without full details
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                    result['projects_error'] = error_msg
             
             # Get subgroups if requested
             if include_subgroups:
@@ -1579,11 +1675,15 @@ class GitlabTool:
                     
                 except Exception as e:
                     logger.error(f"Error retrieving subgroups: {str(e)}")
-                    result['subgroups_error'] = f"group subgroups failed: {str(e)}"
+                    # Return only the error message without full details
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                    result['subgroups_error'] = error_msg
             
             logger.info(f"Successfully retrieved detailed information for group: {group_detail.get('name')}")
             return result
             
         except Exception as e:
             logger.error(f"Error in get_gitlab_group_detail: {str(e)}")
-            return {"error": f"get_gitlab_group_detail failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}

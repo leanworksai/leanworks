@@ -1,4 +1,5 @@
 from leanworks.agent.tools.toolkit import ToolUse
+from leanworks.agent.tools.duckdb import cleanup_responses, clear_session_response_ids
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
@@ -6,7 +7,23 @@ from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALU
 import traceback
 import logging
 import pytz
+import sys
+import time
 logger = logging.getLogger(__name__)
+
+def _stream_text(text, delay=0.02):
+    """
+    Stream text output with a typewriter effect.
+    
+    Args:
+        text (str): Text to stream
+        delay (float): Delay between characters in seconds
+    """
+    for char in text:
+        sys.stdout.write(char)
+        sys.stdout.flush()
+        time.sleep(delay)
+    print()  # Add newline at the end
 
 class ChatAgent:
     """
@@ -35,7 +52,7 @@ class ChatAgent:
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
-            tools (list): List of additional tools to enable. These will be added to the default tools ['leanworks', 'search']. ToolUse handles the processing and filtering.
+            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']. ToolUse handles the processing and filtering.
         """
         # Initialize clients
         self.storage_client = storage_client
@@ -53,8 +70,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with BigQuery client and tools (ToolUse handles tool processing and credential retrieval)
-        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools)
+        # Initialize tool use with BigQuery client and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
         
 
         
@@ -111,9 +128,9 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": self.tool_use.tools,
-            "max_tokens": 2048,
+            "max_tokens": 1024,
             "temperature": 0.1,
-            "timeout": 30
+            "timeout": 60
         }
 
     def _get_user_info(self):
@@ -158,7 +175,7 @@ class ChatAgent:
             return {"user_id": self.user_id or "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
 
 
-    def process_message(self, user_message, cited_context=None, thinking=False):
+    def process_message(self, user_message, cited_context=None, thinking=False, streaming=False):
         """
         Process a user message and handle the conversation flow.
         
@@ -166,11 +183,15 @@ class ChatAgent:
             user_message (str): The user's message content
             cited_context (str): The cited context for the user message
             thinking (bool): When True, enable evaluation-and-critique loop. When False, skip evaluation and return the first direct response.
+            streaming (bool): When True, show tools being used and print response in a streaming way.
         Returns:
             dict: Dictionary with 'content' (response text) and 'data_sources' (list of sources)
         """
         # Reset data sources for new message
         self.data_sources = []
+        
+        # Clear any previously tracked response IDs for cleanup
+        clear_session_response_ids()
         
         # Store the original user query for evaluation (before adding cited context)
         self.original_user_query = user_message
@@ -255,6 +276,38 @@ class ChatAgent:
                     # Add the assistant message with tool_use blocks to the conversation
                     self.conversation.add_assistant_message_with_tool_uses(response)
                     
+                    # Show tool usage if streaming is enabled
+                    if streaming:
+                        for block in response.content:
+                            if block.type == "tool_use":
+                                tool_name = block.name
+                                tool_input = block.input
+                                print(f"🔧 Using tool: {tool_name}")
+                                
+                                # Special handling for BigQuery tools - show the SQL query
+                                if tool_name == "query_bigquery" and tool_input and 'spec' in tool_input:
+                                    try:
+                                        # Compile the query spec to SQL using the BigQuery tool
+                                        if self.tool_use.bigquery_tool:
+                                            sql = self.tool_use.bigquery_tool._compile_query_spec(tool_input['spec'])
+                                            print(f"   📝 SQL Query:")
+                                            print(f"   {sql}")
+                                        else:
+                                            print(f"   Parameters: spec: {tool_input['spec']}")
+                                    except Exception as e:
+                                        print(f"   Parameters: spec: {tool_input['spec']}")
+                                        logger.debug(f"Failed to compile SQL for display: {e}")
+                                elif tool_input:
+                                    # Show key parameters for other tools
+                                    key_params = []
+                                    for key, value in tool_input.items():
+                                        if isinstance(value, str) and len(value) > 100:
+                                            key_params.append(f"{key}: {value[:50]}...")
+                                        else:
+                                            key_params.append(f"{key}: {value}")
+                                    print(f"   Parameters: {', '.join(key_params)}")
+                                print()
+                    
                     # Process tool calls and add results to conversation with data source tracking
                     tool_results = self.conversation.parse_and_format_tool_results_with_sources(
                         response, 
@@ -262,6 +315,20 @@ class ChatAgent:
                         self.data_sources
                     )
                     self.conversation.add_tool_results(tool_results)
+                    
+                    # Show tool results summary if streaming is enabled
+                    if streaming:
+                        for tool_result in tool_results:
+                            if tool_result.get("role") == "user" and isinstance(tool_result.get("content"), list):
+                                for content_block in tool_result["content"]:
+                                    if content_block.get("type") == "tool_result":
+                                        result_content = content_block.get("content", "")
+                                        if result_content and not result_content.startswith("Error"):
+                                            result_preview = result_content[:200] + "..." if len(result_content) > 200 else result_content
+                                            print(f"✅ Tool result: {result_preview}")
+                                        elif result_content.startswith("Error"):
+                                            print(f"❌ Tool error: {result_content}")
+                                        print()
                 else:
                     # Assign the actual response text
                     response_text = text_content
@@ -269,6 +336,14 @@ class ChatAgent:
                     # If not thinking, skip evaluation and return response directly
                     if not thinking:
                         logger.info("Thinking disabled: skipping evaluation and critique. Returning response directly.")
+                        
+                        # Stream the response if streaming is enabled
+                        if streaming:
+                            print("🤖 Assistant response:")
+                            print("-" * 50)
+                            _stream_text(response_text, delay=0.01)
+                            print("-" * 50)
+                        
                         assistant_message_obj = {
                             "role": "assistant",
                             "content": [{"type": "text", "text": response_text}]
@@ -288,6 +363,13 @@ class ChatAgent:
                     
                     if eval_score >= 7:
                         logger.info(f"Question answered with score {eval_score}.")
+                        
+                        # Stream the response if streaming is enabled
+                        if streaming:
+                            print("🤖 Assistant response (evaluated):")
+                            print("-" * 50)
+                            _stream_text(response_text, delay=0.01)
+                            print("-" * 50)
                         
                         # Create assistant message object
                         assistant_message_obj = {
@@ -345,6 +427,13 @@ class ChatAgent:
                             if retry_score >= 7:
                                 logger.info(f"Retry successful with score {retry_score}.")
                                 response_text = retry_text
+                                
+                                # Stream the response if streaming is enabled
+                                if streaming:
+                                    print("🤖 Assistant response (retry successful):")
+                                    print("-" * 50)
+                                    _stream_text(response_text, delay=0.01)
+                                    print("-" * 50)
                                 
                                 # Remove the inadequate response and critique from conversation
                                 self.conversation.conversation = self.conversation.conversation[:-2]
@@ -449,15 +538,27 @@ class ChatAgent:
         logger.info(f"Data sources used: {unique_sources}")
         logger.info(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
         
+        # Show final summary if streaming is enabled
+        if streaming and unique_sources:
+            print("\n📚 Data sources used:")
+            for i, source in enumerate(unique_sources, 1):
+                print(f"   {i}. {source}")
+            print()
+        
         # Log memory stats if using memory manager
         if self.memory_manager:
             logger.info(f"Memory stats: {self.memory_manager.get_memory_stats()}")
         
         # Return dictionary with content and data sources
-        return {
+        result = {
             "content": response_text,
             "data_sources": unique_sources
         }
+        try:
+            cleanup_responses()
+        except Exception:
+            pass
+        return result
     
     def _extract_source_content_from_conversation(self):
         """

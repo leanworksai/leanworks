@@ -135,7 +135,8 @@ class OutlookTool:
             
             if response.status_code != 200:
                 logger.error(f"Graph API error: {response.status_code} - {response.text}")
-                return {"error": f"Graph API error: {response.status_code}: {response.text}"}
+                # Return only the error message without full details
+                return {"error": f"Graph API error: {response.status_code}"}
             
             events_data = response.json()
             events = events_data.get('value', [])
@@ -176,7 +177,9 @@ class OutlookTool:
             
         except Exception as e:
             logger.error(f"Error retrieving meetings: {str(e)}")
-            return {"error": f"Failed to retrieve meetings: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
     
     @property
     def find_available_slots_property(self):
@@ -338,7 +341,7 @@ class OutlookTool:
                             'end': start_datetime_user_tz,
                             'user': user_email,
                             'user_timezone': user_tz,
-                            'error': f"Graph API error: {response.status_code}: {response.text}"
+                            'error': f"Graph API error: {response.status_code}"
                         })
                         continue
                     
@@ -374,12 +377,14 @@ class OutlookTool:
                             
                 except Exception as e:
                     logger.warning(f"Could not retrieve calendar for {user_email}: {str(e)}")
+                    # Return only the error message without full details
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
                     all_busy_times.append({
                         'start': start_dt,
                         'end': start_dt,
                         'user': user_email,
                         'user_timezone': 'UTC',
-                        'error': f"Failed to retrieve calendar: {str(e)}"
+                        'error': error_msg
                     })
                     continue
             
@@ -449,7 +454,9 @@ class OutlookTool:
             
         except Exception as e:
             logger.error(f"Error finding available slots: {str(e)}")
-            return {"error": f"Failed to find available slots: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
     
     def _find_free_slots_in_day(self, day_start: datetime.datetime, day_end: datetime.datetime, 
                                 busy_times: List[Dict], duration_minutes: int) -> List[Dict]:

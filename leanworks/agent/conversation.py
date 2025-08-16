@@ -233,6 +233,9 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
+                        # Debug logging for BigQuery tool calls
+                        if tool_name == "query_bigquery":
+                            logger.info(f"Calling {tool_name} with tool_input: {tool_input}")
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         

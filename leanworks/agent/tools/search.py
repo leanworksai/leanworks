@@ -188,7 +188,9 @@ class SearchTool:
             logger.info(f"Retrieved data sources: {data_sources}")
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
-            return {"error": f"async context retrieval failed: {str(e)}"}
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
 
         formatted_context = ""
         # Add document context
@@ -255,5 +257,7 @@ class SearchTool:
             
         except Exception as e:
             logger.error(f"Error in synchronous search_documents: {str(e)}")
-            error_message = f"Error occurred during documents search: {str(e)}"
+            # Return only the error message without full details
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            error_message = f"Error occurred during documents search: {error_msg}"
             return SearchResult(error_message, [])
