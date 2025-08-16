@@ -343,6 +343,7 @@ class BigQueryTool:
 
         Notes:
         - Most of the time, user won't directly give you any 'id' but rather a 'name'. You should try to get the mapping from name to id first (for example, project name to project id and user name to user id), and then filter the table using the id.
+        - Prefer JOIN on id instead of querying tables separately for better efficiency.
         - When you filter by a 'name' column, you should always use 'LIKE' instead of '=' and lower case everything.
         - If your response is empty, it means either you are filtering the table using a wrong value or the result is empty. In either case, you should try to query the first 5 rows of the table to see if the result is empty. If it is not empty, then use those sample data to have a better understanding of the table schema. After that, you can take another attempt to query the table with the correct filters (if the filter is the problem).
         - Read-only: do not attempt any DML or DDL (INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE, DROP, ALTER). Only SELECT with joins/filters/aggregations/ordering/limits is allowed.

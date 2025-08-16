@@ -2,6 +2,7 @@ import requests
 import logging
 import datetime
 from typing import Optional, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from leanworks.agent.tools.duckdb import save_data, get_response_schema
 
 logger = logging.getLogger(__name__)
@@ -494,45 +495,109 @@ class GitlabTool:
             if with_labels_details is not None:
                 params['with_labels_details'] = with_labels_details
                 
-            all_issues = []
-            import urllib.parse
+            # Define functions for parallel execution
+            def fetch_issues():
+                """Fetch issues based on the provided parameters"""
+                import urllib.parse
+                
+                if project_id:
+                    # Parse project_id to handle multiple projects (comma-separated)
+                    project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
+                    logger.info(f"Parsed project IDs: {project_ids}")
+                    
+                    # Optimize for single project (avoid threading overhead)
+                    if len(project_ids) == 1:
+                        encoded_project_id = urllib.parse.quote(project_ids[0], safe='')
+                        endpoint = f'/projects/{encoded_project_id}/issues'
+                        logger.info(f"Single project optimization: querying {project_ids[0]}")
+                        return self._make_request(endpoint, params)
+                    else:
+                        # Get issues from multiple projects in parallel
+                        return self._fetch_issues_parallel(project_ids, params, 'projects')
+                        
+                elif group_id:
+                    # Parse group_id to handle multiple groups (comma-separated)
+                    group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
+                    logger.info(f"Parsed group IDs: {group_ids}")
+                    
+                    # Optimize for single group (avoid threading overhead)
+                    if len(group_ids) == 1:
+                        encoded_group_id = urllib.parse.quote(group_ids[0], safe='')
+                        endpoint = f'/groups/{encoded_group_id}/issues'
+                        logger.info(f"Single group optimization: querying {group_ids[0]}")
+                        return self._make_request(endpoint, params)
+                    else:
+                        # Get issues from multiple groups in parallel
+                        return self._fetch_issues_parallel(group_ids, params, 'groups')
+                        
+                else:
+                    # Get issues from all projects
+                    logger.info("Retrieving issues from all accessible projects")
+                    params_copy = params.copy()
+                    params_copy['scope'] = 'all'
+                    logger.info(f"Querying all issues with params: {params_copy}")
+                    return self._make_request('/issues', params_copy)
             
-            if project_id:
-                # Parse project_id to handle multiple projects (comma-separated)
-                project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
-                logger.info(f"Parsed project IDs: {project_ids}")
+            def fetch_statistics():
+                """Fetch issue statistics using the same filters"""
+                return self.get_issues_statistics(
+                    project_id=project_id,
+                    group_id=group_id,
+                    labels=labels,
+                    milestone=milestone,
+                    scope=scope,
+                    author_id=author_id,
+                    author_username=author_username,
+                    assignee_id=assignee_id,
+                    assignee_username=assignee_username,
+                    my_reaction_emoji=None,
+                    iids=None,
+                    search=search,
+                    in_scope=in_scope,
+                    created_after=created_after,
+                    created_before=created_before,
+                    updated_after=updated_after,
+                    updated_before=updated_before,
+                    confidential=None,
+                    state=state,
+                )
+            
+            # Execute both API calls in parallel
+            all_issues = []
+            statistics = None
+            
+            import time
+            start_time = time.time()
+            logger.info("Starting parallel execution of issues list and statistics APIs")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                issues_future = executor.submit(fetch_issues)
+                stats_future = executor.submit(fetch_statistics)
                 
-                # Optimize for single project (avoid threading overhead)
-                if len(project_ids) == 1:
-                    encoded_project_id = urllib.parse.quote(project_ids[0], safe='')
-                    endpoint = f'/projects/{encoded_project_id}/issues'
-                    logger.info(f"Single project optimization: querying {project_ids[0]}")
-                    all_issues = self._make_request(endpoint, params)
-                else:
-                    # Get issues from multiple projects in parallel
-                    all_issues = self._fetch_issues_parallel(project_ids, params, 'projects')
-                    
-            elif group_id:
-                # Parse group_id to handle multiple groups (comma-separated)
-                group_ids = [gid.strip() for gid in group_id.split(',') if gid.strip()]
-                logger.info(f"Parsed group IDs: {group_ids}")
-                
-                # Optimize for single group (avoid threading overhead)
-                if len(group_ids) == 1:
-                    encoded_group_id = urllib.parse.quote(group_ids[0], safe='')
-                    endpoint = f'/groups/{encoded_group_id}/issues'
-                    logger.info(f"Single group optimization: querying {group_ids[0]}")
-                    all_issues = self._make_request(endpoint, params)
-                else:
-                    # Get issues from multiple groups in parallel
-                    all_issues = self._fetch_issues_parallel(group_ids, params, 'groups')
-                    
-            else:
-                # Get issues from all projects
-                logger.info("Retrieving issues from all accessible projects")
-                params['scope'] = 'all'
-                logger.info(f"Querying all issues with params: {params}")
-                all_issues = self._make_request('/issues', params)
+                # Collect results as they complete
+                for future in as_completed([issues_future, stats_future]):
+                    try:
+                        if future == issues_future:
+                            all_issues = future.result()
+                            logger.info(f"Issues fetch completed: {len(all_issues)} issues retrieved")
+                        elif future == stats_future:
+                            statistics = future.result()
+                            logger.info("Statistics fetch completed successfully")
+                    except Exception as e:
+                        if future == issues_future:
+                            logger.error(f"Failed to fetch issues: {str(e)}")
+                            # Return error for issues as it's critical
+                            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                            return {"error": f"Failed to fetch issues: {error_msg}"}
+                        elif future == stats_future:
+                            logger.error(f"Failed to fetch statistics: {str(e)}")
+                            # Continue with empty statistics for non-critical failure
+                            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                            statistics = {"error": error_msg}
+            
+            end_time = time.time()
+            parallel_duration = end_time - start_time
+            logger.info(f"Parallel API execution completed in {parallel_duration:.2f} seconds")
             
             # Deduplicate issues based on issue ID (in case same issue appears in multiple groups/projects)
             seen_issue_ids = set()
@@ -576,34 +641,7 @@ class GitlabTool:
             
             logger.info(f"Returning {len(result)} formatted issue records")
 
-            # Also compute statistics using the same filters so callers receive both issues and counts together
-            try:
-                statistics = self.get_issues_statistics(
-                    project_id=project_id,
-                    group_id=group_id,
-                    labels=labels,
-                    milestone=milestone,
-                    scope=scope,
-                    author_id=author_id,
-                    author_username=author_username,
-                    assignee_id=assignee_id,
-                    assignee_username=assignee_username,
-                    my_reaction_emoji=None,
-                    iids=None,
-                    search=search,
-                    in_scope=in_scope,
-                    created_after=created_after,
-                    created_before=created_before,
-                    updated_after=updated_after,
-                    updated_before=updated_before,
-                    confidential=None,
-                    state=state,
-                )
-            except Exception as stats_error:
-                logger.error(f"Failed to fetch issues statistics alongside list: {str(stats_error)}")
-                # Return only the error message without full details
-                error_msg = str(stats_error).split('\n')[0] if '\n' in str(stats_error) else str(stats_error)
-                statistics = {"error": error_msg}
+            # Statistics were already fetched in parallel above, no need to fetch again
 
             duckdb_handle = None
             threshold = 15
