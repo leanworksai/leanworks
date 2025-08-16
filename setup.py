@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.3.2",
+    version="0.3.3",
     packages=find_packages(),
     install_requires=[
         "pinecone==7.2.0",
@@ -19,7 +19,8 @@ setup(
         "tiktoken==0.9.0",
         "pyyaml==6.0.2",
         "google-cloud-bigquery==3.34.0",
-        "pytz==2024.1"
+        "pytz==2024.1",
+        "duckdb==1.1.3"
     ],
     author="Yanfu Zhu",
     author_email="yanfu@leanworks.ai",
