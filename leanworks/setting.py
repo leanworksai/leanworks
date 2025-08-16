@@ -102,8 +102,8 @@ AGENT_SYSTEM_PROMPT = """
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
     - Bigquery tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
-    - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
@@ -112,6 +112,10 @@ AGENT_SYSTEM_PROMPT = """
     - NEVER refer to tool names when speaking to the USER. For example, instead of saying 'I need to use the list_projects tool to list all projects', just say 'I will list all projects'.    
     DON'T put search quality reflection or score in your response after you call the search_documents tool for any purpose.
     </tool_calling>
+
+    <additional_context>
+    {ADDITIONAL_CONTEXT}
+    </additional_context>
 """
 
 # Query for using search_documents as a fallback

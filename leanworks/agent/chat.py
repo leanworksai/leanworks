@@ -39,7 +39,8 @@ class ChatAgent:
                  user_id=None,
                  session_id=None,
                  clear_conversation=True,
-                 tools=None
+                 tools=None,
+                 additional_context=None,
                  ):
         """
         Initialize the ChatAgent with necessary clients and settings.
@@ -53,13 +54,14 @@ class ChatAgent:
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
             tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']. ToolUse handles the processing and filtering.
+            additional_context (str): Additional context to add to the system prompt.
         """
         # Initialize clients
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.model_client = model_client
         self.bq_client_wrapper = bq_client_wrapper
-        
+        self.additional_context = additional_context
         # Set parameters
         self.user_id = user_id
         self.session_id = session_id
@@ -115,7 +117,8 @@ class ChatAgent:
         self.system_prompt = AGENT_SYSTEM_PROMPT.format(
             USER_INFO=user_info, 
             CURRENT_DATE_UTC=datetime.now(timezone.utc).isoformat(),
-            CURRENT_DATE_LOCAL=datetime.now(user_timezone).isoformat()
+            CURRENT_DATE_LOCAL=datetime.now(user_timezone).isoformat(),
+            ADDITIONAL_CONTEXT=self.additional_context
         )
         
         # Set the system prompt and user profile for memory manager

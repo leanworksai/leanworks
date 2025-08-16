@@ -45,6 +45,10 @@ def main():
         # Time the agent initialization
         print("🤖 Initializing ChatAgent with lazy loading...")
         agent_init_start = time.time()
+
+        additional_context = """
+        You company primarily uses both gitlab and bigquery to store project management data. So, to answer questions about the project, you might need to show results from each source separately.
+        """
         
         agent = ChatAgent(
             storage_client=storage_client,
@@ -54,7 +58,8 @@ def main():
             user_id=user_id,
             session_id="jfwp3gy9",
             clear_conversation=True,
-            tools=["gitlab"]  # Only load what we need
+            tools=["gitlab"],  # Only load what we need
+            additional_context=additional_context
         )
         
         agent_init_time = time.time() - agent_init_start
@@ -65,7 +70,7 @@ def main():
         
         # Process a user message with timing
         user_message = '''
-         How many tickets are there in the the CCXAI group?
+         How many tickets are there in CCX
 '''
         
         print("💬 Processing user message:")
