@@ -29,7 +29,7 @@ def main():
         
         print("📋 Setting up clients...")
         bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-        client_name, _ = get_client_info(bq_client, user_id)
+        client_name, tools, additional_context = get_client_info(bq_client, user_id)
         storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
         secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
         model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
@@ -46,10 +46,6 @@ def main():
         print("🤖 Initializing ChatAgent with lazy loading...")
         agent_init_start = time.time()
 
-        additional_context = """
-        Your team primarily uses both gitlab and bigquery to store project management data. So, to answer questions about the project, you might need to show results from each source separately.
-        """
-        
         agent = ChatAgent(
             storage_client=storage_client,
             secret_client=secret_client,
@@ -58,7 +54,7 @@ def main():
             user_id=user_id,
             session_id="jfwp3gy9",
             clear_conversation=True,
-            tools=["gitlab"],  # Only load what we need
+            tools=tools,  # Only load what we need
             additional_context=additional_context
         )
         
@@ -70,7 +66,7 @@ def main():
         
         # Process a user message with timing
         user_message = '''
-         How many tickets are there in CCX
+         How many tickets are there in CCX project?
 '''
         
         print("💬 Processing user message:")
@@ -82,7 +78,7 @@ def main():
         # Time the response processing
         response_start = time.time()
         
-        response = agent.process_message(user_message, thinking=True, streaming=True)
+        response = agent.process_message(user_message, thinking=False, streaming=True)
         
         response_time = time.time() - response_start
         total_time = time.time() - setup_start

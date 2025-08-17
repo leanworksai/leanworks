@@ -190,7 +190,7 @@ def get_client_info(bq_client, user_id: str) -> str:
         Client name as string, available tools as list of strings
     """
     query = f"""
-    SELECT client_name, available_tools
+    SELECT client_name, available_tools, additional_context
     FROM `leanworks.clients.config`
     WHERE domain = '{user_id.split("@")[1]}'
     LIMIT 1
@@ -203,4 +203,4 @@ def get_client_info(bq_client, user_id: str) -> str:
             available_tools = row.available_tools.split(",")
         else:
             available_tools = []
-        return row.client_name, available_tools
+        return row.client_name, available_tools, row.additional_context
