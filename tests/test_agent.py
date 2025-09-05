@@ -7,7 +7,6 @@ import logging
 import traceback
 import time
 from leanworks.setting import get_client_info
-from gitlab import Gitlab
 logger = logging.getLogger(__name__)
 # Configure logging
 logging.basicConfig(
@@ -66,7 +65,7 @@ def main():
         
         # Process a user message with timing
         user_message = '''
-         How many tickets are there in CCX project?
+         show me recent code commits for CCX project?
 '''
         
         print("💬 Processing user message:")

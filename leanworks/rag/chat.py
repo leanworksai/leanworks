@@ -2,7 +2,7 @@ from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.memory import MemoryManager
-from leanworks.rag.reranker import CrossEncoderReranker
+from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
 import datetime
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
+class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     """
     Chat class for retrieving context from Pinecone and generating responses using OpenAI.
     Provides synchronous functionality for RAG operations.
@@ -55,8 +55,11 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         # Initialize QueryRewriter
         QueryRewriter.__init__(self, model_client)
 
-        # Initialize CrossEncoderReranker
-        CrossEncoderReranker.__init__(self, model_client)
+        # Initialize the reranker using factory
+        self.reranker = RerankerFactory.create_reranker(
+            reranker_type=RERANKER_TYPE,
+            model_client=model_client
+        )
             
         logger.info("RAG system initialized successfully")
 
@@ -191,8 +194,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                 logger.info(f"Applying reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use the reranker to improve precision
-                    logger.info("Initializing CrossEncoderReranker")
-                    reranked_results = self.rerank(query, filtered_results, top_k=rerank_top_k)
+                    logger.info(f"Using {RERANKER_TYPE} reranker")
+                    reranked_results = self.reranker.rerank(query, filtered_results, top_k=rerank_top_k)
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
@@ -470,7 +473,7 @@ class AsyncChat(Chat):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
-                    reranked_results = await self.rerank_async(
+                    reranked_results = await self.reranker.rerank_async(
                         query, 
                         filtered_results,
                         top_k=rerank_top_k

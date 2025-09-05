@@ -11,6 +11,16 @@ QUERY_REWRITES = True
 # GENERATION_MODEL = "claude-3-5-haiku-latest"
 GENERATION_MODEL = "claude-sonnet-4-20250514"
 RERANK_MODEL = "claude-3-5-haiku-latest"
+# Reranker configuration
+RERANKER_TYPE = "bge"  # Options: "llm", "bge" (now uses optimized version)
+BGE_MODEL_NAME = "BAAI/bge-reranker-base"
+BGE_DEVICE = "cpu"  # Options: "cpu", "cuda"
+BGE_MAX_WORKERS = 2  # Number of worker threads for BGE reranker
+BGE_CACHE_SIZE = 2000  # Cache size for BGE reranker
+BGE_MAX_LENGTH = 384  # Optimized sequence length (384 vs 512 for better performance)
+BGE_BATCH_SIZE = 28  # Optimized batch size for 300-340 token pairs
+BGE_INTRA_OP_THREADS = 6  # Optimal CPU threading for inference
+BGE_INTER_OP_THREADS = 1  # Single inter-op thread for CPU
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
 
@@ -97,12 +107,10 @@ AGENT_SYSTEM_PROMPT = """
     You have below tools at your disposal to answer project management related questions.
     Bigquery tools: query_bigquery
     Search tools: search_documents
-    Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_milestones,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
     Outlook tools: list_upcoming_meetings,find_available_slots
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Bigquery tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
-    - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - Bigquery tools are used to project management information from the internal database. They should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.

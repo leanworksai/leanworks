@@ -15,7 +15,6 @@ leanworks/agent/chat.py
 leanworks/agent/conversation.py
 leanworks/agent/memory.py
 leanworks/agent/tools/__init__.py
-leanworks/agent/tools/gitlab.py
 leanworks/agent/tools/leanworks.py
 leanworks/agent/tools/outlook.py
 leanworks/agent/tools/search.py

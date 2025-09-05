@@ -1,7 +1,6 @@
 
 from leanworks.agent.tools.bigquery import BigQueryTool
 from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.gitlab import GitlabTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
 import logging
@@ -101,29 +100,6 @@ class ToolUse:
                 self._tool_cache['search_tool'] = None
         return self._tool_cache['search_tool']
     
-    @property
-    def gitlab_tool(self):
-        """Lazy-load GitLab tool on first access."""
-        if 'gitlab_tool' not in self._tool_cache:
-            if 'gitlab' in self.requested_tools and self.secret_client:
-                try:
-                    gitlab_auth = {
-                        'gitlab_url': self.secret_client.get('GITLAB_DOMAIN'),
-                        'gitlab_token': self.secret_client.get('GITLAB_KEY')
-                    }
-                    self._tool_cache['gitlab_tool'] = GitlabTool(gitlab_auth)
-                    if 'gitlab' not in self.enabled_tools:
-                        self.enabled_tools.append('gitlab')
-                    logger.info("GitlabTool initialized successfully (lazy)")
-                except Exception as e:
-                    logger.error(f"Failed to initialize GitlabTool: {str(e)}")
-                    self._tool_cache['gitlab_tool'] = None
-            elif 'gitlab' in self.requested_tools:
-                logger.warning("GitlabTool not initialized: missing secret_client")
-                self._tool_cache['gitlab_tool'] = None
-            else:
-                self._tool_cache['gitlab_tool'] = None
-        return self._tool_cache['gitlab_tool']
     
     @property
     def outlook_tool(self):
@@ -171,19 +147,6 @@ class ToolUse:
                 self._tools_cache.append(self.search_tool.search_documents_property)
                 logger.info("search_documents tool added to tools list (lazy)")
                 
-            # Add GitLab tools if available
-            if self.gitlab_tool:
-                self._tools_cache.extend([
-                    self.gitlab_tool.list_gitlab_projects_property,
-                    self.gitlab_tool.list_gitlab_issues_property,
-                    self.gitlab_tool.list_gitlab_milestones_property,
-                    self.gitlab_tool.find_gitlab_user_by_email_property,
-                    self.gitlab_tool.list_gitlab_project_members_property,
-                    self.gitlab_tool.get_gitlab_project_detail_property,
-                    self.gitlab_tool.list_gitlab_groups_property,
-                    self.gitlab_tool.get_gitlab_group_detail_property,
-                    self.gitlab_tool.get_issue_detail_property
-                ])
                 
             # Add Outlook tools if available
             if self.outlook_tool:
@@ -223,36 +186,6 @@ class ToolUse:
                 self._function_map_cache["search_documents"] = self.search_tool.search_documents
                 logger.info("search_documents function added to function_map (lazy)")
                 
-            # Add GitLab functions if available
-            if self.gitlab_tool:
-                # Wrapper to auto-inject session info for large results persistence
-                def _list_gitlab_issues_with_session(**kwargs):
-                    try:
-                        save_flag = kwargs.get("save_large_to_duckdb", True)
-                        if save_flag:
-                            # Do not expose session identifiers via tool args; instead, set them on the tool instance
-                            if hasattr(self.gitlab_tool, "_session_context") is False:
-                                self.gitlab_tool._session_context = {}
-                            self.gitlab_tool._session_context.update({
-                                "user_id": self.user_id,
-                                "session_id": self.session_id,
-                            })
-                    except Exception:
-                        # Best-effort injection; continue without blocking
-                        pass
-                    return self.gitlab_tool.list_gitlab_issues(**kwargs)
-
-                self._function_map_cache.update({
-                    "list_gitlab_projects": self.gitlab_tool.list_gitlab_projects,
-                    "list_gitlab_issues": _list_gitlab_issues_with_session,
-                    "list_gitlab_milestones": self.gitlab_tool.list_gitlab_milestones,
-                    "find_gitlab_user_by_email": self.gitlab_tool.find_gitlab_user_by_email,
-                    "list_gitlab_project_members": self.gitlab_tool.list_gitlab_project_members,
-                    "get_gitlab_project_detail": self.gitlab_tool.get_gitlab_project_detail,
-                    "list_gitlab_groups": self.gitlab_tool.list_gitlab_groups,
-                    "get_gitlab_group_detail": self.gitlab_tool.get_gitlab_group_detail,
-                    "get_issue_detail": self.gitlab_tool.get_issue_detail
-                })
                 
             # Add Outlook functions if available
             if self.outlook_tool:

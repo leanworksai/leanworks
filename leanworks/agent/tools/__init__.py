@@ -1,6 +1,5 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.gitlab import GitlabTool
 from leanworks.agent.tools.bigquery import BigQueryTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import (
@@ -15,7 +14,6 @@ from leanworks.agent.tools.duckdb import (
 __all__ = [
     'ToolUse',
     'SearchTool',
-    'GitlabTool',
     'BigQueryTool',
     'OutlookTool',
     'DuckDBTool',
