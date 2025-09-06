@@ -136,10 +136,8 @@ class CrossEncoderReranker(BaseReranker):
             logger.error(f"Error during async reranking: {str(e)}")
             # Return original documents in case of error, sorted by timestamp if available
             try:
-                # Sort by timestamp (most recent first)
-                return sorted(documents, 
-                              key=lambda x: x.metadata.get("timestamp", 0) if hasattr(x, "metadata") else 0, 
-                              reverse=True)[:top_k]
+                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+                return documents[:top_k]
             except Exception:
                 # If sorting fails, return unsorted
                 return documents[:top_k]

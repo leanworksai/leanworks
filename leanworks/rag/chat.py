@@ -5,6 +5,8 @@ from leanworks.agent.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.rag.span_selection import SpanSelector
 from leanworks.rag.context_compression import ContextCompressor
+from leanworks.rag.context_aggregation import ContextAggregator
+from leanworks.rag.data_source_formatter import DataSourceFormatter
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
 import datetime
@@ -68,8 +70,48 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Initialize context compressor
         self.context_compressor = ContextCompressor(model_client=model_client)
+        
+        # Initialize context aggregator with embedding client for better similarity
+        self.context_aggregator = ContextAggregator(embedding_client=vectordb_client.embedding_model_client)
+        
+        # Initialize data source formatter
+        self.data_source_formatter = DataSourceFormatter()
             
         logger.info("RAG system initialized successfully")
+
+    def _extract_timestamp_from_context(self, context_text: str) -> str:
+        """Extract timestamp from context text."""
+        import re
+        from datetime import datetime
+        
+        # Common timestamp patterns
+        patterns = [
+            r'date[:\s]+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:[+-]\d{2}:\d{2}|Z)?)',
+            r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:[+-]\d{2}:\d{2}|Z)?)',
+            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
+            r'(\d{4}-\d{2}-\d{2})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, context_text, re.IGNORECASE)
+            if match:
+                timestamp_str = match.group(1)
+                try:
+                    # Try to parse the timestamp
+                    if 'T' in timestamp_str:
+                        # ISO format
+                        if timestamp_str.endswith('Z'):
+                            timestamp_str = timestamp_str[:-1] + '+00:00'
+                        dt = datetime.fromisoformat(timestamp_str)
+                    else:
+                        # Date only or simple format
+                        dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S' if ' ' in timestamp_str else '%Y-%m-%d')
+                    
+                    return dt.isoformat()
+                except ValueError:
+                    continue
+        
+        return None
 
     def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA) -> SimpleNamespace:
         """
@@ -148,6 +190,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             use_reranker: bool = False, 
             use_span_selection: bool = True,
             use_context_compression: bool = USE_CONTEXT_COMPRESSION,
+            use_context_aggregation: bool = True,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -214,15 +257,11 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
-                reranked_results = sorted(
-                    filtered_results[:rerank_top_k],
-                    key=lambda x: x.metadata.get("timestamp", 0)
-                )
+                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+                reranked_results = filtered_results[:rerank_top_k]
         else:
-            reranked_results = sorted(
-                filtered_results[:rerank_top_k],
-                key=lambda x: x.metadata.get("timestamp", 0)
-            )
+            # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+            reranked_results = filtered_results[:rerank_top_k]
         logger.debug("Reranked documents", reranked_results)
 
         # Apply span selection if enabled
@@ -267,7 +306,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 # Add to contexts list
                 contexts.append({
                     "context": span.text,
-                    "timestamp": None,  # Compressed spans don't have timestamps
                     "data_source": span.source,
                     "doc_id": span.doc_id
                 })
@@ -284,9 +322,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 data_source = match.metadata["data_source"]
                 links.add(match.metadata["link"])
                 
-                # Get timestamp if available
-                timestamp = match.metadata.get("timestamp")
-                
                 # Extract context text using various fallback methods
                 context_text = match.metadata.get("chunk_text", "")
                 
@@ -299,12 +334,38 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 # Add to contexts list
                 contexts.append({
                     "context": context_text,
-                    "timestamp": timestamp,
                     "data_source": data_source,
                     "doc_id": match.id
                 })
-        logger.debug(f"Filtered contexts: {contexts}")
-        return contexts, list(links)
+        
+        # Apply context aggregation if enabled
+        if use_context_aggregation and contexts:
+            try:
+                logger.info("Applying context aggregation to group related information...")
+                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
+                
+                # Convert aggregated contexts back to the expected format
+                if aggregated_contexts:
+                    contexts = []
+                    for agg_context in aggregated_contexts:
+                        contexts.append({
+                            "context": agg_context.content,
+                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
+                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
+                            "aggregation_type": agg_context.aggregation_type,
+                            "item_count": agg_context.metadata.get('item_count', 1)
+                        })
+                    
+                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
+            except Exception as e:
+                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
+        
+        logger.debug(f"Final contexts: {contexts}")
+        
+        # Use the scalable data source formatter
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        
+        return contexts, formatted_data_sources
     
     def _retrieve_memory(self):
         """Helper method to retrieve memory in parallel"""
@@ -368,10 +429,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 all_queries = [full_query] + query_rewrites
             else:
                 all_queries = [full_query]
-            if apply_filters:
-                filters = self.extract_time_filters(query, self.model_client)
-            else:
-                filters = None
+            # Note: Time filters disabled as timestamp fields are no longer used in context structure
+            # Timestamp information is now extracted from context text when needed for display
+            filters = None
             nodes = self.retrieve_nodes(all_queries, top_k=top_k, filters=filters, alpha=alpha)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
@@ -379,6 +439,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 use_reranker=use_reranker, 
                 use_span_selection=use_span_selection,
                 use_context_compression=use_context_compression,
+                use_context_aggregation=USE_CONTEXT_AGGREGATION,
                 rerank_top_k=rerank_top_k,
                 **kwargs
                 )
@@ -401,17 +462,11 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Add document context
         for i, ctx in enumerate(context):
-            # Convert timestamp to ISO UTC format if available
+            # Extract timestamp from context text if available
             timestamp_str = ""
-            if ctx.get("timestamp"):
-                try:
-                    # Convert timestamp to ISO format
-                    timestamp = datetime.datetime.fromtimestamp(ctx["timestamp"], tz=datetime.timezone.utc)
-                    timestamp_str = f" (from {timestamp.isoformat()})"
-                except (TypeError, ValueError):
-                    logger.warning(f"Failed to convert timestamp: {ctx.get('timestamp')}")
-                    # If conversion fails, don't include timestamp
-                    pass
+            extracted_timestamp = self._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
             
             # Add source information if available
             source_str = ""
@@ -485,6 +540,7 @@ class AsyncChat(Chat):
             use_reranker: bool = False, 
             use_span_selection: bool = True,
             use_context_compression: bool = USE_CONTEXT_COMPRESSION,
+            use_context_aggregation: bool = True,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -553,15 +609,11 @@ class AsyncChat(Chat):
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
-                reranked_results = sorted(
-                    filtered_results[:rerank_top_k],
-                    key=lambda x: x.metadata.get("timestamp", 0)
-                )
+                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+                reranked_results = filtered_results[:rerank_top_k]
         else:
-            reranked_results = sorted(
-                filtered_results[:rerank_top_k],
-                key=lambda x: x.metadata.get("timestamp", 0)
-            )
+            # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+            reranked_results = filtered_results[:rerank_top_k]
         logger.debug("Reranked documents", reranked_results)
 
         # Apply span selection if enabled
@@ -606,7 +658,6 @@ class AsyncChat(Chat):
                 # Add to contexts list
                 contexts.append({
                     "context": span.text,
-                    "timestamp": None,  # Compressed spans don't have timestamps
                     "data_source": span.source,
                     "doc_id": span.doc_id
                 })
@@ -623,10 +674,6 @@ class AsyncChat(Chat):
                 data_source = match.metadata["data_source"]
                 links.add(match.metadata["link"])
                 
-                # Get timestamp if available and convert to ISO format
-                timestamp = match.metadata.get("timestamp")
-                timestamp = datetime.datetime.fromtimestamp(float(timestamp), tz=datetime.timezone.utc).isoformat()
-                
                 # Extract context text directly from metadata
                 context_text = match.metadata.get("chunk_text", "")
                 
@@ -639,12 +686,38 @@ class AsyncChat(Chat):
                 # Add to contexts list
                 contexts.append({
                     "context": context_text,
-                    "timestamp": timestamp,
                     "data_source": data_source,
                     "doc_id": match.id
                 })
-        logger.debug(f"Filtered contexts: {contexts}")
-        return contexts, list(links)
+        
+        # Apply context aggregation if enabled
+        if use_context_aggregation and contexts:
+            try:
+                logger.info("Applying context aggregation to group related information...")
+                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
+                
+                # Convert aggregated contexts back to the expected format
+                if aggregated_contexts:
+                    contexts = []
+                    for agg_context in aggregated_contexts:
+                        contexts.append({
+                            "context": agg_context.content,
+                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
+                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
+                            "aggregation_type": agg_context.aggregation_type,
+                            "item_count": agg_context.metadata.get('item_count', 1)
+                        })
+                    
+                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
+            except Exception as e:
+                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
+        
+        logger.debug(f"Final contexts: {contexts}")
+        
+        # Use the scalable data source formatter
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        
+        return contexts, formatted_data_sources
         
     async def async_get_response(
             self, query: str, 
@@ -701,11 +774,9 @@ class AsyncChat(Chat):
             rewrites_task = asyncio.create_task(self.async_rewrite_query(query))
             tasks.append(rewrites_task)
         
-        # Task 2: Extract time filters if apply_filters is True (runs in parallel)
+        # Note: Time filters disabled as timestamp fields are no longer used in context structure
+        # Timestamp information is now extracted from context text when needed for display
         filters_task = None
-        if apply_filters:
-            filters_task = asyncio.create_task(self.async_extract_time_filters(query))
-            tasks.append(filters_task)
             
         # Task 3: Memory retrieval (if needed) - runs in parallel
         memory_task = None
@@ -729,14 +800,8 @@ class AsyncChat(Chat):
             except Exception as e:
                 logger.error(f"Error getting query rewrites: {str(e)}")
                 
-        # Get time filters for retrieval
+        # Note: Time filters disabled as timestamp fields are no longer used in context structure
         filters = None
-        if apply_filters and filters_task:
-            try:
-                filters = filters_task.result()
-                logger.info(f"Applied time filters: {filters}")
-            except Exception as e:
-                logger.error(f"Error getting time filters: {str(e)}")
                 
         # Log to make it clear what queries are being used
         logger.info(f"Using queries for retrieval: {all_queries} with filters: {filters}")
@@ -756,6 +821,7 @@ class AsyncChat(Chat):
                 use_reranker=use_reranker,
                 use_span_selection=use_span_selection,
                 use_context_compression=use_context_compression,
+                use_context_aggregation=USE_CONTEXT_AGGREGATION,
                 rerank_top_k=rerank_top_k,
                 **kwargs
             )
@@ -785,17 +851,11 @@ class AsyncChat(Chat):
         
         # Add document context
         for i, ctx in enumerate(context):
-            # Convert timestamp to ISO UTC format if available
+            # Extract timestamp from context text if available
             timestamp_str = ""
-            if ctx.get("timestamp"):
-                try:
-                    # Convert timestamp to ISO format
-                    timestamp = datetime.datetime.fromtimestamp(ctx["timestamp"], tz=datetime.timezone.utc)
-                    timestamp_str = f" (from {timestamp.isoformat()})"
-                except (TypeError, ValueError):
-                    logger.warning(f"Failed to convert timestamp: {ctx.get('timestamp')}")
-                    # If conversion fails, don't include timestamp
-                    pass
+            extracted_timestamp = self._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
             
             # Add source information if available
             source_str = ""

@@ -3,3 +3,5 @@ gcp_credential.json
 test.ipynb
 .env
 leanworks.egg-info/
+.pytest_cache/
+__pycache__/

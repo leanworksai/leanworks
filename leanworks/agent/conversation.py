@@ -270,6 +270,10 @@ class ConversationManager:
                             # For Outlook/calendar tools, add calendar data source
                             data_sources.append("Outlook Calendar")
                         
+                        elif tool_name in ["query_duckdb", "execute_duckdb_query"]:
+                            # For DuckDB tools, add database data source
+                            data_sources.append("DuckDB Database")
+                        
                         
                         elif tool_name == "search_documents":
                             # For search_documents, use the data sources directly from the result

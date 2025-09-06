@@ -241,7 +241,7 @@ class TestContextCompressor:
             CompressedSpan("System handles 600 req/min.", "system_docs", "doc1", [0], "preserved"),
             CompressedSpan("Timeout is 60 seconds.", "system_docs", "doc1", [1], "preserved")
         ]
-        
+    
         synthesized_spans = compressor._pass_b_lossy_synthesis(query, spans)
         
         # Should include synthesis + original spans

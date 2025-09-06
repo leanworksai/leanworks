@@ -88,21 +88,13 @@ class SearchTool:
                     "data_source": {
                         "type": "string",
                         "description": "Optional data source name to filter documents. Can only be one of the following: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
-                    },
-                    "start_timestamp": {
-                        "type": "string",
-                        "description": "Optional start of time range in ISO 8601 (e.g., 2025-06-01T00:00:00Z)"
-                    },
-                    "end_timestamp": {
-                        "type": "string",
-                        "description": "Optional end of time range in ISO 8601 (e.g., 2025-06-30T23:59:59Z)"
                     }
                 },
                 "required": ["query"]
             }
         }
 
-    async def async_search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
+    async def async_search_documents(self, query: str, data_source: str = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -132,39 +124,8 @@ class SearchTool:
             filters = {}
             if data_source:
                 filters["data_source"] = {"$eq": data_source}
-            # Build timestamp filter
-            def _parse_to_unix_seconds(value):
-                try:
-                    # Allow ints/floats or numeric strings directly
-                    if isinstance(value, (int, float)):
-                        return int(value)
-                    if isinstance(value, str):
-                        stripped = value.strip()
-                        # Numeric string
-                        if stripped.isdigit():
-                            return int(stripped)
-                        # ISO 8601 parsing; accept trailing 'Z'
-                        iso_str = stripped.replace('Z', '+00:00') if stripped.endswith('Z') else stripped
-                        dt = datetime.datetime.fromisoformat(iso_str)
-                        # If naive, assume UTC
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=datetime.timezone.utc)
-                        return int(dt.timestamp())
-                except Exception as e:
-                    logger.warning(f"Failed to parse timestamp '{value}': {e}")
-                return None
-
-            ts_filter = {}
-            if start_timestamp is not None:
-                parsed_start = _parse_to_unix_seconds(start_timestamp)
-                if parsed_start is not None:
-                    ts_filter["$gte"] = parsed_start
-            if end_timestamp is not None:
-                parsed_end = _parse_to_unix_seconds(end_timestamp)
-                if parsed_end is not None:
-                    ts_filter["$lte"] = parsed_end
-            if ts_filter:
-                filters["timestamp"] = ts_filter
+            # Note: Timestamp filtering removed as timestamp fields are no longer used in context structure
+            # Timestamp information is now extracted from context text when needed for display
             logger.info(f"Search filters: {filters}")
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
             loop = asyncio.get_event_loop()
@@ -196,12 +157,18 @@ class SearchTool:
         formatted_context = ""
         # Add document context
         for ctx in context:
+            # Extract timestamp from context text if available
+            timestamp_str = ""
+            extracted_timestamp = self.chat._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
+            
             # Add source information if available
             source_str = ""
             if ctx.get("data_source"):
                 source_str = ctx['data_source']
             
-            title = f"DOCUMENT - Date: {ctx['timestamp']}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
+            title = f"DOCUMENT - Date: {timestamp_str}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
             formatted_context += f"{title}\n{ctx['context']}\n\n"
         
         # Return both formatted context and data sources
@@ -210,7 +177,7 @@ class SearchTool:
             "data_sources": data_sources
         }
         
-    def search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
+    def search_documents(self, query: str, data_source: str = None):
         """
         Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
@@ -218,9 +185,6 @@ class SearchTool:
         Args:
             query: The search query
             data_source: Optional data source name to filter
-            start_timestamp: Optional start of time range (Unix timestamp)
-            end_timestamp: Optional end of time range (Unix timestamp)
-            read_document_ids: Set of document IDs already read to skip duplicates
         """
         try:
             logger.info(f"Executing search_documents with query: {query}")
@@ -236,9 +200,7 @@ class SearchTool:
             # Run the async method in the event loop
             result = loop.run_until_complete(self.async_search_documents(
                 query=query,
-                data_source=data_source,
-                start_timestamp=start_timestamp,
-                end_timestamp=end_timestamp
+                data_source=data_source
             ))
             
             # If async layer returned an error, surface it directly

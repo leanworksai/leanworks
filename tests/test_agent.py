@@ -65,7 +65,7 @@ def main():
         
         # Process a user message with timing
         user_message = '''
-         show me recent code commits for CCX project?
+         what are the most recent discussions about CCX project?
 '''
         
         print("💬 Processing user message:")
