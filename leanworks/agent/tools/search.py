@@ -2,7 +2,7 @@ import asyncio
 import datetime
 from openai import OpenAI
 import logging
-from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K, APPLY_FILTERS
+from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K, APPLY_FILTERS, USE_SPAN_SELECTION
 from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.chat import AsyncChat
@@ -180,6 +180,7 @@ class SearchTool:
                 query, 
                 apply_filters=True, 
                 use_reranker=True, 
+                use_span_selection=USE_SPAN_SELECTION,
                 rerank_top_k=RERANK_TOP_K,
                 read_document_ids=self.read_document_ids
             )

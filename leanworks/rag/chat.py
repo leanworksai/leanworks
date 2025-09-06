@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
+from leanworks.rag.span_selection import SpanSelector
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
 import datetime
@@ -60,6 +61,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             reranker_type=RERANKER_TYPE,
             model_client=model_client
         )
+        
+        # Initialize span selector
+        self.span_selector = SpanSelector()
             
         logger.info("RAG system initialized successfully")
 
@@ -138,6 +142,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             self, nodes: List[dict], 
             query: str, 
             use_reranker: bool = False, 
+            use_span_selection: bool = True,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -215,6 +220,18 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             )
         logger.debug("Reranked documents", reranked_results)
 
+        # Apply span selection if enabled
+        if use_span_selection and reranked_results:
+            try:
+                logger.info("Applying span selection to select relevant sentences...")
+                reranked_results = self.span_selector.select_spans(query, reranked_results)
+                
+                # Log span selection statistics
+                stats = self.span_selector.get_selection_stats(reranked_results)
+                logger.info(f"Span selection stats: {stats}")
+            except Exception as e:
+                logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
+
         # Extract text from metadata
         contexts = []
         links = set()
@@ -270,6 +287,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             use_reranker: bool = USE_RERANKER,
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
+            use_span_selection: bool = USE_SPAN_SELECTION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -281,6 +299,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             query: The user query
             model: The model to use for generation
             include_memory: Whether to include recent conversation history
+            use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -315,7 +334,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 nodes, 
                 full_query, 
                 use_reranker=use_reranker, 
-                rerank_top_k=rerank_top_k
+                use_span_selection=use_span_selection,
+                rerank_top_k=rerank_top_k,
+                **kwargs
                 )
         except Exception as e:
             logger.error(f"Error in context retrieval: {str(e)}")
@@ -418,6 +439,7 @@ class AsyncChat(Chat):
             self, nodes: List[dict], 
             query: str, 
             use_reranker: bool = False, 
+            use_span_selection: bool = True,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -497,6 +519,18 @@ class AsyncChat(Chat):
             )
         logger.debug("Reranked documents", reranked_results)
 
+        # Apply span selection if enabled
+        if use_span_selection and reranked_results:
+            try:
+                logger.info("Applying span selection to select relevant sentences...")
+                reranked_results = self.span_selector.select_spans(query, reranked_results)
+                
+                # Log span selection statistics
+                stats = self.span_selector.get_selection_stats(reranked_results)
+                logger.info(f"Span selection stats: {stats}")
+            except Exception as e:
+                logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
+
         # Extract text from metadata
         contexts = []
         links = set()
@@ -538,6 +572,7 @@ class AsyncChat(Chat):
             use_reranker: bool = USE_RERANKER,
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
+            use_span_selection: bool = USE_SPAN_SELECTION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -553,6 +588,7 @@ class AsyncChat(Chat):
             use_reranker: Whether to apply reranking
             apply_filters: Whether to apply time filters extracted from the query
             query_rewrites: Whether to use query rewriting for better recall
+            use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -634,8 +670,10 @@ class AsyncChat(Chat):
             context, data_sources = await self.async_postprocess_nodes(
                 nodes, 
                 full_query, 
-                use_reranker=use_reranker, 
-                rerank_top_k=rerank_top_k
+                use_reranker=use_reranker,
+                use_span_selection=use_span_selection,
+                rerank_top_k=rerank_top_k,
+                **kwargs
             )
             logger.info(f"Retrieved and processed {len(context)} contexts")
         except Exception as e:

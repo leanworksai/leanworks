@@ -26,3 +26,4 @@ sentence-transformers>=5.1.0
 onnx>=1.15.0
 onnxruntime>=1.16.0
 optimum[onnxruntime]>=1.15.0
+nltk>=3.8

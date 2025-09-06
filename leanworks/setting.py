@@ -2,7 +2,7 @@ RETRIEVE_TOP_K = 20
 INCLUDE_MEMORY = True
 USE_RERANKER = True
 APPLY_FILTERS = False
-RERANK_TOP_K = 5
+RERANK_TOP_K = 8
 MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
@@ -23,7 +23,7 @@ BGE_INTRA_OP_THREADS = 6  # Optimal CPU threading for inference
 BGE_INTER_OP_THREADS = 1  # Single inter-op thread for CPU
 OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
-
+USE_SPAN_SELECTION = True
 # Embedding API rate limiting settings
 EMBEDDING_REQUESTS_PER_MINUTE = 150   # At the API limit
 EMBEDDING_BATCH_SIZE = 39             # Maximum possible with 512-token texts
