@@ -4,6 +4,7 @@ from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.rag.span_selection import SpanSelector
+from leanworks.rag.context_compression import ContextCompressor
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
 import datetime
@@ -64,6 +65,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Initialize span selector
         self.span_selector = SpanSelector()
+        
+        # Initialize context compressor
+        self.context_compressor = ContextCompressor(model_client=model_client)
             
         logger.info("RAG system initialized successfully")
 
@@ -143,6 +147,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             query: str, 
             use_reranker: bool = False, 
             use_span_selection: bool = True,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -232,35 +237,72 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             except Exception as e:
                 logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
 
-        # Extract text from metadata
+        # Apply context compression if enabled (after span selection)
+        compressed_spans = None
+        compression_stats = None
+        if use_context_compression and reranked_results:
+            try:
+                logger.info("Applying context compression to optimize selected spans...")
+                compressed_spans, compression_stats = self.context_compressor.compress_context(
+                    query, reranked_results
+                )
+                logger.info(f"Context compression stats: {compression_stats}")
+            except Exception as e:
+                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
+
+        # Extract text from metadata (use compressed spans if available)
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in reranked_results:
-            # Extract source information
-            data_source = match.metadata["data_source"]
-            links.add(match.metadata["link"])
-            
-            # Get timestamp if available
-            timestamp = match.metadata.get("timestamp")
-            
-            # Extract context text using various fallback methods
-            context_text = match.metadata.get("chunk_text", "")
-            
-            # Skip duplicates
-            if not context_text or context_text in seen_contexts:
-                continue
+        # Use compressed spans if compression was successful, otherwise use original results
+        if compressed_spans:
+            # Process compressed spans
+            for span in compressed_spans:
+                # Skip duplicates
+                if span.text in seen_contexts:
+                    continue
+                seen_contexts.add(span.text)
                 
-            seen_contexts.add(context_text)
-            
-            # Add to contexts list
-            contexts.append({
-                "context": context_text,
-                "timestamp": timestamp,
-                "data_source": data_source,
-                "doc_id": match.id
-            })
+                # Add to contexts list
+                contexts.append({
+                    "context": span.text,
+                    "timestamp": None,  # Compressed spans don't have timestamps
+                    "data_source": span.source,
+                    "doc_id": span.doc_id
+                })
+                
+                # Try to find the original document for link extraction
+                for match in reranked_results:
+                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
+                        links.add(match.metadata.get("link", ""))
+                        break
+        else:
+            # Fallback to original processing
+            for match in reranked_results:
+                # Extract source information
+                data_source = match.metadata["data_source"]
+                links.add(match.metadata["link"])
+                
+                # Get timestamp if available
+                timestamp = match.metadata.get("timestamp")
+                
+                # Extract context text using various fallback methods
+                context_text = match.metadata.get("chunk_text", "")
+                
+                # Skip duplicates
+                if not context_text or context_text in seen_contexts:
+                    continue
+                    
+                seen_contexts.add(context_text)
+                
+                # Add to contexts list
+                contexts.append({
+                    "context": context_text,
+                    "timestamp": timestamp,
+                    "data_source": data_source,
+                    "doc_id": match.id
+                })
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
     
@@ -288,6 +330,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -335,6 +378,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 full_query, 
                 use_reranker=use_reranker, 
                 use_span_selection=use_span_selection,
+                use_context_compression=use_context_compression,
                 rerank_top_k=rerank_top_k,
                 **kwargs
                 )
@@ -440,6 +484,7 @@ class AsyncChat(Chat):
             query: str, 
             use_reranker: bool = False, 
             use_span_selection: bool = True,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -531,36 +576,73 @@ class AsyncChat(Chat):
             except Exception as e:
                 logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
 
-        # Extract text from metadata
+        # Apply context compression if enabled (after span selection)
+        compressed_spans = None
+        compression_stats = None
+        if use_context_compression and reranked_results:
+            try:
+                logger.info("Applying context compression to optimize selected spans...")
+                compressed_spans, compression_stats = self.context_compressor.compress_context(
+                    query, reranked_results
+                )
+                logger.info(f"Context compression stats: {compression_stats}")
+            except Exception as e:
+                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
+
+        # Extract text from metadata (use compressed spans if available)
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in reranked_results:
-            # Extract source information
-            data_source = match.metadata["data_source"]
-            links.add(match.metadata["link"])
-            
-            # Get timestamp if available and convert to ISO format
-            timestamp = match.metadata.get("timestamp")
-            timestamp = datetime.datetime.fromtimestamp(float(timestamp), tz=datetime.timezone.utc).isoformat()
-            
-            # Extract context text directly from metadata
-            context_text = match.metadata.get("chunk_text", "")
-            
-            # Skip duplicates
-            if not context_text or context_text in seen_contexts:
-                continue
+        # Use compressed spans if compression was successful, otherwise use original results
+        if compressed_spans:
+            # Process compressed spans
+            for span in compressed_spans:
+                # Skip duplicates
+                if span.text in seen_contexts:
+                    continue
+                seen_contexts.add(span.text)
                 
-            seen_contexts.add(context_text)
-            
-            # Add to contexts list
-            contexts.append({
-                "context": context_text,
-                "timestamp": timestamp,
-                "data_source": data_source,
-                "doc_id": match.id
-            })
+                # Add to contexts list
+                contexts.append({
+                    "context": span.text,
+                    "timestamp": None,  # Compressed spans don't have timestamps
+                    "data_source": span.source,
+                    "doc_id": span.doc_id
+                })
+                
+                # Try to find the original document for link extraction
+                for match in reranked_results:
+                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
+                        links.add(match.metadata.get("link", ""))
+                        break
+        else:
+            # Fallback to original processing
+            for match in reranked_results:
+                # Extract source information
+                data_source = match.metadata["data_source"]
+                links.add(match.metadata["link"])
+                
+                # Get timestamp if available and convert to ISO format
+                timestamp = match.metadata.get("timestamp")
+                timestamp = datetime.datetime.fromtimestamp(float(timestamp), tz=datetime.timezone.utc).isoformat()
+                
+                # Extract context text directly from metadata
+                context_text = match.metadata.get("chunk_text", "")
+                
+                # Skip duplicates
+                if not context_text or context_text in seen_contexts:
+                    continue
+                    
+                seen_contexts.add(context_text)
+                
+                # Add to contexts list
+                contexts.append({
+                    "context": context_text,
+                    "timestamp": timestamp,
+                    "data_source": data_source,
+                    "doc_id": match.id
+                })
         logger.debug(f"Filtered contexts: {contexts}")
         return contexts, list(links)
         
@@ -573,6 +655,7 @@ class AsyncChat(Chat):
             apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -672,6 +755,7 @@ class AsyncChat(Chat):
                 full_query, 
                 use_reranker=use_reranker,
                 use_span_selection=use_span_selection,
+                use_context_compression=use_context_compression,
                 rerank_top_k=rerank_top_k,
                 **kwargs
             )

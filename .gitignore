@@ -2,3 +2,4 @@ gcp_credential.json
 .venv
 test.ipynb
 .env
+leanworks.egg-info/
