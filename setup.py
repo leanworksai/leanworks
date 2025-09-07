@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.3.3",
+    version="0.3.4",
     packages=find_packages(),
     install_requires=[
         "pinecone==7.2.0",
@@ -23,7 +23,17 @@ setup(
         "msal==1.33.0",
         "python-dotenv==1.0.1",
         "pytz==2024.1",
-        "duckdb==1.1.3"
+        "duckdb==1.1.3",
+        "wheel>=0.45.0",
+        "torch>=2.8.0",
+        "torchvision>=0.23.0",
+        "torchaudio>=2.8.0",
+        "transformers>=4.56.0",
+        "sentence-transformers>=5.1.0",
+        "onnx>=1.15.0",
+        "onnxruntime>=1.16.0",
+        "optimum[onnxruntime]>=1.15.0",
+        "nltk>=3.8"
     ],
     author="Yanfu Zhu",
     author_email="yanfu@leanworks.ai",

@@ -2,7 +2,11 @@ from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.memory import MemoryManager
-from leanworks.rag.reranker import CrossEncoderReranker
+from leanworks.rag.reranker.reranker_factory import RerankerFactory
+from leanworks.rag.span_selection import SpanSelector
+from leanworks.rag.context_compression import ContextCompressor
+from leanworks.rag.context_aggregation import ContextAggregator
+from leanworks.rag.data_source_formatter import DataSourceFormatter
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
 import datetime
@@ -13,7 +17,7 @@ from types import SimpleNamespace
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
+class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     """
     Chat class for retrieving context from Pinecone and generating responses using OpenAI.
     Provides synchronous functionality for RAG operations.
@@ -55,10 +59,80 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         # Initialize QueryRewriter
         QueryRewriter.__init__(self, model_client)
 
-        # Initialize CrossEncoderReranker
-        CrossEncoderReranker.__init__(self, model_client)
+        # Initialize the reranker using factory
+        self.reranker = RerankerFactory.create_reranker(
+            reranker_type=RERANKER_TYPE,
+            model_client=model_client
+        )
+        
+        # Initialize span selector
+        self.span_selector = SpanSelector()
+        
+        # Initialize context compressor
+        self.context_compressor = ContextCompressor(model_client=model_client)
+        
+        # Initialize context aggregator with embedding client for better similarity
+        self.context_aggregator = ContextAggregator(embedding_client=vectordb_client.embedding_model_client)
+        
+        # Initialize data source formatter
+        self.data_source_formatter = DataSourceFormatter()
             
         logger.info("RAG system initialized successfully")
+
+    def _extract_timestamp_from_context(self, context_text: str) -> str:
+        """Extract timestamp from context text."""
+        import re
+        from datetime import datetime
+        
+        # Common timestamp patterns
+        patterns = [
+            r'date[:\s]+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:[+-]\d{2}:\d{2}|Z)?)',
+            r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:[+-]\d{2}:\d{2}|Z)?)',
+            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
+            r'(\d{4}-\d{2}-\d{2})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, context_text, re.IGNORECASE)
+            if match:
+                timestamp_str = match.group(1)
+                try:
+                    # Try to parse the timestamp
+                    if 'T' in timestamp_str:
+                        # ISO format
+                        if timestamp_str.endswith('Z'):
+                            timestamp_str = timestamp_str[:-1] + '+00:00'
+                        dt = datetime.fromisoformat(timestamp_str)
+                    else:
+                        # Date only or simple format
+                        dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S' if ' ' in timestamp_str else '%Y-%m-%d')
+                    
+                    return dt.isoformat()
+                except ValueError:
+                    continue
+        
+        # Check for Unix timestamps (both integer and float formats)
+        unix_patterns = [
+            r'timestamp[:\s]+(\d{10,13}(?:\.\d+)?)',  # timestamp: 1756087205.146079
+            r'(\d{10,13}(?:\.\d+)?)',  # standalone Unix timestamp
+        ]
+        
+        for pattern in unix_patterns:
+            match = re.search(pattern, context_text)
+            if match:
+                timestamp_str = match.group(1)
+                try:
+                    # Convert Unix timestamp to datetime
+                    unix_timestamp = float(timestamp_str)
+                    # Handle both seconds and milliseconds
+                    if unix_timestamp > 1e10:  # Likely milliseconds
+                        unix_timestamp = unix_timestamp / 1000
+                    dt = datetime.fromtimestamp(unix_timestamp)
+                    return dt.isoformat()
+                except (ValueError, OSError):
+                    continue
+        
+        return None
 
     def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA) -> SimpleNamespace:
         """
@@ -134,7 +208,10 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
     def postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = False, 
+            use_reranker: bool = True, 
+            use_span_selection: bool = True,
+            use_context_compression: bool = True,
+            use_context_aggregation: bool = True,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -143,7 +220,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         Args:
             nodes: The query results from Pinecone
             query: The user query
-            apply_filters: Whether to apply user filters extracted from the query (default True)
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
             read_document_ids: Set of document IDs already read to skip duplicates
             
@@ -191,8 +267,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                 logger.info(f"Applying reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use the reranker to improve precision
-                    logger.info("Initializing CrossEncoderReranker")
-                    reranked_results = self.rerank(query, filtered_results, top_k=rerank_top_k)
+                    logger.info(f"Using {RERANKER_TYPE} reranker")
+                    reranked_results = self.reranker.rerank(query, filtered_results, top_k=rerank_top_k)
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
@@ -201,48 +277,115 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
-                reranked_results = sorted(
-                    filtered_results[:rerank_top_k],
-                    key=lambda x: x.metadata.get("timestamp", 0)
-                )
+                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+                reranked_results = filtered_results[:rerank_top_k]
         else:
-            reranked_results = sorted(
-                filtered_results[:rerank_top_k],
-                key=lambda x: x.metadata.get("timestamp", 0)
-            )
+            # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+            reranked_results = filtered_results[:rerank_top_k]
         logger.debug("Reranked documents", reranked_results)
 
-        # Extract text from metadata
+        # Apply span selection if enabled
+        if use_span_selection and reranked_results:
+            try:
+                logger.info("Applying span selection to select relevant sentences...")
+                reranked_results = self.span_selector.select_spans(query, reranked_results)
+                
+                # Log span selection statistics
+                stats = self.span_selector.get_selection_stats(reranked_results)
+                logger.info(f"Span selection stats: {stats}")
+            except Exception as e:
+                logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
+
+        # Apply context compression if enabled (after span selection)
+        compressed_spans = None
+        compression_stats = None
+        if use_context_compression and reranked_results:
+            try:
+                logger.info("Applying context compression to optimize selected spans...")
+                compressed_spans, compression_stats = self.context_compressor.compress_context(
+                    query, reranked_results
+                )
+                logger.info(f"Context compression stats: {compression_stats}")
+            except Exception as e:
+                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
+
+        # Extract text from metadata (use compressed spans if available)
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in reranked_results:
-            # Extract source information
-            data_source = match.metadata["data_source"]
-            links.add(match.metadata["link"])
-            
-            # Get timestamp if available
-            timestamp = match.metadata.get("timestamp")
-            
-            # Extract context text using various fallback methods
-            context_text = match.metadata.get("chunk_text", "")
-            
-            # Skip duplicates
-            if not context_text or context_text in seen_contexts:
-                continue
+        # Use compressed spans if compression was successful, otherwise use original results
+        if compressed_spans:
+            # Process compressed spans
+            for span in compressed_spans:
+                # Skip duplicates
+                if span.text in seen_contexts:
+                    continue
+                seen_contexts.add(span.text)
                 
-            seen_contexts.add(context_text)
-            
-            # Add to contexts list
-            contexts.append({
-                "context": context_text,
-                "timestamp": timestamp,
-                "data_source": data_source,
-                "doc_id": match.id
-            })
-        logger.debug(f"Filtered contexts: {contexts}")
-        return contexts, list(links)
+                # Add to contexts list
+                contexts.append({
+                    "context": span.text,
+                    "data_source": span.source,
+                    "doc_id": span.doc_id
+                })
+                
+                # Try to find the original document for link extraction
+                for match in reranked_results:
+                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
+                        links.add(match.metadata.get("link", ""))
+                        break
+        else:
+            # Fallback to original processing
+            for match in reranked_results:
+                # Extract source information
+                data_source = match.metadata["data_source"]
+                links.add(match.metadata["link"])
+                
+                # Extract context text using various fallback methods
+                context_text = match.metadata.get("chunk_text", "")
+                
+                # Skip duplicates
+                if not context_text or context_text in seen_contexts:
+                    continue
+                    
+                seen_contexts.add(context_text)
+                
+                # Add to contexts list
+                contexts.append({
+                    "context": context_text,
+                    "data_source": data_source,
+                    "doc_id": match.id
+                })
+        
+        # Apply context aggregation if enabled
+        if use_context_aggregation and contexts:
+            try:
+                logger.info("Applying context aggregation to group related information...")
+                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
+                
+                # Convert aggregated contexts back to the expected format
+                if aggregated_contexts:
+                    contexts = []
+                    for agg_context in aggregated_contexts:
+                        contexts.append({
+                            "context": agg_context.content,
+                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
+                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
+                            "aggregation_type": agg_context.aggregation_type,
+                            "item_count": agg_context.metadata.get('item_count', 1)
+                        })
+                    
+                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
+            except Exception as e:
+                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
+        
+        logger.debug(f"Final contexts: {contexts}")
+        
+        # Use the scalable data source formatter
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        
+        return contexts, formatted_data_sources
     
     def _retrieve_memory(self):
         """Helper method to retrieve memory in parallel"""
@@ -265,8 +408,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             top_k: int = RETRIEVE_TOP_K,
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
-            apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
+            use_span_selection: bool = USE_SPAN_SELECTION,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -278,6 +422,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
             query: The user query
             model: The model to use for generation
             include_memory: Whether to include recent conversation history
+            use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -303,16 +448,19 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
                 all_queries = [full_query] + query_rewrites
             else:
                 all_queries = [full_query]
-            if apply_filters:
-                filters = self.extract_time_filters(query, self.model_client)
-            else:
-                filters = None
+            # Note: Time filters disabled as timestamp fields are no longer used in context structure
+            # Timestamp information is now extracted from context text when needed for display
+            filters = None
             nodes = self.retrieve_nodes(all_queries, top_k=top_k, filters=filters, alpha=alpha)
             context, data_sources = self.postprocess_nodes(
                 nodes, 
                 full_query, 
                 use_reranker=use_reranker, 
-                rerank_top_k=rerank_top_k
+                use_span_selection=use_span_selection,
+                use_context_compression=use_context_compression,
+                use_context_aggregation=USE_CONTEXT_AGGREGATION,
+                rerank_top_k=rerank_top_k,
+                **kwargs
                 )
         except Exception as e:
             logger.error(f"Error in context retrieval: {str(e)}")
@@ -333,17 +481,11 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter, CrossEncoderReranker):
         
         # Add document context
         for i, ctx in enumerate(context):
-            # Convert timestamp to ISO UTC format if available
+            # Extract timestamp from context text if available
             timestamp_str = ""
-            if ctx.get("timestamp"):
-                try:
-                    # Convert timestamp to ISO format
-                    timestamp = datetime.datetime.fromtimestamp(ctx["timestamp"], tz=datetime.timezone.utc)
-                    timestamp_str = f" (from {timestamp.isoformat()})"
-                except (TypeError, ValueError):
-                    logger.warning(f"Failed to convert timestamp: {ctx.get('timestamp')}")
-                    # If conversion fails, don't include timestamp
-                    pass
+            extracted_timestamp = self._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
             
             # Add source information if available
             source_str = ""
@@ -414,7 +556,10 @@ class AsyncChat(Chat):
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = False, 
+            use_reranker: bool = True, 
+            use_span_selection: bool = True,
+            use_context_compression: bool = True,
+            use_context_aggregation: bool = True,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -470,7 +615,7 @@ class AsyncChat(Chat):
                 logger.info(f"Applying async reranking to get top {rerank_top_k} documents...")
                 try:
                     # Use async reranker to improve precision without blocking
-                    reranked_results = await self.rerank_async(
+                    reranked_results = await self.reranker.rerank_async(
                         query, 
                         filtered_results,
                         top_k=rerank_top_k
@@ -483,49 +628,115 @@ class AsyncChat(Chat):
             else:
                 logger.info("Skipping reranking due to high quality initial results")
                 # Just take the top results without reranking
-                reranked_results = sorted(
-                    filtered_results[:rerank_top_k],
-                    key=lambda x: x.metadata.get("timestamp", 0)
-                )
+                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+                reranked_results = filtered_results[:rerank_top_k]
         else:
-            reranked_results = sorted(
-                filtered_results[:rerank_top_k],
-                key=lambda x: x.metadata.get("timestamp", 0)
-            )
+            # Note: Timestamp-based sorting removed as timestamp fields are no longer used
+            reranked_results = filtered_results[:rerank_top_k]
         logger.debug("Reranked documents", reranked_results)
 
-        # Extract text from metadata
+        # Apply span selection if enabled
+        if use_span_selection and reranked_results:
+            try:
+                logger.info("Applying span selection to select relevant sentences...")
+                reranked_results = self.span_selector.select_spans(query, reranked_results)
+                
+                # Log span selection statistics
+                stats = self.span_selector.get_selection_stats(reranked_results)
+                logger.info(f"Span selection stats: {stats}")
+            except Exception as e:
+                logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
+
+        # Apply context compression if enabled (after span selection)
+        compressed_spans = None
+        compression_stats = None
+        if use_context_compression and reranked_results:
+            try:
+                logger.info("Applying context compression to optimize selected spans...")
+                compressed_spans, compression_stats = self.context_compressor.compress_context(
+                    query, reranked_results
+                )
+                logger.info(f"Context compression stats: {compression_stats}")
+            except Exception as e:
+                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
+
+        # Extract text from metadata (use compressed spans if available)
         contexts = []
         links = set()
         seen_contexts = set()
         
-        for match in reranked_results:
-            # Extract source information
-            data_source = match.metadata["data_source"]
-            links.add(match.metadata["link"])
-            
-            # Get timestamp if available and convert to ISO format
-            timestamp = match.metadata.get("timestamp")
-            timestamp = datetime.datetime.fromtimestamp(float(timestamp), tz=datetime.timezone.utc).isoformat()
-            
-            # Extract context text directly from metadata
-            context_text = match.metadata.get("chunk_text", "")
-            
-            # Skip duplicates
-            if not context_text or context_text in seen_contexts:
-                continue
+        # Use compressed spans if compression was successful, otherwise use original results
+        if compressed_spans:
+            # Process compressed spans
+            for span in compressed_spans:
+                # Skip duplicates
+                if span.text in seen_contexts:
+                    continue
+                seen_contexts.add(span.text)
                 
-            seen_contexts.add(context_text)
-            
-            # Add to contexts list
-            contexts.append({
-                "context": context_text,
-                "timestamp": timestamp,
-                "data_source": data_source,
-                "doc_id": match.id
-            })
-        logger.debug(f"Filtered contexts: {contexts}")
-        return contexts, list(links)
+                # Add to contexts list
+                contexts.append({
+                    "context": span.text,
+                    "data_source": span.source,
+                    "doc_id": span.doc_id
+                })
+                
+                # Try to find the original document for link extraction
+                for match in reranked_results:
+                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
+                        links.add(match.metadata.get("link", ""))
+                        break
+        else:
+            # Fallback to original processing
+            for match in reranked_results:
+                # Extract source information
+                data_source = match.metadata["data_source"]
+                links.add(match.metadata["link"])
+                
+                # Extract context text directly from metadata
+                context_text = match.metadata.get("chunk_text", "")
+                
+                # Skip duplicates
+                if not context_text or context_text in seen_contexts:
+                    continue
+                    
+                seen_contexts.add(context_text)
+                
+                # Add to contexts list
+                contexts.append({
+                    "context": context_text,
+                    "data_source": data_source,
+                    "doc_id": match.id
+                })
+        
+        # Apply context aggregation if enabled
+        if use_context_aggregation and contexts:
+            try:
+                logger.info("Applying context aggregation to group related information...")
+                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
+                
+                # Convert aggregated contexts back to the expected format
+                if aggregated_contexts:
+                    contexts = []
+                    for agg_context in aggregated_contexts:
+                        contexts.append({
+                            "context": agg_context.content,
+                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
+                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
+                            "aggregation_type": agg_context.aggregation_type,
+                            "item_count": agg_context.metadata.get('item_count', 1)
+                        })
+                    
+                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
+            except Exception as e:
+                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
+        
+        logger.debug(f"Final contexts: {contexts}")
+        
+        # Use the scalable data source formatter
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        
+        return contexts, formatted_data_sources
         
     async def async_get_response(
             self, query: str, 
@@ -533,8 +744,9 @@ class AsyncChat(Chat):
             top_k: int = RETRIEVE_TOP_K,
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
-            apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
+            use_span_selection: bool = USE_SPAN_SELECTION,
+            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -548,8 +760,8 @@ class AsyncChat(Chat):
             top_k: Number of context chunks to retrieve
             include_memory: Whether to include recent conversation history
             use_reranker: Whether to apply reranking
-            apply_filters: Whether to apply time filters extracted from the query
             query_rewrites: Whether to use query rewriting for better recall
+            use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -579,11 +791,9 @@ class AsyncChat(Chat):
             rewrites_task = asyncio.create_task(self.async_rewrite_query(query))
             tasks.append(rewrites_task)
         
-        # Task 2: Extract time filters if apply_filters is True (runs in parallel)
+        # Note: Time filters disabled as timestamp fields are no longer used in context structure
+        # Timestamp information is now extracted from context text when needed for display
         filters_task = None
-        if apply_filters:
-            filters_task = asyncio.create_task(self.async_extract_time_filters(query))
-            tasks.append(filters_task)
             
         # Task 3: Memory retrieval (if needed) - runs in parallel
         memory_task = None
@@ -607,14 +817,8 @@ class AsyncChat(Chat):
             except Exception as e:
                 logger.error(f"Error getting query rewrites: {str(e)}")
                 
-        # Get time filters for retrieval
+        # Note: Time filters disabled as timestamp fields are no longer used in context structure
         filters = None
-        if apply_filters and filters_task:
-            try:
-                filters = filters_task.result()
-                logger.info(f"Applied time filters: {filters}")
-            except Exception as e:
-                logger.error(f"Error getting time filters: {str(e)}")
                 
         # Log to make it clear what queries are being used
         logger.info(f"Using queries for retrieval: {all_queries} with filters: {filters}")
@@ -631,8 +835,12 @@ class AsyncChat(Chat):
             context, data_sources = await self.async_postprocess_nodes(
                 nodes, 
                 full_query, 
-                use_reranker=use_reranker, 
-                rerank_top_k=rerank_top_k
+                use_reranker=use_reranker,
+                use_span_selection=use_span_selection,
+                use_context_compression=use_context_compression,
+                use_context_aggregation=USE_CONTEXT_AGGREGATION,
+                rerank_top_k=rerank_top_k,
+                **kwargs
             )
             logger.info(f"Retrieved and processed {len(context)} contexts")
         except Exception as e:
@@ -660,17 +868,11 @@ class AsyncChat(Chat):
         
         # Add document context
         for i, ctx in enumerate(context):
-            # Convert timestamp to ISO UTC format if available
+            # Extract timestamp from context text if available
             timestamp_str = ""
-            if ctx.get("timestamp"):
-                try:
-                    # Convert timestamp to ISO format
-                    timestamp = datetime.datetime.fromtimestamp(ctx["timestamp"], tz=datetime.timezone.utc)
-                    timestamp_str = f" (from {timestamp.isoformat()})"
-                except (TypeError, ValueError):
-                    logger.warning(f"Failed to convert timestamp: {ctx.get('timestamp')}")
-                    # If conversion fails, don't include timestamp
-                    pass
+            extracted_timestamp = self._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
             
             # Add source information if available
             source_str = ""

@@ -73,6 +73,7 @@ class MemoryManager:
         self._token_count_future = None  # Future for ongoing token calculation
         self._token_count_lock = threading.Lock()  # Thread safety
         self._last_token_calculation_turns = 0  # Track when we last calculated
+        self._shutdown = False  # Track shutdown state
         
         # Load existing memory state
         self.load_memory_state()
@@ -448,6 +449,9 @@ class MemoryManager:
     
     def _start_background_token_calculation(self):
         """Start background token calculation for next time."""
+        if self._shutdown:
+            return
+            
         try:
             self._token_count_future = self._executor.submit(self._calculate_current_tokens_sync)
             logger.debug("Started background token calculation")
@@ -459,6 +463,9 @@ class MemoryManager:
         """
         Trigger background summarization without blocking the main thread.
         """
+        if self._shutdown:
+            return
+            
         try:
             self._executor.submit(self._perform_summarization)
             logger.debug("Started background summarization")
@@ -673,23 +680,44 @@ Please provide an updated running summary that incorporates both the existing su
     def shutdown(self):
         """Shutdown the memory manager and clean up background threads."""
         try:
+            # Check if already shutdown
+            if hasattr(self, '_shutdown') and self._shutdown:
+                return
+            
+            self._shutdown = True
+            
             # Cancel any pending operations
             if hasattr(self, '_token_count_lock'):
                 with self._token_count_lock:
-                    if self._token_count_future:
+                    if hasattr(self, '_token_count_future') and self._token_count_future:
                         self._token_count_future.cancel()
                         self._token_count_future = None
             
-            # Shutdown the executor
-            if hasattr(self, '_executor'):
-                self._executor.shutdown(wait=True)
-                logger.info("MemoryManager shutdown completed")
+            # Shutdown the executor with timeout to avoid hanging
+            if hasattr(self, '_executor') and self._executor:
+                try:
+                    # Use shutdown with timeout to prevent hanging
+                    self._executor.shutdown(wait=False)  # Don't wait for completion
+                    logger.info("MemoryManager shutdown initiated")
+                except Exception as e:
+                    logger.warning(f"Error shutting down executor: {e}")
+            
         except Exception as e:
             logger.error(f"Error during MemoryManager shutdown: {e}")
     
     def __del__(self):
         """Cleanup on deletion."""
         try:
-            self.shutdown()
+            # Only attempt shutdown if not already done
+            if not (hasattr(self, '_shutdown') and self._shutdown):
+                self.shutdown()
         except Exception:
             pass  # Ignore errors during cleanup
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with proper cleanup."""
+        self.shutdown()

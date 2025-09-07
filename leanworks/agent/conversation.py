@@ -270,11 +270,10 @@ class ConversationManager:
                             # For Outlook/calendar tools, add calendar data source
                             data_sources.append("Outlook Calendar")
                         
-                        elif tool_name in ["list_gitlab_projects", "list_gitlab_issues", "find_gitlab_user_by_email", 
-                                          "list_gitlab_project_members", "get_gitlab_project_detail", 
-                                          "list_gitlab_groups", "get_gitlab_group_detail", "get_issue_detail"]:
-                            # For GitLab tools, add GitLab data source
-                            data_sources.append("GitLab")
+                        elif tool_name in ["query_duckdb", "execute_duckdb_query"]:
+                            # For DuckDB tools, add database data source
+                            data_sources.append("DuckDB Database")
+                        
                         
                         elif tool_name == "search_documents":
                             # For search_documents, use the data sources directly from the result

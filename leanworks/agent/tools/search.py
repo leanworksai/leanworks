@@ -2,7 +2,7 @@ import asyncio
 import datetime
 from openai import OpenAI
 import logging
-from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K, APPLY_FILTERS
+from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
 from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.chat import AsyncChat
@@ -56,6 +56,33 @@ class SearchTool:
         )
         # Shared deduplication set used across searches
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
+    
+    def _convert_unix_timestamps_in_text(self, text: str) -> str:
+        """Convert Unix timestamps in text to ISO format for better readability."""
+        import re
+        from datetime import datetime
+        
+        def replace_timestamp(match):
+            prefix = match.group(1)  # The part before the timestamp
+            timestamp_str = match.group(2)  # The actual timestamp
+            try:
+                # Convert Unix timestamp to datetime
+                unix_timestamp = float(timestamp_str)
+                # Handle both seconds and milliseconds
+                if unix_timestamp > 1e10:  # Likely milliseconds
+                    unix_timestamp = unix_timestamp / 1000
+                dt = datetime.fromtimestamp(unix_timestamp)
+                iso_format = dt.isoformat()
+                return f"{prefix}{iso_format}"
+            except (ValueError, OSError):
+                return match.group(0)  # Return original if conversion fails
+        
+        # Pattern to match Unix timestamps in various contexts
+        # Matches patterns like: timestamp is 1756087205.146079, [0].timestamp is 1756087205.146079, etc.
+        unix_pattern = r'(\w*[Tt]imestamp\s*is\s*)(\d{10,13}(?:\.\d+)?)'
+        text = re.sub(unix_pattern, replace_timestamp, text)
+        
+        return text
         
     @property
     def search_documents_property(self):
@@ -88,21 +115,13 @@ class SearchTool:
                     "data_source": {
                         "type": "string",
                         "description": "Optional data source name to filter documents. Can only be one of the following: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
-                    },
-                    "start_timestamp": {
-                        "type": "string",
-                        "description": "Optional start of time range in ISO 8601 (e.g., 2025-06-01T00:00:00Z)"
-                    },
-                    "end_timestamp": {
-                        "type": "string",
-                        "description": "Optional end of time range in ISO 8601 (e.g., 2025-06-30T23:59:59Z)"
                     }
                 },
                 "required": ["query"]
             }
         }
 
-    async def async_search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
+    async def async_search_documents(self, query: str, data_source: str = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -132,39 +151,8 @@ class SearchTool:
             filters = {}
             if data_source:
                 filters["data_source"] = {"$eq": data_source}
-            # Build timestamp filter
-            def _parse_to_unix_seconds(value):
-                try:
-                    # Allow ints/floats or numeric strings directly
-                    if isinstance(value, (int, float)):
-                        return int(value)
-                    if isinstance(value, str):
-                        stripped = value.strip()
-                        # Numeric string
-                        if stripped.isdigit():
-                            return int(stripped)
-                        # ISO 8601 parsing; accept trailing 'Z'
-                        iso_str = stripped.replace('Z', '+00:00') if stripped.endswith('Z') else stripped
-                        dt = datetime.datetime.fromisoformat(iso_str)
-                        # If naive, assume UTC
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=datetime.timezone.utc)
-                        return int(dt.timestamp())
-                except Exception as e:
-                    logger.warning(f"Failed to parse timestamp '{value}': {e}")
-                return None
-
-            ts_filter = {}
-            if start_timestamp is not None:
-                parsed_start = _parse_to_unix_seconds(start_timestamp)
-                if parsed_start is not None:
-                    ts_filter["$gte"] = parsed_start
-            if end_timestamp is not None:
-                parsed_end = _parse_to_unix_seconds(end_timestamp)
-                if parsed_end is not None:
-                    ts_filter["$lte"] = parsed_end
-            if ts_filter:
-                filters["timestamp"] = ts_filter
+            # Note: Timestamp filtering removed as timestamp fields are no longer used in context structure
+            # Timestamp information is now extracted from context text when needed for display
             logger.info(f"Search filters: {filters}")
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
             loop = asyncio.get_event_loop()
@@ -177,13 +165,10 @@ class SearchTool:
             # Use async postprocessing with non-blocking reranking and deduplication
             context, data_sources = await self.chat.async_postprocess_nodes(
                 nodes, 
-                query, 
-                apply_filters=True, 
-                use_reranker=True, 
+                query,
                 rerank_top_k=RERANK_TOP_K,
                 read_document_ids=self.read_document_ids
             )
-            print(f"context: {context}")
             logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
             logger.info(f"Retrieved data sources: {data_sources}")
         except Exception as e:
@@ -195,21 +180,29 @@ class SearchTool:
         formatted_context = ""
         # Add document context
         for ctx in context:
+            # Extract timestamp from context text if available
+            timestamp_str = ""
+            extracted_timestamp = self.chat._extract_timestamp_from_context(ctx.get("context", ""))
+            if extracted_timestamp:
+                timestamp_str = f" (from {extracted_timestamp})"
+            
             # Add source information if available
             source_str = ""
             if ctx.get("data_source"):
                 source_str = ctx['data_source']
             
-            title = f"DOCUMENT - Date: {ctx['timestamp']}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
-            formatted_context += f"{title}\n{ctx['context']}\n\n"
-        
+            # Convert Unix timestamps in the context text to ISO format for better readability
+            context_text = self._convert_unix_timestamps_in_text(ctx.get("context", ""))
+            
+            title = f"DOCUMENT - Date: {timestamp_str}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
+            formatted_context += f"{title}\n{context_text}\n\n"
         # Return both formatted context and data sources
         return {
             "formatted_context": formatted_context,
             "data_sources": data_sources
         }
         
-    def search_documents(self, query: str, data_source: str = None, start_timestamp: str | int | None = None, end_timestamp: str | int | None = None):
+    def search_documents(self, query: str, data_source: str = None):
         """
         Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
@@ -217,28 +210,49 @@ class SearchTool:
         Args:
             query: The search query
             data_source: Optional data source name to filter
-            start_timestamp: Optional start of time range (Unix timestamp)
-            end_timestamp: Optional end of time range (Unix timestamp)
-            read_document_ids: Set of document IDs already read to skip duplicates
         """
         try:
             logger.info(f"Executing search_documents with query: {query}")
             logger.info(f"Using shared read_document_ids length: {len(self.read_document_ids)}")
-            # Get or create an event loop
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                # If there's no event loop in this thread, create one
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
             
-            # Run the async method in the event loop
-            result = loop.run_until_complete(self.async_search_documents(
-                query=query,
-                data_source=data_source,
-                start_timestamp=start_timestamp,
-                end_timestamp=end_timestamp
-            ))
+            # Check if we're already in an event loop
+            try:
+                asyncio.get_running_loop()
+                # We're in an event loop, so we need to use a thread executor
+                import concurrent.futures
+                import threading
+                
+                def run_in_thread():
+                    # Create a new event loop in this thread
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        return new_loop.run_until_complete(self.async_search_documents(
+                            query=query,
+                            data_source=data_source
+                        ))
+                    finally:
+                        new_loop.close()
+                
+                # Run the async method in a separate thread
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(run_in_thread)
+                    result = future.result(timeout=30)  # 30 second timeout
+                    
+            except RuntimeError:
+                # No event loop running, we can safely create one
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # If there's no event loop in this thread, create one
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Run the async method in the event loop
+                result = loop.run_until_complete(self.async_search_documents(
+                    query=query,
+                    data_source=data_source
+                ))
             
             # If async layer returned an error, surface it directly
             if isinstance(result, dict) and "error" in result:

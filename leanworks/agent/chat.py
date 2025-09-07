@@ -578,6 +578,22 @@ class ChatAgent:
             pass
         return result
     
+    def cleanup(self):
+        """Clean up resources and shutdown background threads."""
+        try:
+            if hasattr(self, 'memory_manager') and self.memory_manager:
+                self.memory_manager.shutdown()
+                logger.info("ChatAgent cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during ChatAgent cleanup: {e}")
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        try:
+            self.cleanup()
+        except Exception:
+            pass  # Ignore errors during cleanup
+    
     def _extract_source_content_from_conversation(self):
         """
         Extract the actual content from tool results in the conversation history

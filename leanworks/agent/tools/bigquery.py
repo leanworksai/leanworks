@@ -3,6 +3,7 @@ import json
 import logging
 import datetime
 import re
+from leanworks.setting import get_tables_and_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -21,95 +22,44 @@ class BigQueryTool:
         """
         self.bq_client_wrapper = bq_client_wrapper
 
-        # Load all table schemas into a list on initialization using the attached script pattern
-        # Schema structure: [ { 'bq_table_path': 'leanworks.{client}.{table}', 'schema': [field_dict, ...] }, ... ]
-        self.table_schemas = []
+        # Load table schemas from settings instead of dynamically from BigQuery
+        dataset_id = getattr(self.bq_client_wrapper, 'client_name', 'unknown')
         try:
-            dataset_ref = bigquery.DatasetReference("leanworks", self.bq_client_wrapper.client_name)
-            tables = self.bq_client_wrapper.bq_client.list_tables(dataset_ref)
-            for table_item in tables:
-                try:
-                    table = self.bq_client_wrapper.bq_client.get_table(table_item.reference)
-                    # Prefer API repr so the schema is always JSON serializable
-                    try:
-                        schema_list = [getattr(f, "to_api_repr")() for f in (table.schema or [])]
-                    except Exception:
-                        # Fallback to string if to_api_repr is not available
-                        schema_list = [{
-                            "name": str(getattr(f, "name", "")),
-                            "type": str(getattr(f, "field_type", getattr(f, "type", ""))),
-                            "description": str(getattr(f, "description", ""))
-                        } for f in (table.schema or [])]
-                    self.table_schemas.append({
-                        "bq_table_path": f"leanworks.{self.bq_client_wrapper.client_name}.{table.table_id}",
-                        "schema": schema_list,
-                        "description": getattr(table, "description", "") or ""
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to load schema for table {table_item.table_id}: {str(e)}")
+            # Get formatted schemas from settings
+            self.tables_and_schemas = get_tables_and_schemas(dataset_id)
         except Exception as e:
             logger.warning(
-                f"Failed to list tables for dataset leanworks.{getattr(self.bq_client_wrapper, 'client_name', 'unknown')}: {str(e)}"
+                f"Failed to load schemas from settings for dataset {dataset_id}: {str(e)}"
             )
-        catalog_lines = []
-        for entry in self.table_schemas:
-            path = entry.get("bq_table_path", "")
-            if not path:
-                continue
-            cols = []
-            for f in entry.get("schema", []):
-                try:
-                    name = f.get("name", "")
-                    ftype = f.get("type", "")
-                    cols.append(f"{name} {ftype}".strip())
-                except Exception:
-                    cols.append(str(f))
-            catalog_lines.append(f"- {path}: {', '.join(cols)}")
-        self.table_catalog_brief = "\n".join(catalog_lines)
-        self.schemas_json = json.dumps(self.table_schemas, ensure_ascii=False)
-        # Build a merged tables-and-schemas view in one list, including column descriptions if present
-        merged_lines = []
-        for entry in self.table_schemas:
-            path = entry.get("bq_table_path", "")
-            if not path:
-                continue
-            
-            # Add table name as header
-            merged_lines.append(f"\n**Table: {path}**")
-            
-            # Add each column on its own line with proper indentation
-            for f in entry.get("schema", []):
-                try:
-                    name = f.get("name", "")
-                    ftype = f.get("type", "")
-                    desc = f.get("description") or ""
-                    if desc:
-                        merged_lines.append(f"  - {name} ({ftype}) - {desc}")
-                    else:
-                        merged_lines.append(f"  - {name} ({ftype})")
-                except Exception:
-                    merged_lines.append(f"  - {str(f)}")
+            self.tables_and_schemas = ""
         
-        self.tables_and_schemas = "\n".join(merged_lines)
+        # Keep empty structures for backward compatibility
+        self.table_schemas = []
+        self.table_catalog_brief = ""
+        self.schemas_json = "[]"
 
         # Build a set of column names that are Unix timestamps (by description), and detect units
         # Map: column_name -> "seconds" | "millis"
         self.unix_ts_columns = {}
-        for entry in self.table_schemas:
-            for f in entry.get("schema", []):
-                try:
-                    name = (f.get("name") or "").strip()
-                    desc = (f.get("description") or "").lower()
-                    if not name:
-                        continue
-                    if "unix" in desc and "timestamp" in desc:
-                        unit = "millis" if ("millis" in desc or "ms" in desc) else "seconds"
-                        # Preserve the most specific (millis overrides seconds if seen later)
-                        prev = self.unix_ts_columns.get(name)
-                        if prev != "millis":
-                            self.unix_ts_columns[name] = unit
-                except Exception:
-                    continue
+        # Parse the string format to extract Unix timestamp columns
+        if self.tables_and_schemas:
+            lines = self.tables_and_schemas.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.startswith('- ') and 'Unix timestamp' in line:
+                    # Extract column name and check for millis/seconds
+                    # Format: "  - column_name (TYPE) - description"
+                    parts = line.split(' (')
+                    if len(parts) >= 2:
+                        column_name = parts[0].replace('- ', '').strip()
+                        desc_part = parts[1] if len(parts) > 1 else ""
+                        desc = desc_part.lower()
+                        if "unix" in desc and "timestamp" in desc:
+                            unit = "millis" if ("millis" in desc or "ms" in desc) else "seconds"
+                            # Preserve the most specific (millis overrides seconds if seen later)
+                            prev = self.unix_ts_columns.get(column_name)
+                            if prev != "millis":
+                                self.unix_ts_columns[column_name] = unit
 
     def _fully_qualify_table(self, table_name: str) -> str:
         # Backtick-quote and prefix dataset if needed
@@ -379,6 +329,33 @@ class BigQueryTool:
             elif spec is None:
                 # If no spec provided at all, this is an error
                 raise ValueError("spec parameter is required")
+            
+            # Parse spec if it's a string (JSON)
+            if isinstance(spec, str):
+                try:
+                    # Clean up the JSON string - remove any extra whitespace and fix common issues
+                    spec_str = spec.strip()
+                    # Try to parse as-is first
+                    spec = json.loads(spec_str)
+                except json.JSONDecodeError as e:
+                    # Try to fix common JSON issues
+                    try:
+                        # Fix missing "value" key in where conditions
+                        # Pattern: {"column": "x", "op": "LIKE", "%value%"} -> {"column": "x", "op": "LIKE", "value": "%value%"}
+                        import re
+                        fixed_spec = re.sub(
+                            r'(\{[^}]*"op"\s*:\s*"[^"]*"[^}]*),\s*"([^"]*%[^"]*%)"(\s*\})',
+                            r'\1, "value": "\2"\3',
+                            spec_str
+                        )
+                        spec = json.loads(fixed_spec)
+                        logger.info(f"Fixed malformed JSON spec: {spec_str} -> {fixed_spec}")
+                    except (json.JSONDecodeError, Exception) as fix_error:
+                        # Log the problematic JSON for debugging
+                        logger.error(f"Failed to parse JSON spec: {spec_str}")
+                        logger.error(f"JSON parse error: {str(e)}")
+                        logger.error(f"JSON fix attempt failed: {str(fix_error)}")
+                        raise ValueError(f"spec must be valid JSON: {str(e)}")
                 
             sql = self._compile_query_spec(spec)
             client_name = getattr(self.bq_client_wrapper, 'client_name', 'unknown')

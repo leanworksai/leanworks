@@ -1,17 +1,31 @@
+# Retrieval configuration
 RETRIEVE_TOP_K = 20
 INCLUDE_MEMORY = True
 USE_RERANKER = True
-APPLY_FILTERS = False
-RERANK_TOP_K = 5
+USE_SPAN_SELECTION = True
+USE_CONTEXT_COMPRESSION = True
+USE_CONTEXT_AGGREGATION = True
 MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-# GENERATION_MODEL = "claude-3-5-haiku-latest"
-GENERATION_MODEL = "claude-sonnet-4-20250514"
-RERANK_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-3-5-haiku-latest"
+# GENERATION_MODEL = "claude-sonnet-4-20250514"
 OTHER_MODEL = "claude-3-haiku-20240307"
+
+# Reranker configuration
+RERANK_MODEL = "claude-3-haiku-20240307"
+RERANKER_TYPE = "bge"  # Options: "llm", "bge" (now uses optimized version)
+RERANK_TOP_K = 8
+BGE_MODEL_NAME = "BAAI/bge-reranker-base"
+BGE_DEVICE = "cpu"  # Options: "cpu", "cuda"
+BGE_MAX_WORKERS = 2  # Number of worker threads for BGE reranker
+BGE_CACHE_SIZE = 2000  # Cache size for BGE reranker
+BGE_MAX_LENGTH = 384  # Optimized sequence length (384 vs 512 for better performance)
+BGE_BATCH_SIZE = 28  # Optimized batch size for 300-340 token pairs
+BGE_INTRA_OP_THREADS = 6  # Optimal CPU threading for inference
+BGE_INTER_OP_THREADS = 1  # Single inter-op thread for CPU
 ALPHA=0.7
 
 # Embedding API rate limiting settings
@@ -97,12 +111,10 @@ AGENT_SYSTEM_PROMPT = """
     You have below tools at your disposal to answer project management related questions.
     Bigquery tools: query_bigquery
     Search tools: search_documents
-    Gitlab tools: list_gitlab_projects,list_gitlab_issues,list_gitlab_milestones,list_gitlab_project_members,get_gitlab_project_detail,get_issue_detail,find_gitlab_user_by_email
     Outlook tools: list_upcoming_meetings,find_available_slots
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Bigquery tools are used to retrieve information from the internal database. They should be your primary tools to answer questions.
-    - Gitlab tools are used to retrieve information from GitLab when users also uses gitlab for project management. If the user enabled gitlab, you should use these tools in addition to the internal database tools.
+    - Bigquery tools are used to project management information from the internal database. They should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
@@ -177,6 +189,74 @@ Generate an improved response now."""
 import logging
 import json
 logger = logging.getLogger(__name__)
+
+# Table schemas template in string format
+# Use {dataset_id} as placeholder for the actual dataset name
+TABLE_SCHEMAS = """
+**Table: leanworks.{dataset_id}.project_config**
+  Description: Configuration and metadata for projects, including project details, collaborators, and settings
+  - created_by (STRING)
+  - project_id (STRING)
+  - project_name (STRING)
+  - description (STRING) - The project description and scope.
+  - last_n_days (INTEGER)
+  - collaborators (STRING)
+  - created_ts (INTEGER)
+
+**Table: leanworks.{dataset_id}.tasks**
+  Description: Individual tasks within projects, tracking task details, status, priority, and deadlines
+  - project_id (STRING)
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - task_id (STRING)
+  - created_at (FLOAT) - Unix timestamp
+  - updated_at (FLOAT) - Unix timestamp
+  - task_name (STRING)
+  - status (STRING) - Status includes 'to_do', 'in_progress', 'completed and 'blocked'
+  - description (STRING) - Task details. It may also include additional information not covered by the other fields.
+  - priority (STRING) - Priority includes 'high', 'medium' and 'low'
+  - deadline (FLOAT) - Unix timestamp
+  - reason (STRING)
+
+**Table: leanworks.{dataset_id}.update_summaries**
+  Description: Daily summaries of project updates, providing high-level overview of project progress
+  - project_id (STRING)
+  - update_summary (STRING) - The update summary content.
+  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update summary.
+
+**Table: leanworks.{dataset_id}.updates**
+  Description: Individual project updates from team members, including progress reports and task associations
+  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update.
+  - project_id (STRING)
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - update_id (STRING)
+  - ts (FLOAT) - Unix timestamp
+  - update (STRING) - The update content.
+  - associated_tasks (STRING) - It is a list of task ids. For example, ['task_1', 'task_2', 'task_3']
+  - reason (STRING)
+
+**Table: leanworks.{dataset_id}.user_config**
+  Description: User profile information and configuration settings for team members
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - first_name (STRING)
+  - last_name (STRING)
+  - alias_email (STRING) - Secondary user id/ email address for the user.
+  - job_title (STRING)
+  - job_responsibilities (STRING)
+  - timezone (STRING) - The timezone of the user. For example, 'America/New_York'
+"""
+
+def get_tables_and_schemas(dataset_id: str) -> str:
+    """
+    Get formatted table schemas for a given dataset_id.
+    
+    Args:
+        dataset_id: The dataset identifier (e.g., 'leanworks')
+        
+    Returns:
+        Formatted string with table schemas
+    """
+    # Replace {dataset_id} placeholder with actual dataset_id
+    return TABLE_SCHEMAS.format(dataset_id=dataset_id)
 
 def get_client_info(bq_client, user_id: str) -> str:
     """
