@@ -8,9 +8,9 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
-# GENERATION_MODEL = "claude-3-5-haiku-latest"
-GENERATION_MODEL = "claude-sonnet-4-20250514"
-RERANK_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-3-5-haiku-latest"
+# GENERATION_MODEL = "claude-sonnet-4-20250514"
+RERANK_MODEL = "claude-3-haiku-20240307"
 # Reranker configuration
 RERANKER_TYPE = "bge"  # Options: "llm", "bge" (now uses optimized version)
 BGE_MODEL_NAME = "BAAI/bge-reranker-base"
@@ -187,6 +187,74 @@ Generate an improved response now."""
 import logging
 import json
 logger = logging.getLogger(__name__)
+
+# Table schemas template in string format
+# Use {dataset_id} as placeholder for the actual dataset name
+TABLE_SCHEMAS = """
+**Table: leanworks.{dataset_id}.project_config**
+  Description: Configuration and metadata for projects, including project details, collaborators, and settings
+  - created_by (STRING)
+  - project_id (STRING)
+  - project_name (STRING)
+  - description (STRING) - The project description and scope.
+  - last_n_days (INTEGER)
+  - collaborators (STRING)
+  - created_ts (INTEGER)
+
+**Table: leanworks.{dataset_id}.tasks**
+  Description: Individual tasks within projects, tracking task details, status, priority, and deadlines
+  - project_id (STRING)
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - task_id (STRING)
+  - created_at (FLOAT) - Unix timestamp
+  - updated_at (FLOAT) - Unix timestamp
+  - task_name (STRING)
+  - status (STRING) - Status includes 'to_do', 'in_progress', 'completed and 'blocked'
+  - description (STRING) - Task details. It may also include additional information not covered by the other fields.
+  - priority (STRING) - Priority includes 'high', 'medium' and 'low'
+  - deadline (FLOAT) - Unix timestamp
+  - reason (STRING)
+
+**Table: leanworks.{dataset_id}.update_summaries**
+  Description: Daily summaries of project updates, providing high-level overview of project progress
+  - project_id (STRING)
+  - update_summary (STRING) - The update summary content.
+  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update summary.
+
+**Table: leanworks.{dataset_id}.updates**
+  Description: Individual project updates from team members, including progress reports and task associations
+  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update.
+  - project_id (STRING)
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - update_id (STRING)
+  - ts (FLOAT) - Unix timestamp
+  - update (STRING) - The update content.
+  - associated_tasks (STRING) - It is a list of task ids. For example, ['task_1', 'task_2', 'task_3']
+  - reason (STRING)
+
+**Table: leanworks.{dataset_id}.user_config**
+  Description: User profile information and configuration settings for team members
+  - user_id (STRING) - user email under company domain. This is not user name.
+  - first_name (STRING)
+  - last_name (STRING)
+  - alias_email (STRING) - Secondary user id/ email address for the user.
+  - job_title (STRING)
+  - job_responsibilities (STRING)
+  - timezone (STRING) - The timezone of the user. For example, 'America/New_York'
+"""
+
+def get_tables_and_schemas(dataset_id: str) -> str:
+    """
+    Get formatted table schemas for a given dataset_id.
+    
+    Args:
+        dataset_id: The dataset identifier (e.g., 'leanworks')
+        
+    Returns:
+        Formatted string with table schemas
+    """
+    # Replace {dataset_id} placeholder with actual dataset_id
+    return TABLE_SCHEMAS.format(dataset_id=dataset_id)
 
 def get_client_info(bq_client, user_id: str) -> str:
     """
