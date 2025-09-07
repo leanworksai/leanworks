@@ -330,6 +330,33 @@ class BigQueryTool:
             elif spec is None:
                 # If no spec provided at all, this is an error
                 raise ValueError("spec parameter is required")
+            
+            # Parse spec if it's a string (JSON)
+            if isinstance(spec, str):
+                try:
+                    # Clean up the JSON string - remove any extra whitespace and fix common issues
+                    spec_str = spec.strip()
+                    # Try to parse as-is first
+                    spec = json.loads(spec_str)
+                except json.JSONDecodeError as e:
+                    # Try to fix common JSON issues
+                    try:
+                        # Fix missing "value" key in where conditions
+                        # Pattern: {"column": "x", "op": "LIKE", "%value%"} -> {"column": "x", "op": "LIKE", "value": "%value%"}
+                        import re
+                        fixed_spec = re.sub(
+                            r'(\{[^}]*"op"\s*:\s*"[^"]*"[^}]*),\s*"([^"]*%[^"]*%)"(\s*\})',
+                            r'\1, "value": "\2"\3',
+                            spec_str
+                        )
+                        spec = json.loads(fixed_spec)
+                        logger.info(f"Fixed malformed JSON spec: {spec_str} -> {fixed_spec}")
+                    except (json.JSONDecodeError, Exception) as fix_error:
+                        # Log the problematic JSON for debugging
+                        logger.error(f"Failed to parse JSON spec: {spec_str}")
+                        logger.error(f"JSON parse error: {str(e)}")
+                        logger.error(f"JSON fix attempt failed: {str(fix_error)}")
+                        raise ValueError(f"spec must be valid JSON: {str(e)}")
                 
             sql = self._compile_query_spec(spec)
             client_name = getattr(self.bq_client_wrapper, 'client_name', 'unknown')

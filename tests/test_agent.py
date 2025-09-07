@@ -214,7 +214,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-         Based on the project timeline, which tasks require my attention?
+         How is our engagement with Alan based on our slack discussions?
 '''
         
         print("💬 Processing user message:")

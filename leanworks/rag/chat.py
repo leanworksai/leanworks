@@ -111,6 +111,27 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 except ValueError:
                     continue
         
+        # Check for Unix timestamps (both integer and float formats)
+        unix_patterns = [
+            r'timestamp[:\s]+(\d{10,13}(?:\.\d+)?)',  # timestamp: 1756087205.146079
+            r'(\d{10,13}(?:\.\d+)?)',  # standalone Unix timestamp
+        ]
+        
+        for pattern in unix_patterns:
+            match = re.search(pattern, context_text)
+            if match:
+                timestamp_str = match.group(1)
+                try:
+                    # Convert Unix timestamp to datetime
+                    unix_timestamp = float(timestamp_str)
+                    # Handle both seconds and milliseconds
+                    if unix_timestamp > 1e10:  # Likely milliseconds
+                        unix_timestamp = unix_timestamp / 1000
+                    dt = datetime.fromtimestamp(unix_timestamp)
+                    return dt.isoformat()
+                except (ValueError, OSError):
+                    continue
+        
         return None
 
     def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA) -> SimpleNamespace:
@@ -187,9 +208,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     def postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = False, 
+            use_reranker: bool = True, 
             use_span_selection: bool = True,
-            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
+            use_context_compression: bool = True,
             use_context_aggregation: bool = True,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
@@ -199,7 +220,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         Args:
             nodes: The query results from Pinecone
             query: The user query
-            apply_filters: Whether to apply user filters extracted from the query (default True)
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
             read_document_ids: Set of document IDs already read to skip duplicates
             
@@ -388,7 +408,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             top_k: int = RETRIEVE_TOP_K,
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
-            apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
             use_context_compression: bool = USE_CONTEXT_COMPRESSION,
@@ -537,9 +556,9 @@ class AsyncChat(Chat):
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = False, 
+            use_reranker: bool = True, 
             use_span_selection: bool = True,
-            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
+            use_context_compression: bool = True,
             use_context_aggregation: bool = True,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
@@ -725,7 +744,6 @@ class AsyncChat(Chat):
             top_k: int = RETRIEVE_TOP_K,
             include_memory: bool = INCLUDE_MEMORY,
             use_reranker: bool = USE_RERANKER,
-            apply_filters: bool = APPLY_FILTERS,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
             use_context_compression: bool = USE_CONTEXT_COMPRESSION,
@@ -742,7 +760,6 @@ class AsyncChat(Chat):
             top_k: Number of context chunks to retrieve
             include_memory: Whether to include recent conversation history
             use_reranker: Whether to apply reranking
-            apply_filters: Whether to apply time filters extracted from the query
             query_rewrites: Whether to use query rewriting for better recall
             use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary

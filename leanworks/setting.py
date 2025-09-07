@@ -1,8 +1,10 @@
+# Retrieval configuration
 RETRIEVE_TOP_K = 20
 INCLUDE_MEMORY = True
 USE_RERANKER = True
-APPLY_FILTERS = False
-RERANK_TOP_K = 8
+USE_SPAN_SELECTION = True
+USE_CONTEXT_COMPRESSION = True
+USE_CONTEXT_AGGREGATION = True
 MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
@@ -10,9 +12,12 @@ SIMILARITY_CUTOFF = 0.3
 QUERY_REWRITES = True
 GENERATION_MODEL = "claude-3-5-haiku-latest"
 # GENERATION_MODEL = "claude-sonnet-4-20250514"
-RERANK_MODEL = "claude-3-haiku-20240307"
+OTHER_MODEL = "claude-3-haiku-20240307"
+
 # Reranker configuration
+RERANK_MODEL = "claude-3-haiku-20240307"
 RERANKER_TYPE = "bge"  # Options: "llm", "bge" (now uses optimized version)
+RERANK_TOP_K = 8
 BGE_MODEL_NAME = "BAAI/bge-reranker-base"
 BGE_DEVICE = "cpu"  # Options: "cpu", "cuda"
 BGE_MAX_WORKERS = 2  # Number of worker threads for BGE reranker
@@ -21,11 +26,8 @@ BGE_MAX_LENGTH = 384  # Optimized sequence length (384 vs 512 for better perform
 BGE_BATCH_SIZE = 28  # Optimized batch size for 300-340 token pairs
 BGE_INTRA_OP_THREADS = 6  # Optimal CPU threading for inference
 BGE_INTER_OP_THREADS = 1  # Single inter-op thread for CPU
-OTHER_MODEL = "claude-3-haiku-20240307"
 ALPHA=0.7
-USE_SPAN_SELECTION = True
-USE_CONTEXT_COMPRESSION = True
-USE_CONTEXT_AGGREGATION = True
+
 # Embedding API rate limiting settings
 EMBEDDING_REQUESTS_PER_MINUTE = 150   # At the API limit
 EMBEDDING_BATCH_SIZE = 39             # Maximum possible with 512-token texts
