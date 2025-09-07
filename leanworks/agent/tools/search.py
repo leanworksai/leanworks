@@ -196,7 +196,6 @@ class SearchTool:
             
             title = f"DOCUMENT - Date: {timestamp_str}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
             formatted_context += f"{title}\n{context_text}\n\n"
-        
         # Return both formatted context and data sources
         return {
             "formatted_context": formatted_context,

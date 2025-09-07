@@ -303,7 +303,6 @@ class BigQueryTool:
         Tables and schemas:
         {self.tables_and_schemas}
         """
-        print(f"tables_and_schemas: {self.tables_and_schemas}")
         return {
             "type": "custom",
             "name": "query_bigquery",
