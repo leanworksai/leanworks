@@ -162,8 +162,8 @@ async def initialize_clients_async(bq_client, user_id: str) -> Tuple[CloudStorag
 
 async def main_async():
     """Async version of main function with optimized client initialization"""
-    # user_id = "bharathkumar.l@sbnasoftware.com"
-    user_id = "yanfu@leanworks.ai"
+    user_id = "bharathkumar.l@sbnasoftware.com"
+    # user_id = "yanfu@leanworks.ai"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING (OPTIMIZED)")
@@ -214,7 +214,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-         How is our engagement with Alan based on our slack discussions?
+         How many tickets are there in CCX?
 '''
         
         print("💬 Processing user message:")

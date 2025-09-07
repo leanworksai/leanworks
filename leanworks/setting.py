@@ -42,7 +42,6 @@ based on the provided context
 Rules:
 1. When recent conversations are provided, use them to maintain consistency with previous responses. 
 2. User cited context serves as reference for the user query if it is provided.
-3. Your response MUST be less than 120 words.
 '''
 
 QUERY_REWRITE_MODEL_SYSTEM_PROMPT = '''
@@ -105,6 +104,7 @@ AGENT_SYSTEM_PROMPT = """
     If your response includes identifiers, try to include display names as well to make it easier for the user to understand.
     Refrain from apologizing all the time when results are unexpected. Instead, just try your best to proceed or explain the circumstances to the user without apologizing.
     If the user supplies a block delimited by <cited_context>, treat that block as authoritative background for their next question. Ground your answer in it and cite it when relevant. If no such block appears, answer normally.
+    Some important context might not be directly provided by the tools. You should use your knowledge and common sense to infer the answer.
     </communication>
 
     <tool_calling>
@@ -114,7 +114,7 @@ AGENT_SYSTEM_PROMPT = """
     Outlook tools: list_upcoming_meetings,find_available_slots
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Bigquery tools are used to project management information from the internal database. They should be your primary tools to answer questions.
+    - Bigquery tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, Bigquery tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
@@ -196,18 +196,18 @@ TABLE_SCHEMAS = """
 **Table: leanworks.{dataset_id}.project_config**
   Description: Configuration and metadata for projects, including project details, collaborators, and settings
   - created_by (STRING)
-  - project_id (STRING)
+  - project_id (STRING) - Id of the project. This is not the project name.
   - project_name (STRING)
   - description (STRING) - The project description and scope.
   - last_n_days (INTEGER)
   - collaborators (STRING)
-  - created_ts (INTEGER)
+  - created_ts (INTEGER) - Unix timestamp
 
 **Table: leanworks.{dataset_id}.tasks**
   Description: Individual tasks within projects, tracking task details, status, priority, and deadlines
-  - project_id (STRING)
+  - project_id (STRING) - Id of the project. This is not the project name.
   - user_id (STRING) - user email under company domain. This is not user name.
-  - task_id (STRING)
+  - task_id (STRING) - Id of the task. This is not the task name.
   - created_at (FLOAT) - Unix timestamp
   - updated_at (FLOAT) - Unix timestamp
   - task_name (STRING)
@@ -215,24 +215,24 @@ TABLE_SCHEMAS = """
   - description (STRING) - Task details. It may also include additional information not covered by the other fields.
   - priority (STRING) - Priority includes 'high', 'medium' and 'low'
   - deadline (FLOAT) - Unix timestamp
-  - reason (STRING)
+  - reason (STRING) - The reason for the task to be created. If it is synchronized from 3rd party provider, it will include label like 'Synced from GitLab project' or 'Synced from Jira project'
 
 **Table: leanworks.{dataset_id}.update_summaries**
   Description: Daily summaries of project updates, providing high-level overview of project progress
-  - project_id (STRING)
+  - project_id (STRING) - Id of the project. This is not the project name.
   - update_summary (STRING) - The update summary content.
   - date_id (DATE) - For example, '2025-08-01' - It is the date of the update summary.
 
 **Table: leanworks.{dataset_id}.updates**
   Description: Individual project updates from team members, including progress reports and task associations
   - date_id (DATE) - For example, '2025-08-01' - It is the date of the update.
-  - project_id (STRING)
+  - project_id (STRING) - Id of the project. This is not the project name.
   - user_id (STRING) - user email under company domain. This is not user name.
-  - update_id (STRING)
+  - update_id (STRING) - Id of the update. This is not the update content.
   - ts (FLOAT) - Unix timestamp
   - update (STRING) - The update content.
   - associated_tasks (STRING) - It is a list of task ids. For example, ['task_1', 'task_2', 'task_3']
-  - reason (STRING)
+  - reason (STRING) - The reason for the update to be created.
 
 **Table: leanworks.{dataset_id}.user_config**
   Description: User profile information and configuration settings for team members
