@@ -3,8 +3,6 @@ RETRIEVE_TOP_K = 20
 INCLUDE_MEMORY = True
 USE_RERANKER = True
 USE_SPAN_SELECTION = True
-USE_CONTEXT_COMPRESSION = True
-USE_CONTEXT_AGGREGATION = True
 MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
@@ -33,6 +31,12 @@ EMBEDDING_REQUESTS_PER_MINUTE = 150   # At the API limit
 EMBEDDING_BATCH_SIZE = 39             # Maximum possible with 512-token texts
 EMBEDDING_BATCH_DELAY = 0.5  
 EMBEDDING_MODEL = "text-embedding-004"  # Official supported model (768 dimensions, 2048 tokens)
+
+# Span Selection Hybrid Scoring Configuration
+USE_HYBRID_SPAN_SELECTION = True      # Enable hybrid BM25 + embedding scoring
+SPAN_SELECTION_RRF_K = 60             # RRF parameter (higher values give more weight to top ranks)
+SPAN_SELECTION_TOP_SENTENCES = 4      # Number of top sentences per document (3-5)
+SPAN_SELECTION_CONTEXT_WINDOW = 1     # Number of neighbor sentences to include (±1)
 
 
 GENERATION_MODEL_SYSTEM_PROMPT = '''

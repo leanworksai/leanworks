@@ -4,8 +4,6 @@ from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.rag.span_selection import SpanSelector
-from leanworks.rag.context_compression import ContextCompressor
-from leanworks.rag.context_aggregation import ContextAggregator
 from leanworks.rag.data_source_formatter import DataSourceFormatter
 from leanworks.setting import *
 from leanworks.rag.query import QueryRewriter
@@ -65,14 +63,30 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             model_client=model_client
         )
         
-        # Initialize span selector
-        self.span_selector = SpanSelector()
+        # Initialize span selector with hybrid scoring
+        from leanworks.setting import (
+            USE_HYBRID_SPAN_SELECTION, 
+            SPAN_SELECTION_RRF_K, 
+            SPAN_SELECTION_TOP_SENTENCES, 
+            SPAN_SELECTION_CONTEXT_WINDOW
+        )
+        # Reuse the existing reranker for span selection to avoid loading BGE model twice
+        self.span_selector = SpanSelector(
+            top_spans_per_doc=SPAN_SELECTION_TOP_SENTENCES,
+            context_window=SPAN_SELECTION_CONTEXT_WINDOW,
+            min_span_length=20,
+            max_span_length=400,
+            bge_reranker=self.reranker,  # Reuse existing reranker
+            use_sliding_windows=True,  # Use sliding windows for better semantic recall
+            window_size=96,  # 96 tokens per window
+            window_stride=48,  # 48 token stride
+            max_span_candidates=60,  # Cap total candidates to 60
+            max_final_spans=18,  # Return top 18 spans globally
+            use_bm25_prefilter=True,  # Use BM25 pre-filtering
+            bm25_k1=1.2,
+            bm25_b=0.75
+        )
         
-        # Initialize context compressor
-        self.context_compressor = ContextCompressor(model_client=model_client)
-        
-        # Initialize context aggregator with embedding client for better similarity
-        self.context_aggregator = ContextAggregator(embedding_client=vectordb_client.embedding_model_client)
         
         # Initialize data source formatter
         self.data_source_formatter = DataSourceFormatter()
@@ -208,10 +222,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     def postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = True, 
-            use_span_selection: bool = True,
-            use_context_compression: bool = True,
-            use_context_aggregation: bool = True,
+            use_reranker: bool = USE_RERANKER, 
+            use_span_selection: bool = USE_SPAN_SELECTION,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -296,89 +308,32 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             except Exception as e:
                 logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
 
-        # Apply context compression if enabled (after span selection)
-        compressed_spans = None
-        compression_stats = None
-        if use_context_compression and reranked_results:
-            try:
-                logger.info("Applying context compression to optimize selected spans...")
-                compressed_spans, compression_stats = self.context_compressor.compress_context(
-                    query, reranked_results
-                )
-                logger.info(f"Context compression stats: {compression_stats}")
-            except Exception as e:
-                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
-
-        # Extract text from metadata (use compressed spans if available)
+        # Extract text from metadata
         contexts = []
         links = set()
         seen_contexts = set()
         
-        # Use compressed spans if compression was successful, otherwise use original results
-        if compressed_spans:
-            # Process compressed spans
-            for span in compressed_spans:
-                # Skip duplicates
-                if span.text in seen_contexts:
-                    continue
-                seen_contexts.add(span.text)
-                
-                # Add to contexts list
-                contexts.append({
-                    "context": span.text,
-                    "data_source": span.source,
-                    "doc_id": span.doc_id
-                })
-                
-                # Try to find the original document for link extraction
-                for match in reranked_results:
-                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
-                        links.add(match.metadata.get("link", ""))
-                        break
-        else:
-            # Fallback to original processing
-            for match in reranked_results:
-                # Extract source information
-                data_source = match.metadata["data_source"]
-                links.add(match.metadata["link"])
-                
-                # Extract context text using various fallback methods
-                context_text = match.metadata.get("chunk_text", "")
-                
-                # Skip duplicates
-                if not context_text or context_text in seen_contexts:
-                    continue
+        for match in reranked_results:
+            # Extract source information
+            data_source = match.metadata["data_source"]
+            links.add(match.metadata["link"])
+            
+            # Extract context text using various fallback methods
+            context_text = match.metadata.get("chunk_text", "")
+            
+            # Skip duplicates
+            if not context_text or context_text in seen_contexts:
+                continue
                     
-                seen_contexts.add(context_text)
-                
-                # Add to contexts list
-                contexts.append({
-                    "context": context_text,
-                    "data_source": data_source,
-                    "doc_id": match.id
-                })
+            seen_contexts.add(context_text)
+            
+            # Add to contexts list
+            contexts.append({
+                "context": context_text,
+                "data_source": data_source,
+                "doc_id": match.id
+            })
         
-        # Apply context aggregation if enabled
-        if use_context_aggregation and contexts:
-            try:
-                logger.info("Applying context aggregation to group related information...")
-                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
-                
-                # Convert aggregated contexts back to the expected format
-                if aggregated_contexts:
-                    contexts = []
-                    for agg_context in aggregated_contexts:
-                        contexts.append({
-                            "context": agg_context.content,
-                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
-                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
-                            "aggregation_type": agg_context.aggregation_type,
-                            "item_count": agg_context.metadata.get('item_count', 1)
-                        })
-                    
-                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
-            except Exception as e:
-                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
         
         logger.debug(f"Final contexts: {contexts}")
         
@@ -410,7 +365,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             use_reranker: bool = USE_RERANKER,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
-            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -457,8 +411,6 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 full_query, 
                 use_reranker=use_reranker, 
                 use_span_selection=use_span_selection,
-                use_context_compression=use_context_compression,
-                use_context_aggregation=USE_CONTEXT_AGGREGATION,
                 rerank_top_k=rerank_top_k,
                 **kwargs
                 )
@@ -556,10 +508,8 @@ class AsyncChat(Chat):
     async def async_postprocess_nodes(
             self, nodes: List[dict], 
             query: str, 
-            use_reranker: bool = True, 
-            use_span_selection: bool = True,
-            use_context_compression: bool = True,
-            use_context_aggregation: bool = True,
+            use_reranker: bool = USE_RERANKER, 
+            use_span_selection: bool = USE_SPAN_SELECTION,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -647,89 +597,32 @@ class AsyncChat(Chat):
             except Exception as e:
                 logger.error(f"Error during span selection: {str(e)}, proceeding without span selection")
 
-        # Apply context compression if enabled (after span selection)
-        compressed_spans = None
-        compression_stats = None
-        if use_context_compression and reranked_results:
-            try:
-                logger.info("Applying context compression to optimize selected spans...")
-                compressed_spans, compression_stats = self.context_compressor.compress_context(
-                    query, reranked_results
-                )
-                logger.info(f"Context compression stats: {compression_stats}")
-            except Exception as e:
-                logger.error(f"Error during context compression: {str(e)}, proceeding without compression")
-
-        # Extract text from metadata (use compressed spans if available)
+        # Extract text from metadata
         contexts = []
         links = set()
         seen_contexts = set()
         
-        # Use compressed spans if compression was successful, otherwise use original results
-        if compressed_spans:
-            # Process compressed spans
-            for span in compressed_spans:
-                # Skip duplicates
-                if span.text in seen_contexts:
-                    continue
-                seen_contexts.add(span.text)
+        for match in reranked_results:
+            # Extract source information
+            data_source = match.metadata["data_source"]
+            links.add(match.metadata["link"])
+            
+            # Extract context text directly from metadata
+            context_text = match.metadata.get("chunk_text", "")
+            
+            # Skip duplicates
+            if not context_text or context_text in seen_contexts:
+                continue
                 
-                # Add to contexts list
-                contexts.append({
-                    "context": span.text,
-                    "data_source": span.source,
-                    "doc_id": span.doc_id
-                })
-                
-                # Try to find the original document for link extraction
-                for match in reranked_results:
-                    if getattr(match, 'id', '') == span.doc_id or match.metadata.get("data_source") == span.source:
-                        links.add(match.metadata.get("link", ""))
-                        break
-        else:
-            # Fallback to original processing
-            for match in reranked_results:
-                # Extract source information
-                data_source = match.metadata["data_source"]
-                links.add(match.metadata["link"])
-                
-                # Extract context text directly from metadata
-                context_text = match.metadata.get("chunk_text", "")
-                
-                # Skip duplicates
-                if not context_text or context_text in seen_contexts:
-                    continue
-                    
-                seen_contexts.add(context_text)
-                
-                # Add to contexts list
-                contexts.append({
-                    "context": context_text,
-                    "data_source": data_source,
-                    "doc_id": match.id
-                })
+            seen_contexts.add(context_text)
+            
+            # Add to contexts list
+            contexts.append({
+                "context": context_text,
+                "data_source": data_source,
+                "doc_id": match.id
+            })
         
-        # Apply context aggregation if enabled
-        if use_context_aggregation and contexts:
-            try:
-                logger.info("Applying context aggregation to group related information...")
-                aggregated_contexts = self.context_aggregator.aggregate_context(contexts, query)
-                
-                # Convert aggregated contexts back to the expected format
-                if aggregated_contexts:
-                    contexts = []
-                    for agg_context in aggregated_contexts:
-                        contexts.append({
-                            "context": agg_context.content,
-                            "data_source": agg_context.metadata.get('data_source', 'unknown'),
-                            "doc_id": agg_context.metadata.get('group_key', 'aggregated'),
-                            "aggregation_type": agg_context.aggregation_type,
-                            "item_count": agg_context.metadata.get('item_count', 1)
-                        })
-                    
-                    logger.info(f"Context aggregation completed: {len(aggregated_contexts)} aggregated contexts from original {len(contexts)} items")
-            except Exception as e:
-                logger.error(f"Error during context aggregation: {str(e)}, proceeding without aggregation")
         
         logger.debug(f"Final contexts: {contexts}")
         
@@ -746,7 +639,6 @@ class AsyncChat(Chat):
             use_reranker: bool = USE_RERANKER,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
-            use_context_compression: bool = USE_CONTEXT_COMPRESSION,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -837,8 +729,6 @@ class AsyncChat(Chat):
                 full_query, 
                 use_reranker=use_reranker,
                 use_span_selection=use_span_selection,
-                use_context_compression=use_context_compression,
-                use_context_aggregation=USE_CONTEXT_AGGREGATION,
                 rerank_top_k=rerank_top_k,
                 **kwargs
             )

@@ -1,5 +1,5 @@
 import asyncio
-import datetime
+from datetime import datetime, timezone
 from openai import OpenAI
 import logging
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
@@ -24,6 +24,14 @@ class SearchResult:
     
     def __repr__(self):
         return f"SearchResult(context_length={len(self.formatted_context)}, sources={len(self._search_data_sources)})"
+    
+    def __contains__(self, item):
+        """Support 'in' operator for string-like behavior."""
+        return item in self.formatted_context
+    
+    def __len__(self):
+        """Support len() for string-like behavior."""
+        return len(self.formatted_context)
 
 class SearchTool:
     """
@@ -83,11 +91,45 @@ class SearchTool:
         text = re.sub(unix_pattern, replace_timestamp, text)
         
         return text
+    
+    def _convert_date_to_timestamp(self, date_str: str) -> int:
+        """
+        Convert date string to Unix timestamp.
+        
+        Args:
+            date_str: Date string in format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ
+            
+        Returns:
+            Unix timestamp as integer
+        """
+        if not date_str:
+            return None
+            
+        try:
+            # Handle different date formats
+            if 'T' in date_str:
+                # ISO format with time
+                if date_str.endswith('Z'):
+                    date_str = date_str[:-1] + '+00:00'
+                dt = datetime.fromisoformat(date_str)
+            else:
+                # Date only format
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+            
+            # Convert to UTC timestamp
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            return int(dt.timestamp())
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse date '{date_str}': {e}")
+            return None
         
     @property
     def search_documents_property(self):
         description = """
         Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
+        You can filter results by data source and date range using the optional parameters.
         You should use this tool as when any of these conditions occur:
         - Other tools are not suitable to answer the question
         - Other tools return empty, error or insufficient results
@@ -95,6 +137,7 @@ class SearchTool:
         - You have ANY uncertainty about the quality of your answer
         - More detailed information is needed to answer the question
         - You need to perform search for details of a specific data source when the corresponding tool result is too large to display
+        - You need to search for documents within a specific time period when the query contains specific dates or time references
         When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_documents tool) with a different query 
         so that it can surface more information to help refine your answer.
         You might need to use this tool multiple times with different queries to fully answer the question.
@@ -115,13 +158,21 @@ class SearchTool:
                     "data_source": {
                         "type": "string",
                         "description": "Optional data source name to filter documents. Can only be one of the following: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional start date for filtering documents by timestamp."
+                    },
+                    "end_date": {
+                        "type": "string", 
+                        "description": "Optional end date for filtering documents by timestamp."
                     }
                 },
                 "required": ["query"]
             }
         }
 
-    async def async_search_documents(self, query: str, data_source: str = None):
+    async def async_search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -151,8 +202,29 @@ class SearchTool:
             filters = {}
             if data_source:
                 filters["data_source"] = {"$eq": data_source}
-            # Note: Timestamp filtering removed as timestamp fields are no longer used in context structure
-            # Timestamp information is now extracted from context text when needed for display
+            
+            # Add timestamp filters only if dates are explicitly provided
+            if start_date or end_date:
+                timestamp_filter = {}
+                if start_date:
+                    start_timestamp = self._convert_date_to_timestamp(start_date)
+                    if start_timestamp is not None:
+                        timestamp_filter["$gte"] = start_timestamp
+                        logger.info(f"Applied start timestamp filter: {start_timestamp}")
+                
+                if end_date:
+                    end_timestamp = self._convert_date_to_timestamp(end_date)
+                    if end_timestamp is not None:
+                        timestamp_filter["$lte"] = end_timestamp
+                        logger.info(f"Applied end timestamp filter: {end_timestamp}")
+                
+                # Only add timestamp filter if we have at least one valid timestamp
+                if timestamp_filter:
+                    filters["timestamp"] = timestamp_filter
+                    logger.info(f"Applied timestamp filtering with {len(timestamp_filter)} conditions")
+            else:
+                logger.info("No date parameters provided, skipping timestamp filtering")
+            
             logger.info(f"Search filters: {filters}")
             # Retrieve nodes (running in executor since retrieve_nodes is not async)
             loop = asyncio.get_event_loop()
@@ -186,6 +258,18 @@ class SearchTool:
             if extracted_timestamp:
                 timestamp_str = f" (from {extracted_timestamp})"
             
+            # Also check metadata for timestamp if context extraction fails
+            if not timestamp_str and ctx.get("metadata", {}).get("timestamp"):
+                try:
+                    # Convert Unix timestamp to readable format
+                    import time
+                    timestamp = ctx["metadata"]["timestamp"]
+                    if isinstance(timestamp, (int, float)):
+                        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                        timestamp_str = f" (from {dt.isoformat()})"
+                except (ValueError, TypeError):
+                    pass
+            
             # Add source information if available
             source_str = ""
             if ctx.get("data_source"):
@@ -194,15 +278,32 @@ class SearchTool:
             # Convert Unix timestamps in the context text to ISO format for better readability
             context_text = self._convert_unix_timestamps_in_text(ctx.get("context", ""))
             
+            # If context is empty, try to get information from metadata as fallback
+            if not context_text.strip():
+                metadata = ctx.get("metadata", {})
+                if metadata:
+                    # Try to construct context from available metadata
+                    context_parts = []
+                    for key, value in metadata.items():
+                        if value and key not in ['data_source', 'doc_id']:
+                            context_parts.append(f"{key}: {value}")
+                    
+                    if context_parts:
+                        context_text = "\n".join(context_parts)
+                    else:
+                        context_text = "Content not available in this context."
+            
             title = f"DOCUMENT - Date: {timestamp_str}, Source: {source_str}, Doc ID: {ctx['doc_id']}"
             formatted_context += f"{title}\n{context_text}\n\n"
+
+        logger.info(f"Formatted context: {formatted_context}")
         # Return both formatted context and data sources
         return {
             "formatted_context": formatted_context,
             "data_sources": data_sources
         }
         
-    def search_documents(self, query: str, data_source: str = None):
+    def search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None):
         """
         Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
@@ -210,6 +311,8 @@ class SearchTool:
         Args:
             query: The search query
             data_source: Optional data source name to filter
+            start_date: Optional start date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
+            end_date: Optional end date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
         """
         try:
             logger.info(f"Executing search_documents with query: {query}")
@@ -229,7 +332,9 @@ class SearchTool:
                     try:
                         return new_loop.run_until_complete(self.async_search_documents(
                             query=query,
-                            data_source=data_source
+                            data_source=data_source,
+                            start_date=start_date,
+                            end_date=end_date
                         ))
                     finally:
                         new_loop.close()
@@ -251,7 +356,9 @@ class SearchTool:
                 # Run the async method in the event loop
                 result = loop.run_until_complete(self.async_search_documents(
                     query=query,
-                    data_source=data_source
+                    data_source=data_source,
+                    start_date=start_date,
+                    end_date=end_date
                 ))
             
             # If async layer returned an error, surface it directly

@@ -7,13 +7,17 @@ import logging
 import traceback
 import time
 import asyncio
+import json
 from typing import Dict, Tuple, Optional
 from leanworks.setting import get_client_info
 logger = logging.getLogger(__name__)
 # Configure logging
 logging.basicConfig(
-    level=logging.ERROR,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
 )
 
 # Performance optimization: Add caching for frequently accessed data
@@ -162,8 +166,8 @@ async def initialize_clients_async(bq_client, user_id: str) -> Tuple[CloudStorag
 
 async def main_async():
     """Async version of main function with optimized client initialization"""
-    user_id = "bharathkumar.l@sbnasoftware.com"
-    # user_id = "yanfu@leanworks.ai"
+    # user_id = "bharathkumar.l@sbnasoftware.com"
+    user_id = "yanfu@leanworks.ai"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING (OPTIMIZED)")
@@ -214,7 +218,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-         How many tickets are there in CCX?
+         based on yanfu's github commits, summarize improvements he made for backend project throughout this week
 '''
         
         print("💬 Processing user message:")
@@ -226,7 +230,7 @@ async def main_async():
         # Time the response processing
         response_start = time.time()
         
-        response = agent.process_message(user_message, thinking=False, streaming=True)
+        response = agent.process_message(user_message, thinking=True, streaming=True)
         
         response_time = time.time() - response_start
         total_time = time.time() - setup_start
@@ -273,6 +277,33 @@ def get_cache_stats():
         "secret_client_cache_size": len(secret_client_cache.cache)
     }
     return stats
+
+def print_full_tool_result(tool_name: str, result: any):
+    """Print tool call results in a readable format without truncation"""
+    print(f"\n{'='*80}")
+    print(f"🔧 TOOL CALL RESULT: {tool_name}")
+    print(f"{'='*80}")
+    
+    if isinstance(result, dict):
+        for key, value in result.items():
+            print(f"\n📋 {key.upper()}:")
+            if isinstance(value, (list, dict)):
+                print(json.dumps(value, indent=2, ensure_ascii=False))
+            else:
+                print(str(value))
+    elif isinstance(result, list):
+        print(f"📋 RESULTS ({len(result)} items):")
+        for i, item in enumerate(result):
+            print(f"\n--- Item {i+1} ---")
+            if isinstance(item, dict):
+                print(json.dumps(item, indent=2, ensure_ascii=False))
+            else:
+                print(str(item))
+    else:
+        print(f"📋 RESULT:")
+        print(str(result))
+    
+    print(f"\n{'='*80}\n")
 
 def run_performance_comparison():
     """Run a comparison between cached and non-cached initialization"""
