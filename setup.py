@@ -23,7 +23,8 @@ setup(
         "msal==1.33.0",
         "python-dotenv==1.0.1",
         "pytz==2024.1",
-        "duckdb==1.1.3"
+        "duckdb==1.1.3",
+        "nltk>=3.8"
     ],
     author="Yanfu Zhu",
     author_email="yanfu@leanworks.ai",
