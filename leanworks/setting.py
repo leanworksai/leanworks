@@ -14,7 +14,7 @@ OTHER_MODEL = "claude-3-haiku-20240307"
 
 # Reranker configuration
 RERANK_MODEL = "claude-3-haiku-20240307"
-RERANKER_TYPE = "bge"  # Options: "llm", "bge" (now uses optimized version)
+RERANKER_TYPE = "llm"  # Options: "llm", "bge" (now uses optimized version)
 RERANK_TOP_K = 8
 BGE_MODEL_NAME = "BAAI/bge-reranker-base"
 BGE_DEVICE = "cpu"  # Options: "cpu", "cuda"
@@ -32,7 +32,8 @@ EMBEDDING_BATCH_SIZE = 39             # Maximum possible with 512-token texts
 EMBEDDING_BATCH_DELAY = 0.5  
 EMBEDDING_MODEL = "text-embedding-004"  # Official supported model (768 dimensions, 2048 tokens)
 
-# Span Selection Hybrid Scoring Configuration
+# Span Selection Configuration
+SPAN_SELECTION_TYPE = "llm"           # Options: "llm", "bge"
 USE_HYBRID_SPAN_SELECTION = True      # Enable hybrid BM25 + embedding scoring
 SPAN_SELECTION_RRF_K = 60             # RRF parameter (higher values give more weight to top ranks)
 SPAN_SELECTION_TOP_SENTENCES = 4      # Number of top sentences per document (3-5)

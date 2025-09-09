@@ -1,5 +1,5 @@
 """
-Span Selection Module for RAG Pipeline
+BGE-based Span Selection Module for RAG Pipeline
 
 This module performs span-level selection from reranked documents using BGE semantic scoring.
 It extracts the most relevant spans using sliding windows or sentences with BGE reranking.
@@ -17,7 +17,8 @@ from collections import defaultdict, Counter
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
-from sklearn.metrics.pairwise import cosine_similarity
+
+from .span_selection_base import BaseSpanSelector
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -33,9 +34,9 @@ try:
 except LookupError:
     nltk.download('stopwords')
 
-class SpanSelector:
+class BGESpanSelector(BaseSpanSelector):
     """
-    Span selection module that selects the most relevant spans from documents
+    BGE-based span selection module that selects the most relevant spans from documents
     using BGE semantic scoring with sliding windows or sentence-based candidates.
     """
     
@@ -56,7 +57,7 @@ class SpanSelector:
         bm25_b: float = 0.75
     ):
         """
-        Initialize the SpanSelector.
+        Initialize the BGESpanSelector.
         
         Args:
             top_spans_per_doc: Number of top spans to select per document (default 6)
@@ -73,6 +74,7 @@ class SpanSelector:
             bm25_k1: BM25 k1 parameter
             bm25_b: BM25 b parameter
         """
+        super().__init__()
         self.top_spans_per_doc = max(3, min(10, top_spans_per_doc))
         self.context_window = context_window
         self.min_span_length = min_span_length
@@ -94,7 +96,7 @@ class SpanSelector:
             logger.warning("English stopwords not available, using empty set")
             self.stopwords = set()
         
-        logger.info(f"SpanSelector initialized with top_spans_per_doc={self.top_spans_per_doc}, "
+        logger.info(f"BGESpanSelector initialized with top_spans_per_doc={self.top_spans_per_doc}, "
                    f"context_window={self.context_window}, use_sliding_windows={self.use_sliding_windows}, "
                    f"window_size={self.window_size}, max_span_candidates={self.max_span_candidates}, "
                    f"bge_reranker={'available' if self.bge_reranker else 'none'}")
@@ -368,279 +370,6 @@ class SpanSelector:
         
         return terms
     
-    def _select_top_sentences_bm25(self, query_terms: List[str], sentences: List[str], doc_metadata: dict = None) -> List[int]:
-        """
-        Select top sentences using BM25 scoring.
-        
-        Args:
-            query_terms: Preprocessed query terms
-            sentences: List of sentences
-            doc_metadata: Document metadata for context-aware selection
-            
-        Returns:
-            List of indices of top sentences
-        """
-        if not query_terms or not sentences:
-            return []
-        
-        # Special handling for GitHub commits - prioritize commit messages
-        if doc_metadata and doc_metadata.get("data_source") == "github_commits":
-            return self._select_github_commit_sentences(sentences)
-        
-        # Preprocess all sentences
-        sentence_terms = []
-        for sentence in sentences:
-            terms = self._preprocess_text(sentence)
-            sentence_terms.append(terms)
-        
-        # Calculate BM25 scores
-        scores = self._calculate_bm25_scores(query_terms, sentence_terms)
-        
-        # Get top sentences
-        scored_indices = [(i, score) for i, score in enumerate(scores)]
-        scored_indices.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top N indices
-        top_indices = [i for i, _ in scored_indices[:self.top_spans_per_doc]]
-        
-        logger.debug(f"Selected {len(top_indices)} sentences with BM25 scores: "
-                    f"{[scores[i] for i in top_indices]}")
-        
-        return top_indices
-    
-    
-    def _select_github_commit_sentences(self, sentences: List[str]) -> List[int]:
-        """
-        Special sentence selection for GitHub commits that prioritizes commit messages.
-        
-        Args:
-            sentences: List of sentences from flattened JSON
-            
-        Returns:
-            List of indices of selected sentences
-        """
-        # Priority order for GitHub commit sentences
-        priority_patterns = [
-            r'message is ',  # Commit messages (highest priority)
-            r'repo_name is ',  # Repository names
-            r'author_name is ',  # Author names
-            r'date is ',  # Dates
-            r'html_url is ',  # URLs
-            r'sha is ',  # Commit hashes
-        ]
-        
-        # Score sentences based on priority patterns
-        scored_sentences = []
-        for i, sentence in enumerate(sentences):
-            score = 0
-            for j, pattern in enumerate(priority_patterns):
-                if re.search(pattern, sentence, re.IGNORECASE):
-                    # Higher score for higher priority patterns
-                    score = len(priority_patterns) - j
-                    break
-            
-            scored_sentences.append((i, score, sentence))
-        
-        # Sort by score (descending) and then by sentence length (descending for longer commit messages)
-        scored_sentences.sort(key=lambda x: (x[1], len(x[2])), reverse=True)
-        
-        # Select top sentences, ensuring we get at least one commit message if available
-        selected_indices = []
-        commit_message_found = False
-        
-        for i, score, sentence in scored_sentences:
-            if len(selected_indices) >= self.top_spans_per_doc:
-                break
-            
-            # Always include commit messages
-            if 'message is ' in sentence:
-                selected_indices.append(i)
-                commit_message_found = True
-            # Include other high-priority sentences
-            elif score > 0:
-                selected_indices.append(i)
-        
-        # If no commit message found, take the first few sentences
-        if not commit_message_found and sentences:
-            selected_indices = list(range(min(len(sentences), self.top_spans_per_doc)))
-        
-        logger.debug(f"Selected {len(selected_indices)} GitHub commit sentences: "
-                    f"{[sentences[i][:50] + '...' for i in selected_indices]}")
-        
-        return selected_indices
-    
-    def _calculate_bm25_scores(self, query_terms: List[str], sentence_terms: List[List[str]]) -> List[float]:
-        """
-        Calculate BM25 scores for sentences given query terms.
-        
-        Args:
-            query_terms: Query terms
-            sentence_terms: List of term lists for each sentence
-            
-        Returns:
-            List of BM25 scores
-        """
-        if not sentence_terms:
-            return []
-        
-        # Calculate document frequency for each term
-        df = defaultdict(int)
-        for terms in sentence_terms:
-            unique_terms = set(terms)
-            for term in unique_terms:
-                df[term] += 1
-        
-        # Calculate average document length
-        total_length = sum(len(terms) for terms in sentence_terms)
-        avg_doc_length = total_length / len(sentence_terms) if sentence_terms else 0
-        
-        # Calculate BM25 score for each sentence
-        scores = []
-        N = len(sentence_terms)  # Total number of documents (sentences)
-        
-        for doc_terms in sentence_terms:
-            score = 0.0
-            doc_length = len(doc_terms)
-            term_freq = Counter(doc_terms)
-            
-            for query_term in query_terms:
-                if query_term in term_freq:
-                    # Term frequency in document
-                    tf = term_freq[query_term]
-                    
-                    # Document frequency
-                    doc_freq = df[query_term]
-                    
-                    # IDF calculation - ensure positive IDF
-                    idf = max(0.1, math.log((N - doc_freq + 0.5) / (doc_freq + 0.5)))
-                    
-                    # BM25 formula
-                    numerator = tf * (self.bm25_k1 + 1)
-                    denominator = tf + self.bm25_k1 * (1 - self.bm25_b + self.bm25_b * (doc_length / avg_doc_length))
-                    
-                    score += idf * (numerator / denominator)
-            
-            scores.append(max(0.0, score))  # Ensure non-negative scores
-        
-        return scores
-    
-    
-    def _expand_with_context(self, selected_indices: List[int], total_sentences: int) -> List[int]:
-        """
-        Expand selected sentence indices with context window.
-        
-        Args:
-            selected_indices: Indices of selected sentences
-            total_sentences: Total number of sentences
-            
-        Returns:
-            Expanded list of indices including context
-        """
-        expanded_indices = set()
-        
-        for idx in selected_indices:
-            # Add the selected sentence
-            expanded_indices.add(idx)
-            
-            # Add context window
-            for offset in range(-self.context_window, self.context_window + 1):
-                context_idx = idx + offset
-                if 0 <= context_idx < total_sentences:
-                    expanded_indices.add(context_idx)
-        
-        return list(expanded_indices)
-    
-    def _update_document_metadata(
-        self, 
-        doc: Any, 
-        selected_spans: List[str], 
-        selected_indices: List[int],
-        original_sentences: List[str]
-    ) -> Any:
-        """
-        Update document metadata with selected spans.
-        
-        Args:
-            doc: Original document
-            selected_spans: Selected span texts
-            selected_indices: Indices of selected spans
-            original_sentences: All original sentences
-            
-        Returns:
-            Updated document
-        """
-        # Create a copy of the document to avoid modifying the original
-        if hasattr(doc, 'metadata') and isinstance(doc.metadata, dict):
-            # Keep original text for reference BEFORE modifying chunk_text
-            if "original_chunk_text" not in doc.metadata:
-                doc.metadata["original_chunk_text"] = doc.metadata.get("chunk_text", "")
-            
-            # Update metadata with span information
-            doc.metadata["selected_spans"] = selected_spans
-            doc.metadata["selected_span_indices"] = selected_indices
-            doc.metadata["total_sentences"] = len(original_sentences)
-            doc.metadata["span_selection_applied"] = True
-            
-            # Replace chunk_text with selected spans joined
-            doc.metadata["chunk_text"] = " ".join(selected_spans)
-        
-        return doc
-
-    def get_selection_stats(self, documents: List[Any]) -> Dict[str, Any]:
-        """
-        Get statistics about span selection results.
-        
-        Args:
-            documents: Processed documents
-            
-        Returns:
-            Dictionary with selection statistics
-        """
-        stats = {
-            "total_documents": len(documents),
-            "documents_with_spans": 0,
-            "total_selected_spans": 0,
-            "avg_spans_per_doc": 0.0,
-            "total_original_sentences": 0,
-            "selection_ratio": 0.0,
-            "selection_method": "unknown",
-            "avg_span_score": 0.0,
-            "span_scores_available": False
-        }
-        
-        total_span_scores = 0.0
-        span_scores_count = 0
-        
-        for doc in documents:
-            if hasattr(doc, 'metadata') and doc.metadata.get("span_selection_applied"):
-                stats["documents_with_spans"] += 1
-                selected_spans = doc.metadata.get("selected_spans", [])
-                stats["total_selected_spans"] += len(selected_spans)
-                stats["total_original_sentences"] += doc.metadata.get("total_sentences", 0)
-                
-                # Track selection method
-                method = doc.metadata.get("span_selection_method", "unknown")
-                if method != "unknown":
-                    stats["selection_method"] = method
-                
-                # Track span scores if available
-                span_scores = doc.metadata.get("span_scores", [])
-                if span_scores:
-                    stats["span_scores_available"] = True
-                    total_span_scores += sum(span_scores)
-                    span_scores_count += len(span_scores)
-        
-        if stats["documents_with_spans"] > 0:
-            stats["avg_spans_per_doc"] = stats["total_selected_spans"] / stats["documents_with_spans"]
-        
-        if stats["total_original_sentences"] > 0:
-            stats["selection_ratio"] = stats["total_selected_spans"] / stats["total_original_sentences"]
-        
-        if span_scores_count > 0:
-            stats["avg_span_score"] = total_span_scores / span_scores_count
-        
-        return stats
-    
     def _generate_sliding_window_candidates(self, text: str) -> List[str]:
         """
         Generate sliding window span candidates from text.
@@ -784,6 +513,61 @@ class SpanSelector:
         
         logger.debug(f"BM25 pre-filtering: {len(span_candidates)} -> {len(filtered_candidates)} candidates")
         return filtered_candidates, filtered_mapping
+    
+    def _calculate_bm25_scores(self, query_terms: List[str], sentence_terms: List[List[str]]) -> List[float]:
+        """
+        Calculate BM25 scores for sentences given query terms.
+        
+        Args:
+            query_terms: Query terms
+            sentence_terms: List of term lists for each sentence
+            
+        Returns:
+            List of BM25 scores
+        """
+        if not sentence_terms:
+            return []
+        
+        # Calculate document frequency for each term
+        df = defaultdict(int)
+        for terms in sentence_terms:
+            unique_terms = set(terms)
+            for term in unique_terms:
+                df[term] += 1
+        
+        # Calculate average document length
+        total_length = sum(len(terms) for terms in sentence_terms)
+        avg_doc_length = total_length / len(sentence_terms) if sentence_terms else 0
+        
+        # Calculate BM25 score for each sentence
+        scores = []
+        N = len(sentence_terms)  # Total number of documents (sentences)
+        
+        for doc_terms in sentence_terms:
+            score = 0.0
+            doc_length = len(doc_terms)
+            term_freq = Counter(doc_terms)
+            
+            for query_term in query_terms:
+                if query_term in term_freq:
+                    # Term frequency in document
+                    tf = term_freq[query_term]
+                    
+                    # Document frequency
+                    doc_freq = df[query_term]
+                    
+                    # IDF calculation - ensure positive IDF
+                    idf = max(0.1, math.log((N - doc_freq + 0.5) / (doc_freq + 0.5)))
+                    
+                    # BM25 formula
+                    numerator = tf * (self.bm25_k1 + 1)
+                    denominator = tf + self.bm25_k1 * (1 - self.bm25_b + self.bm25_b * (doc_length / avg_doc_length))
+                    
+                    score += idf * (numerator / denominator)
+            
+            scores.append(max(0.0, score))  # Ensure non-negative scores
+        
+        return scores
     
     def _score_spans_with_bge(self, query: str, span_candidates: List[str]) -> List[float]:
         """
@@ -1052,7 +836,9 @@ class SpanSelector:
                 selected_spans = [sentences[i] for i in sorted(expanded_indices)]
                 
                 # Update document metadata
-                updated_doc = self._update_document_metadata(doc, selected_spans, expanded_indices, sentences)
+                updated_doc = self._update_document_metadata_bm25(
+                    doc, selected_spans, expanded_indices, sentences
+                )
                 processed_docs.append(updated_doc)
                 
                 logger.debug(f"Selected {len(selected_spans)} spans from document {getattr(doc, 'id', 'unknown')}")
@@ -1063,3 +849,165 @@ class SpanSelector:
         
         logger.info(f"Successfully processed {len(processed_docs)} documents with BM25 fallback")
         return processed_docs
+    
+    def _select_top_sentences_bm25(self, query_terms: List[str], sentences: List[str], doc_metadata: dict = None) -> List[int]:
+        """
+        Select top sentences using BM25 scoring.
+        
+        Args:
+            query_terms: Preprocessed query terms
+            sentences: List of sentences
+            doc_metadata: Document metadata for context-aware selection
+            
+        Returns:
+            List of indices of top sentences
+        """
+        if not query_terms or not sentences:
+            return []
+        
+        # Special handling for GitHub commits - prioritize commit messages
+        if doc_metadata and doc_metadata.get("data_source") == "github_commits":
+            return self._select_github_commit_sentences(sentences)
+        
+        # Preprocess all sentences
+        sentence_terms = []
+        for sentence in sentences:
+            terms = self._preprocess_text(sentence)
+            sentence_terms.append(terms)
+        
+        # Calculate BM25 scores
+        scores = self._calculate_bm25_scores(query_terms, sentence_terms)
+        
+        # Get top sentences
+        scored_indices = [(i, score) for i, score in enumerate(scores)]
+        scored_indices.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top N indices
+        top_indices = [i for i, _ in scored_indices[:self.top_spans_per_doc]]
+        
+        logger.debug(f"Selected {len(top_indices)} sentences with BM25 scores: "
+                    f"{[scores[i] for i in top_indices]}")
+        
+        return top_indices
+    
+    def _select_github_commit_sentences(self, sentences: List[str]) -> List[int]:
+        """
+        Special sentence selection for GitHub commits that prioritizes commit messages.
+        
+        Args:
+            sentences: List of sentences from flattened JSON
+            
+        Returns:
+            List of indices of selected sentences
+        """
+        # Priority order for GitHub commit sentences
+        priority_patterns = [
+            r'message is ',  # Commit messages (highest priority)
+            r'repo_name is ',  # Repository names
+            r'author_name is ',  # Author names
+            r'date is ',  # Dates
+            r'html_url is ',  # URLs
+            r'sha is ',  # Commit hashes
+        ]
+        
+        # Score sentences based on priority patterns
+        scored_sentences = []
+        for i, sentence in enumerate(sentences):
+            score = 0
+            for j, pattern in enumerate(priority_patterns):
+                if re.search(pattern, sentence, re.IGNORECASE):
+                    # Higher score for higher priority patterns
+                    score = len(priority_patterns) - j
+                    break
+            
+            scored_sentences.append((i, score, sentence))
+        
+        # Sort by score (descending) and then by sentence length (descending for longer commit messages)
+        scored_sentences.sort(key=lambda x: (x[1], len(x[2])), reverse=True)
+        
+        # Select top sentences, ensuring we get at least one commit message if available
+        selected_indices = []
+        commit_message_found = False
+        
+        for i, score, sentence in scored_sentences:
+            if len(selected_indices) >= self.top_spans_per_doc:
+                break
+            
+            # Always include commit messages
+            if 'message is ' in sentence:
+                selected_indices.append(i)
+                commit_message_found = True
+            # Include other high-priority sentences
+            elif score > 0:
+                selected_indices.append(i)
+        
+        # If no commit message found, take the first few sentences
+        if not commit_message_found and sentences:
+            selected_indices = list(range(min(len(sentences), self.top_spans_per_doc)))
+        
+        logger.debug(f"Selected {len(selected_indices)} GitHub commit sentences: "
+                    f"{[sentences[i][:50] + '...' for i in selected_indices]}")
+        
+        return selected_indices
+    
+    def _expand_with_context(self, selected_indices: List[int], total_sentences: int) -> List[int]:
+        """
+        Expand selected sentence indices with context window.
+        
+        Args:
+            selected_indices: Indices of selected sentences
+            total_sentences: Total number of sentences
+            
+        Returns:
+            Expanded list of indices including context
+        """
+        expanded_indices = set()
+        
+        for idx in selected_indices:
+            # Add the selected sentence
+            expanded_indices.add(idx)
+            
+            # Add context window
+            for offset in range(-self.context_window, self.context_window + 1):
+                context_idx = idx + offset
+                if 0 <= context_idx < total_sentences:
+                    expanded_indices.add(context_idx)
+        
+        return list(expanded_indices)
+    
+    def _update_document_metadata_bm25(
+        self, 
+        doc: Any, 
+        selected_spans: List[str], 
+        selected_indices: List[int],
+        original_sentences: List[str]
+    ) -> Any:
+        """
+        Update document metadata with BM25-selected spans.
+        
+        Args:
+            doc: Original document
+            selected_spans: Selected span texts
+            selected_indices: Indices of selected spans
+            original_sentences: All original sentences
+            
+        Returns:
+            Updated document
+        """
+        # Create a copy of the document to avoid modifying the original
+        if hasattr(doc, 'metadata') and isinstance(doc.metadata, dict):
+            # Keep original text for reference BEFORE modifying chunk_text
+            if "original_chunk_text" not in doc.metadata:
+                doc.metadata["original_chunk_text"] = doc.metadata.get("chunk_text", "")
+            
+            # Update metadata with BM25 span information
+            doc.metadata["selected_spans"] = selected_spans
+            doc.metadata["selected_span_indices"] = selected_indices
+            doc.metadata["total_sentences"] = len(original_sentences)
+            doc.metadata["span_selection_method"] = "bm25"
+            doc.metadata["span_selection_applied"] = True
+            
+            # Replace chunk_text with selected spans joined
+            doc.metadata["chunk_text"] = " ".join(selected_spans)
+        
+        return doc

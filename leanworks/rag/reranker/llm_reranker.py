@@ -136,8 +136,10 @@ class CrossEncoderReranker(BaseReranker):
             logger.error(f"Error during async reranking: {str(e)}")
             # Return original documents in case of error, sorted by timestamp if available
             try:
-                # Note: Timestamp-based sorting removed as timestamp fields are no longer used
-                return documents[:top_k]
+                # Sort by timestamp (most recent first) as fallback
+                return sorted(documents, 
+                              key=lambda x: x.metadata.get("timestamp", 0) if hasattr(x, "metadata") else 0, 
+                              reverse=True)[:top_k]
             except Exception:
                 # If sorting fails, return unsorted
                 return documents[:top_k]
@@ -242,14 +244,20 @@ class CrossEncoderReranker(BaseReranker):
             doc = re.sub(r'\s+', ' ', doc).strip()
             return doc
         
+        # Helper to create span-exact cache key
+        def _doc_cache_key(query: str, doc: str) -> str:
+            import hashlib
+            h = hashlib.md5(doc.encode()).hexdigest()
+            return f"{query}::{h}"
+        
         # Check individual document caches
         cached_scores = []
         uncached_docs = []
         uncached_indices = []
         
         for i, doc in enumerate(documents):
-            # Use first 100 chars as part of cache key
-            doc_key = f"{query}::{sanitize_document(doc[:100])[:100]}"
+            # Use span-exact cache key
+            doc_key = _doc_cache_key(query, doc)
             score = None
             
             with self._cache_lock:
@@ -306,7 +314,7 @@ class CrossEncoderReranker(BaseReranker):
                     # Update cache with new scores
                     with self._cache_lock:
                         for i, doc in enumerate(uncached_docs):
-                            doc_key = f"{query}::{sanitize_document(doc[:100])[:100]}"
+                            doc_key = _doc_cache_key(query, doc)
                             self._score_cache[doc_key] = scores[i]
                     
                     # Combine cached and new scores

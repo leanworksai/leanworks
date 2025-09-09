@@ -70,13 +70,14 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             SPAN_SELECTION_TOP_SENTENCES, 
             SPAN_SELECTION_CONTEXT_WINDOW
         )
-        # Reuse the existing reranker for span selection to avoid loading BGE model twice
+        # Reuse the existing reranker for span selection to avoid loading models twice
         self.span_selector = SpanSelector(
             top_spans_per_doc=SPAN_SELECTION_TOP_SENTENCES,
             context_window=SPAN_SELECTION_CONTEXT_WINDOW,
             min_span_length=20,
             max_span_length=400,
-            bge_reranker=self.reranker,  # Reuse existing reranker
+            reranker=self.reranker,  # Reuse existing reranker (LLM or BGE)
+            span_selection_type=SPAN_SELECTION_TYPE,
             use_sliding_windows=True,  # Use sliding windows for better semantic recall
             window_size=96,  # 96 tokens per window
             window_stride=48,  # 48 token stride
@@ -338,7 +339,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         logger.debug(f"Final contexts: {contexts}")
         
         # Use the scalable data source formatter
-        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=False, raw_links_only=False)
         
         return contexts, formatted_data_sources
     
@@ -627,7 +628,7 @@ class AsyncChat(Chat):
         logger.debug(f"Final contexts: {contexts}")
         
         # Use the scalable data source formatter
-        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=True, raw_links_only=False)
+        formatted_data_sources = self.data_source_formatter.format_data_sources(links, contexts, simple_mode=True, show_all_links=False, raw_links_only=False)
         
         return contexts, formatted_data_sources
         
