@@ -2,7 +2,6 @@ from typing import Optional
 import logging
 from leanworks.rag.reranker.base_reranker import BaseReranker
 from leanworks.rag.reranker.llm_reranker import CrossEncoderReranker
-from leanworks.rag.reranker.bge_reranker import BGEReranker
 from leanworks.setting import (
     RERANKER_TYPE, BGE_MODEL_NAME, BGE_DEVICE, BGE_MAX_WORKERS, BGE_CACHE_SIZE,
     BGE_MAX_LENGTH, BGE_BATCH_SIZE, BGE_INTRA_OP_THREADS, BGE_INTER_OP_THREADS
@@ -61,6 +60,8 @@ class RerankerFactory:
             inter_op_threads = kwargs.get("inter_op_threads", BGE_INTER_OP_THREADS)
             
             logger.info(f"Creating BGEOptimizedReranker (default BGE) with model: {model_name}")
+            from leanworks.rag.reranker.bge_reranker import BGEReranker
+
             return BGEReranker(
                 model_name=model_name,
                 cache_size=cache_size,

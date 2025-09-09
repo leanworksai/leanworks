@@ -7,8 +7,6 @@ This module provides a factory for creating different types of span selectors ba
 from typing import Optional, List, Dict, Any
 import logging
 from .span_selection_base import BaseSpanSelector
-from .span_selection_llm import LLMSpanSelector
-from .span_selection_bge import BGESpanSelector
 from leanworks.setting import (
     SPAN_SELECTION_TYPE, BGE_MODEL_NAME, BGE_DEVICE, BGE_MAX_WORKERS, BGE_CACHE_SIZE,
     BGE_MAX_LENGTH, BGE_BATCH_SIZE, BGE_INTRA_OP_THREADS, BGE_INTER_OP_THREADS
@@ -61,6 +59,7 @@ class SpanSelectionFactory:
             bm25_b = kwargs.get("bm25_b", 0.75)
             
             logger.info("Creating LLMSpanSelector")
+            from .span_selection_llm import LLMSpanSelector
             return LLMSpanSelector(
                 top_spans_per_doc=top_spans_per_doc,
                 context_window=context_window,
@@ -95,6 +94,7 @@ class SpanSelectionFactory:
             bm25_b = kwargs.get("bm25_b", 0.75)
             
             logger.info("Creating BGESpanSelector")
+            from .span_selection_bge import BGESpanSelector
             return BGESpanSelector(
                 top_spans_per_doc=top_spans_per_doc,
                 context_window=context_window,
