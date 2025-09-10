@@ -218,7 +218,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-        How many tickets are there in the active milestone of the CCXAI group? List them based on project weightage and assignee.
+        show me the most recent code commit for ccx project
 '''
         
         print("💬 Processing user message:")

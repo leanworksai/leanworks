@@ -225,6 +225,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             query: str, 
             use_reranker: bool = USE_RERANKER, 
             use_span_selection: bool = USE_SPAN_SELECTION,
+            min_score_threshold: float = MIN_SCORE_THRESHOLD,
+            recency_weight: float = RECENCY_WEIGHT,
+            recency_coefficient: float = RECENCY_COEFFICIENT,
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
@@ -234,6 +237,10 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             nodes: The query results from Pinecone
             query: The user query
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
+            use_span_selection: Whether to apply span selection
+            min_score_threshold: Minimum score threshold for filtering results
+            recency_weight: Weight for recency scoring
+            recency_coefficient: Coefficient for recency calculation
             read_document_ids: Set of document IDs already read to skip duplicates
             
         Returns:
@@ -281,7 +288,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 try:
                     # Use the reranker to improve precision
                     logger.info(f"Using {RERANKER_TYPE} reranker")
-                    reranked_results = self.reranker.rerank(query, filtered_results, top_k=rerank_top_k)
+                    reranked_results = self.reranker.rerank(query, filtered_results, top_k=rerank_top_k, min_score_threshold=min_score_threshold, recency_weight=recency_weight, recency_coefficient=recency_coefficient)
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
                     logger.error(f"Error during reranking: {str(e)}, falling back to vector rankings")
@@ -412,6 +419,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 full_query, 
                 use_reranker=use_reranker, 
                 use_span_selection=use_span_selection,
+                min_score_threshold=MIN_SCORE_THRESHOLD,
+                recency_weight=RECENCY_WEIGHT,
+                recency_coefficient=RECENCY_COEFFICIENT,
                 rerank_top_k=rerank_top_k,
                 **kwargs
                 )
@@ -511,6 +521,9 @@ class AsyncChat(Chat):
             query: str, 
             use_reranker: bool = USE_RERANKER, 
             use_span_selection: bool = USE_SPAN_SELECTION,
+            min_score_threshold: float = MIN_SCORE_THRESHOLD,
+            recency_weight: float = RECENCY_WEIGHT,
+            recency_coefficient: float = RECENCY_COEFFICIENT,
             **kwargs
         ) -> Tuple[List[dict], List[str]]:
         """
@@ -520,6 +533,10 @@ class AsyncChat(Chat):
             nodes: The query results from Pinecone
             query: The user query
             use_reranker: Whether to apply reranking
+            use_span_selection: Whether to apply span selection
+            min_score_threshold: Minimum score threshold for filtering results
+            recency_weight: Weight for recency scoring
+            recency_coefficient: Coefficient for recency calculation
             read_document_ids: Set of document IDs already read to skip duplicates
             
         Returns:
@@ -569,7 +586,10 @@ class AsyncChat(Chat):
                     reranked_results = await self.reranker.rerank_async(
                         query, 
                         filtered_results,
-                        top_k=rerank_top_k
+                        top_k=rerank_top_k,
+                        min_score_threshold=MIN_SCORE_THRESHOLD,
+                        recency_weight=RECENCY_WEIGHT,
+                        recency_coefficient=RECENCY_COEFFICIENT
                     )
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
@@ -730,7 +750,10 @@ class AsyncChat(Chat):
                 full_query, 
                 use_reranker=use_reranker,
                 use_span_selection=use_span_selection,
-                rerank_top_k=rerank_top_k,
+                min_score_threshold=MIN_SCORE_THRESHOLD,
+                recency_weight=RECENCY_WEIGHT,
+                recency_coefficient=RECENCY_COEFFICIENT,
+                rerank_top_k=rerank_top_k
                 **kwargs
             )
             logger.info(f"Retrieved and processed {len(context)} contexts")
