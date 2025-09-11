@@ -238,6 +238,7 @@ class SearchTool:
             context, data_sources = await self.chat.async_postprocess_nodes(
                 nodes, 
                 query,
+                use_span_selection=True,
                 rerank_top_k=RERANK_TOP_K,
                 read_document_ids=self.read_document_ids
             )

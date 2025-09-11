@@ -688,8 +688,7 @@ class ChatAgent:
                 "role": "user",
                 "content": [{"type": "text", "text": EVALUATION_PROMPT.format(
                     USER_QUERY=self.original_user_query, 
-                    LAST_RESPONSE=response_text,
-                    SOURCE_CONTEXT=source_content
+                    LAST_RESPONSE=response_text
                 )}]
             })
             logger.info(f"Evaluation messages: {eval_messages}")

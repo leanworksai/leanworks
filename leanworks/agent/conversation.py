@@ -235,7 +235,7 @@ class ConversationManager:
                     try:
                         # Debug logging for BigQuery tool calls
                         if tool_name == "query_bigquery":
-                            logger.info(f"Calling {tool_name} with tool_input: {tool_input}")
+                            logger.info(f"Calling {tool_name}")
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         

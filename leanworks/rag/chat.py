@@ -753,7 +753,7 @@ class AsyncChat(Chat):
                 min_score_threshold=MIN_SCORE_THRESHOLD,
                 recency_weight=RECENCY_WEIGHT,
                 recency_coefficient=RECENCY_COEFFICIENT,
-                rerank_top_k=rerank_top_k
+                rerank_top_k=rerank_top_k,
                 **kwargs
             )
             logger.info(f"Retrieved and processed {len(context)} contexts")

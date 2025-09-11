@@ -7,8 +7,8 @@ MIN_SCORE_THRESHOLD = 0.3
 RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 QUERY_REWRITES = True
-GENERATION_MODEL = "claude-3-5-haiku-latest"
-# GENERATION_MODEL = "claude-sonnet-4-20250514"
+# GENERATION_MODEL = "claude-3-5-haiku-latest"
+GENERATION_MODEL = "claude-sonnet-4-20250514"
 OTHER_MODEL = "claude-3-haiku-20240307"
 
 # Reranker configuration
@@ -140,6 +140,45 @@ Do not reflect on the quality of the returned search results in your response
 Output ONLY the final answer text—no explanations, no reasoning, no headings.
 """
 
+# EVALUATION_PROMPT = """
+# You are an impartial expert evaluator.
+
+# Task: grade one assistant answer to a user's question.
+
+# <user_query>
+# {USER_QUERY}
+# </user_query>
+
+# <last_response>
+# {LAST_RESPONSE}
+# </last_response>
+
+# <source>
+# {SOURCE_CONTEXT}
+# </source>
+
+# Judge on the three criteria below, weighting them equally:
+# 1. Correctness & Factuality – Every non-trivial claim should be attributable to the provided tool results in source. You should treat information from source as authoritative, even though sometimes it might be incomplete. In some cases, source information won't give you the direct answer. But if you can infer the answer from the source information, it is also acceptable.
+# 2. Relevance  – addresses every part of the user's request  
+# 3. Depth & Insight – completeness, useful details, edge-cases. For time-sensitive queries, the freshness of the document in the source is important. For example, it is possible that the last response came from an old document in the source that is not enough to fully answer the question.
+
+# Process:
+# • Deduct points for any major flaw in a criterion.  
+# • Assign an OVERALL integer score from 0-10:  
+#   0-2 = very poor, 3-4 = poor, 5-6 = fair, 7-8 = good, 9 = excellent, 10 = perfect.  
+
+# <schema>
+# You MUST ALWAYS RESPOND WITH VALID JSON. Your entire response MUST be a single JSON object with this exact structure:
+# ###
+# {{
+#     "explanation": "one concise paragraph ≤80 words explaining the evaluation.",
+#     "score": <0-10 integer score>
+# }}
+# ###
+# </schema>
+# """
+
+
 EVALUATION_PROMPT = """
 You are an impartial expert evaluator.
 
@@ -153,14 +192,9 @@ Task: grade one assistant answer to a user's question.
 {LAST_RESPONSE}
 </last_response>
 
-<source>
-{SOURCE_CONTEXT}
-</source>
-
 Judge on the three criteria below, weighting them equally:
-1. Correctness & Factuality – Every non-trivial claim should be attributable to the provided tool results in source. You should treat information from source as authoritative, even though sometimes it might be incomplete. In some cases, source information won't give you the direct answer. But if you can infer the answer from the source information, it is also acceptable.
-2. Relevance  – addresses every part of the user's request  
-3. Depth & Insight – completeness, useful details, edge-cases. For time-sensitive queries, the freshness of the document in the source is important. For example, it is possible that the last response came from an old document in the source that is not enough to fully answer the question.
+1. Relevance  – addresses every part of the user's request  
+2. Depth & Insight – completeness, useful details, edge-cases. For time-sensitive queries, the freshness of the document in the source is important. For example, it is possible that the last response came from an old document in the source that is not enough to fully answer the question.
 
 Process:
 • Deduct points for any major flaw in a criterion.  
