@@ -194,7 +194,7 @@ Task: grade one assistant answer to a user's question.
 
 Judge on the three criteria below, weighting them equally:
 1. Relevance  – addresses every part of the user's request  
-2. Depth & Insight – completeness, useful details, edge-cases. Don't assume the user is familiar with the context.
+2. Depth & Insight – completeness, useful details, edge-cases. There should be enough context for the user to understand the answer.
 
 Process:
 • Deduct points for any major flaw in a criterion.  
