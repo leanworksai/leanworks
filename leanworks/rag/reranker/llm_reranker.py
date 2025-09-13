@@ -6,8 +6,17 @@ import math
 import time
 import asyncio
 import threading
+import os
+import hashlib
 from leanworks.setting import *
 from leanworks.rag.reranker.base_reranker import BaseReranker
+from leanworks.rag.reranker.rate_limiter import (
+    DualRateLimiter, 
+    _approx_token_count, 
+    _estimate_prompt_tokens, 
+    _adaptive_batch_size, 
+    _jitter_backoff
+)
 import random
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -32,18 +41,39 @@ class CrossEncoderReranker(BaseReranker):
         self._score_cache = {}
         self._cache_lock = threading.Lock()
         self._cache_size = cache_size
-        self._max_batch_size = 5
         self._max_retries = 3
         self._base_delay = 1.0  # Base delay for exponential backoff
         self._max_concurrent_requests = max_concurrent_requests
-        logger.info("CrossEncoderReranker initialized")
+        
+        # Rate limiting configuration
+        self._rpm = int(os.getenv("RERANK_RPM", "60"))       # tune per environment/quota
+        self._tpm = int(os.getenv("RERANK_TPM", "120000"))   # tune per environment/quota
+        self._limiter = DualRateLimiter(rpm=self._rpm, tpm=self._tpm, burst_requests=self._rpm, burst_tokens=self._tpm)
+        self._hard_cap_batch = int(os.getenv("RERANK_BATCH_CAP", "8"))   # upper bound
+        self._target_latency = float(os.getenv("RERANK_TARGET_LATENCY_S", "1.2"))
+        self._inflight = asyncio.Semaphore(self._max_concurrent_requests)  # one global semaphore only
+        self._doc_token_cap = int(os.getenv("RERANK_DOC_TOKEN_CAP", "220"))  # per-doc cap
+        self._prompt_overhead = 80  # system+formatting budget, keep it tiny
+        
+        # Cache TTL (in seconds)
+        self._cache_ttl = int(os.getenv("RERANK_CACHE_TTL", "3600"))  # 1 hour default
+        self._cache_timestamps = {}  # Track when cache entries were created
+        
+        logger.info(f"CrossEncoderReranker initialized with RPM={self._rpm}, TPM={self._tpm}, batch_cap={self._hard_cap_batch}")
     
-    @property
-    def rate_limit_semaphore(self):
-        """Get or create rate limit semaphore for current event loop."""
-        if not hasattr(self, '_current_semaphore'):
-            self._current_semaphore = asyncio.Semaphore(self._max_concurrent_requests)
-        return self._current_semaphore
+    def _truncate_by_tokens(self, text: str, max_tokens: int) -> str:
+        """Truncate text to fit within token budget."""
+        # quick char-based fall-back; replace with tiktoken-aware truncation if possible
+        approx_chars = max_tokens * 4
+        if len(text) <= approx_chars:
+            return " ".join(text.split())
+        return " ".join(text[:approx_chars].split()) + " …"
+    
+    def _is_cache_expired(self, cache_key: str) -> bool:
+        """Check if cache entry has expired."""
+        if cache_key not in self._cache_timestamps:
+            return True
+        return time.time() - self._cache_timestamps[cache_key] > self._cache_ttl
     
     
     def rerank(self, query: str, documents: List[Any], **kwargs) -> List[Any]:
@@ -147,7 +177,7 @@ class CrossEncoderReranker(BaseReranker):
     async def _score_documents_async(self, query: str, documents: List[str]) -> List[float]:
         """
         Score documents based on their relevance to the query using the model.
-        Uses async processing and rate limiting for better performance.
+        Uses token-aware adaptive batching and rate limiting for optimal performance.
         
         Args:
             query: The user query
@@ -159,71 +189,62 @@ class CrossEncoderReranker(BaseReranker):
         # Check cache for entire query-documents combination
         cache_key = self._create_cache_key(query, documents)
         with self._cache_lock:
-            if cache_key in self._score_cache:
+            if cache_key in self._score_cache and not self._is_cache_expired(cache_key):
                 return self._score_cache[cache_key]
         
-        scores = [0.0] * len(documents)
+        # Token-cap the documents to keep batches predictable
+        capped_docs = [self._truncate_by_tokens(doc, self._doc_token_cap) for doc in documents]
         
-        # For very small document sets, just process directly
-        if len(documents) <= self._max_batch_size:
-            batch_scores = await self._batch_score_documents_async(query, documents)
-            scores = batch_scores
-        else:
-            # Process documents in parallel batches with rate limiting
-            semaphore = asyncio.Semaphore(3)  # Limit concurrent batches
-            
-            async def process_batch(start_idx: int, batch_docs: List[str]) -> tuple:
-                async with semaphore:
-                    batch_scores = await self._batch_score_documents_async(query, batch_docs)
-                    return start_idx, batch_scores
-            
-            # Create tasks for each batch
-            tasks = []
-            for i in range(0, len(documents), self._max_batch_size):
-                batch_docs = documents[i:i+self._max_batch_size]
-                task = process_batch(i, batch_docs)
-                tasks.append(task)
-            
-            # Wait for all batches to complete
-            try:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Process results
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Error in batch scoring: {str(result)}")
-                        continue
-                    
-                    start_idx, batch_scores = result
-                    # Put scores in the right positions
-                    for j, score in enumerate(batch_scores):
-                        if start_idx + j < len(scores):
-                            scores[start_idx + j] = score
-                            
-            except Exception as e:
-                logger.error(f"Error in parallel batch processing: {str(e)}")
-                # Fill with default scores
-                scores = [0.5] * len(documents)
+        # Process documents with adaptive batching
+        remaining = capped_docs[:]  # list of strings (already query-focused)
+        scores = [0.0] * len(remaining)
         
-        # Update cache
+        idx_map = list(range(len(remaining)))  # track original positions
+        while remaining:
+            avg_doc_tokens = int(sum(_approx_token_count(d) for d in remaining) / len(remaining))
+            bsz = _adaptive_batch_size(
+                docs_remaining=len(remaining),
+                avg_doc_tokens=avg_doc_tokens,
+                limiter=self._limiter,
+                hard_cap=self._hard_cap_batch,
+                overhead_tokens=self._prompt_overhead,
+                target_latency_s=self._target_latency,
+            )
+            batch_docs = remaining[:bsz]
+            batch_idx = idx_map[:bsz]
+            del remaining[:bsz], idx_map[:bsz]
+            
+            est_tokens = _estimate_prompt_tokens(query, batch_docs, overhead_tokens=self._prompt_overhead)
+            
+            # unified concurrency + token-aware gating
+            async with self._inflight:
+                await self._limiter.acquire(est_tokens)
+                batch_scores = await self._batch_score_documents_async(query, batch_docs)
+            
+            for i, s in zip(batch_idx, batch_scores):
+                scores[i] = s
+        
+        # Update cache with TTL
         with self._cache_lock:
             # Simple cache management - if too many items, clear half the cache
             if len(self._score_cache) >= self._cache_size:
                 keys_to_remove = list(self._score_cache.keys())[:self._cache_size // 2]
                 for k in keys_to_remove:
                     self._score_cache.pop(k, None)
+                    self._cache_timestamps.pop(k, None)
             
             self._score_cache[cache_key] = scores
+            self._cache_timestamps[cache_key] = time.time()
         
         return scores
 
     async def _batch_score_documents_async(self, query: str, documents: List[str]) -> List[float]:
         """
-        Score a batch of documents using the model with rate limiting and retry logic.
+        Score a batch of documents using the model with structured output and header awareness.
         
         Args:
             query: The user query
-            documents: List of document texts
+            documents: List of document texts (already token-capped)
             
         Returns:
             List of relevance scores for the batch
@@ -232,21 +253,8 @@ class CrossEncoderReranker(BaseReranker):
         if not documents:
             return []
         
-        # Helper to sanitize and limit document length
-        def sanitize_document(doc: str, max_chars: int = 1000) -> str:
-            # Truncate overly long documents
-            if len(doc) > max_chars:
-                doc = doc[:max_chars] + "..."
-            # Remove problematic characters that might affect formatting
-            doc = doc.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-            # Collapse multiple spaces
-            import re
-            doc = re.sub(r'\s+', ' ', doc).strip()
-            return doc
-        
         # Helper to create span-exact cache key
         def _doc_cache_key(query: str, doc: str) -> str:
-            import hashlib
             h = hashlib.md5(doc.encode()).hexdigest()
             return f"{query}::{h}"
         
@@ -261,7 +269,7 @@ class CrossEncoderReranker(BaseReranker):
             score = None
             
             with self._cache_lock:
-                if doc_key in self._score_cache:
+                if doc_key in self._score_cache and not self._is_cache_expired(doc_key):
                     score = self._score_cache[doc_key]
             
             if score is not None:
@@ -275,65 +283,69 @@ class CrossEncoderReranker(BaseReranker):
             # Sort by original index and return scores
             return [score for _, score in sorted(cached_scores, key=lambda x: x[0])]
         
-        # Prepare prompt for scoring only uncached documents
-        prompt = "Rate the relevance of each document to the query on a scale of 0 to 10, where 10 is extremely relevant and 0 is completely irrelevant.\n\n"
-        prompt += f"Query: {query}\n\n"
-        
-        for i, doc in enumerate(uncached_docs):
-            prompt += f"Document {i+1}: {sanitize_document(doc)}\n\n"
-        
-        prompt += f"\nYou must return EXACTLY {len(uncached_docs)} scores, one for each document, in the format: Score1, Score2, Score3, ...\n"
-        prompt += "Example response format: 8, 7, 9, 5\n"
-        prompt += "DO NOT include any other text or explanation in your response."
-        
-        # Get model response with rate limiting and retry logic
+        # Get model response with retry logic
         for attempt in range(self._max_retries):
             try:
-                # Use semaphore to limit concurrent requests
-                async with self.rate_limit_semaphore:
-                    logger.info(f"Requesting scores for {len(uncached_docs)} documents (attempt {attempt + 1})")
+                logger.info(f"Requesting scores for {len(uncached_docs)} documents (attempt {attempt + 1})")
+                
+                # Use a more robust approach with better prompting
+                prompt = f"Rate the relevance of each document to the query on a scale of 0 to 10, where 10 is extremely relevant and 0 is completely irrelevant.\n\n"
+                prompt += f"Query: {query}\n\n"
+                
+                for i, doc in enumerate(uncached_docs):
+                    prompt += f"Document {i+1}: {doc}\n\n"
+                
+                prompt += f"\nYou must return EXACTLY {len(uncached_docs)} scores, one for each document, in the format: Score1, Score2, Score3, ...\n"
+                prompt += "Example response format: 8, 7, 9, 5\n"
+                prompt += "DO NOT include any other text or explanation in your response."
+                
+                response = self.model_client.chat.completions.create(
+                    model=RERANK_MODEL,
+                    max_tokens=256,
+                    temperature=0.0,  # Use deterministic output
+                    messages=[
+                        {"role": "system", "content": "You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response."},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                # Parse scores from response
+                answer = response.choices[0].message.content
+                logger.debug(f"Raw reranking response: {answer}")
+                
+                # Parse and process scores using the robust parser
+                scores = await self._parse_scores_async(answer, len(uncached_docs))
+                
+                # (Optional) If your SDK exposes headers, feed them:
+                try:
+                    self._limiter.observe_headers(getattr(response, "response", {}).get("headers", {}))
+                except Exception:
+                    pass
+                
+                # Update cache with new scores
+                with self._cache_lock:
+                    for i, doc in enumerate(uncached_docs):
+                        doc_key = _doc_cache_key(query, doc)
+                        self._score_cache[doc_key] = scores[i]
+                        self._cache_timestamps[doc_key] = time.time()
+                
+                # Combine cached and new scores
+                all_scores = [0.0] * len(documents)
+                
+                # Fill in cached scores
+                for idx, score in cached_scores:
+                    all_scores[idx] = score
                     
-                    # Make the API call
-                    response = self.model_client.chat.completions.create(
-                        model=RERANK_MODEL,
-                        max_tokens=256,
-                        temperature=0.0,  # Use deterministic output
-                        messages=[
-                            {"role": "system", "content": "You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response."},
-                            {"role": "user", "content": prompt}
-                        ]
-                    )
+                # Fill in newly calculated scores
+                for i, orig_idx in enumerate(uncached_indices):
+                    all_scores[orig_idx] = scores[i]
                     
-                    # Parse scores from response
-                    answer = response.choices[0].message.content
-                    logger.debug(f"Raw reranking response: {answer}")
-                    
-                    # Parse and process scores
-                    scores = await self._parse_scores_async(answer, len(uncached_docs))
-                    
-                    # Update cache with new scores
-                    with self._cache_lock:
-                        for i, doc in enumerate(uncached_docs):
-                            doc_key = _doc_cache_key(query, doc)
-                            self._score_cache[doc_key] = scores[i]
-                    
-                    # Combine cached and new scores
-                    all_scores = [0.0] * len(documents)
-                    
-                    # Fill in cached scores
-                    for idx, score in cached_scores:
-                        all_scores[idx] = score
-                        
-                    # Fill in newly calculated scores
-                    for i, orig_idx in enumerate(uncached_indices):
-                        all_scores[orig_idx] = scores[i]
-                        
-                    return all_scores
+                return all_scores
                     
             except Exception as e:
                 # Check if it's a rate limit error
                 if self._is_rate_limit_error(e):
-                    wait_time = self._calculate_backoff_delay_async(attempt)
+                    wait_time = _jitter_backoff(self._base_delay, 60.0, attempt)
                     logger.warning(f"Rate limit hit on attempt {attempt + 1}. Waiting {wait_time:.2f} seconds before retry")
                     await asyncio.sleep(wait_time)
                     continue
@@ -350,25 +362,6 @@ class CrossEncoderReranker(BaseReranker):
         logger.error("All retry attempts failed, returning default scores")
         return [0.5] * len(documents)
 
-    def _calculate_backoff_delay_async(self, attempt: int) -> float:
-        """
-        Calculate exponential backoff delay with jitter for async operations.
-        
-        Args:
-            attempt: The current attempt number (0-based)
-            
-        Returns:
-            Delay in seconds
-        """
-        
-        # Exponential backoff: base_delay * (2^attempt)
-        delay = self._base_delay * (2 ** attempt)
-        
-        # Add jitter to avoid thundering herd
-        jitter = random.uniform(0.1, 0.5)
-        
-        # Cap the maximum delay at 60 seconds
-        return min(delay + jitter, 60.0)
 
     async def _parse_scores_async(self, response_text: str, expected_count: int) -> List[float]:
         """
@@ -384,8 +377,23 @@ class CrossEncoderReranker(BaseReranker):
         try:
             scores = []
             
-            # Method 1: Try comma-separated values first (most common format)
-            if "," in response_text:
+            # Method 0: Try JSON parsing first (in case model returns JSON despite instructions)
+            try:
+                import re
+                # Look for JSON-like structure in the response
+                json_match = re.search(r'\{[^}]*"scores"[^}]*\[([^\]]+)\][^}]*\}', response_text, re.DOTALL)
+                if json_match:
+                    scores_str = json_match.group(1)
+                    # Parse the scores array content
+                    score_values = re.findall(r'(\d+(?:\.\d+)?)', scores_str)
+                    if score_values:
+                        scores = [float(val) for val in score_values]
+            except Exception:
+                pass
+            
+            # Method 1: Try comma-separated values (most common format)
+            if len(scores) != expected_count and "," in response_text:
+                scores = []
                 for score_str in response_text.split(","):
                     # Clean and extract numeric values
                     cleaned = ''.join([c for c in score_str if c.isdigit() or c == '.'])
@@ -405,7 +413,10 @@ class CrossEncoderReranker(BaseReranker):
             
             # Method 3: If all else fails, extract any numbers in the text
             if len(scores) != expected_count:
-                scores = [float(num) for num in response_text.split() if num.replace(".", "").isdigit()]
+                import re
+                all_numbers = re.findall(r'\d+(?:\.\d+)?', response_text)
+                if all_numbers:
+                    scores = [float(num) for num in all_numbers]
             
             # Verify we have the expected number of scores
             if len(scores) > expected_count:
@@ -449,10 +460,8 @@ class CrossEncoderReranker(BaseReranker):
 
     def _create_cache_key(self, query: str, documents: List[str]) -> str:
         """Create a unique cache key based on query and document content."""
-        import hashlib
+        # Create a hash of the full document content for better cache accuracy
+        doc_hashes = [hashlib.md5(doc.encode()).hexdigest() for doc in documents]
+        content_hash = hashlib.md5(f"{query}::{':'.join(doc_hashes)}".encode()).hexdigest()
         
-        # Create a hash of the documents content
-        doc_content = "::".join(doc[:100] for doc in documents)  # First 100 chars of each doc
-        content_hash = hashlib.md5(f"{query}::{doc_content}".encode()).hexdigest()
-        
-        return f"{query}::{len(documents)}::{content_hash}"
+        return f"rerank::{query}::{len(documents)}::{content_hash}"

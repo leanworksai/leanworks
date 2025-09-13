@@ -218,7 +218,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-        based on our progress update for go to market for last two weeks, do you think we are on track? if not, what should we do given our limited capacity
+        summarize the ai backend progress using github commits for last two weeks
 '''
         
         print("💬 Processing user message:")
@@ -230,7 +230,7 @@ async def main_async():
         # Time the response processing
         response_start = time.time()
         
-        response = agent.process_message(user_message, thinking=True, streaming=True)
+        response = agent.process_message(user_message, thinking=False, streaming=True)
         
         response_time = time.time() - response_start
         total_time = time.time() - setup_start
