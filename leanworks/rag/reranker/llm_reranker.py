@@ -296,7 +296,12 @@ class CrossEncoderReranker(BaseReranker):
                     prompt += f"Document {i+1}: {doc}\n\n"
                 
                 prompt += f"\nYou must return EXACTLY {len(uncached_docs)} scores, one for each document, in the format: Score1, Score2, Score3, ...\n"
-                prompt += "Example response format: 8, 7, 9, 5\n"
+                if len(uncached_docs) <= 4:
+                    example_scores = ", ".join([str(i+5) for i in range(len(uncached_docs))])
+                    prompt += f"Example response format for {len(uncached_docs)} documents: {example_scores}\n"
+                else:
+                    prompt += "Example response format: 8, 7, 9, 5, 6, 3, 8, 4\n"
+                prompt += f"CRITICAL: Your response must contain exactly {len(uncached_docs)} comma-separated numbers. No more, no less.\n"
                 prompt += "DO NOT include any other text or explanation in your response."
                 
                 response = self.model_client.chat.completions.create(
@@ -312,6 +317,13 @@ class CrossEncoderReranker(BaseReranker):
                 # Parse scores from response
                 answer = response.choices[0].message.content
                 logger.debug(f"Raw reranking response: {answer}")
+                
+                # Quick validation: count commas to estimate number of scores
+                if answer and "," in answer:
+                    comma_count = answer.count(",")
+                    expected_commas = len(uncached_docs) - 1  # n scores = n-1 commas
+                    if comma_count != expected_commas:
+                        logger.debug(f"Response has {comma_count} commas, expected {expected_commas} for {len(uncached_docs)} scores")
                 
                 # Parse and process scores using the robust parser
                 scores = await self._parse_scores_async(answer, len(uncached_docs))
@@ -426,7 +438,11 @@ class CrossEncoderReranker(BaseReranker):
             
             # Normalize to ensure we have correct number of scores
             if len(scores) < expected_count:
-                logger.warning(f"Failed to parse correct number of scores from: {response_text}. Found {len(scores)}, expected {expected_count}")
+                # Check if we're only missing one score and the response might be truncated
+                if len(scores) == expected_count - 1:
+                    logger.info(f"Model returned {len(scores)} scores instead of {expected_count}. This is likely due to the model missing one document or response truncation. Adding default score.")
+                else:
+                    logger.warning(f"Failed to parse correct number of scores from: {response_text}. Found {len(scores)}, expected {expected_count}")
                 # Use found scores and fill rest with default
                 scores = scores + [5.0] * (expected_count - len(scores))
             
