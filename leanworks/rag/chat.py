@@ -373,6 +373,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             use_reranker: bool = USE_RERANKER,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
+            min_score_threshold: float = MIN_SCORE_THRESHOLD,
+            recency_weight: float = RECENCY_WEIGHT,
+            recency_coefficient: float = RECENCY_COEFFICIENT,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -385,6 +388,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             model: The model to use for generation
             include_memory: Whether to include recent conversation history
             use_span_selection: Whether to apply span selection to extract relevant sentences
+            min_score_threshold: Minimum score threshold for filtering results
+            recency_weight: Weight for recency scoring
+            recency_coefficient: Coefficient for recency calculation
             cited_context: Specific context cited by the user, a dictionary
             
         Returns:
@@ -419,9 +425,9 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 full_query, 
                 use_reranker=use_reranker, 
                 use_span_selection=use_span_selection,
-                min_score_threshold=MIN_SCORE_THRESHOLD,
-                recency_weight=RECENCY_WEIGHT,
-                recency_coefficient=RECENCY_COEFFICIENT,
+                min_score_threshold=min_score_threshold,
+                recency_weight=recency_weight,
+                recency_coefficient=recency_coefficient,
                 rerank_top_k=rerank_top_k,
                 **kwargs
                 )
@@ -587,9 +593,9 @@ class AsyncChat(Chat):
                         query, 
                         filtered_results,
                         top_k=rerank_top_k,
-                        min_score_threshold=MIN_SCORE_THRESHOLD,
-                        recency_weight=RECENCY_WEIGHT,
-                        recency_coefficient=RECENCY_COEFFICIENT
+                        min_score_threshold=min_score_threshold,
+                        recency_weight=recency_weight,
+                        recency_coefficient=recency_coefficient
                     )
                     logger.info(f"Successfully reranked results to {len(reranked_results)} documents")
                 except Exception as e:
@@ -660,6 +666,9 @@ class AsyncChat(Chat):
             use_reranker: bool = USE_RERANKER,
             query_rewrites: bool = QUERY_REWRITES,
             use_span_selection: bool = USE_SPAN_SELECTION,
+            min_score_threshold: float = MIN_SCORE_THRESHOLD,
+            recency_weight: float = RECENCY_WEIGHT,
+            recency_coefficient: float = RECENCY_COEFFICIENT,
             cited_context: dict = None,
             alpha: float = ALPHA,
             **kwargs
@@ -676,7 +685,9 @@ class AsyncChat(Chat):
             query_rewrites: Whether to use query rewriting for better recall
             use_span_selection: Whether to apply span selection to extract relevant sentences
             cited_context: Specific context cited by the user, a dictionary
-            
+            min_score_threshold: Minimum score threshold for filtering results
+            recency_weight: Weight for recency scoring
+            recency_coefficient: Coefficient for recency calculation
         Returns:
             Dictionary with 'content' (the answer) and 'data_sources' (list of unique links)
         """
@@ -750,9 +761,9 @@ class AsyncChat(Chat):
                 full_query, 
                 use_reranker=use_reranker,
                 use_span_selection=use_span_selection,
-                min_score_threshold=MIN_SCORE_THRESHOLD,
-                recency_weight=RECENCY_WEIGHT,
-                recency_coefficient=RECENCY_COEFFICIENT,
+                min_score_threshold=min_score_threshold,
+                recency_weight=recency_weight,
+                recency_coefficient=recency_coefficient,
                 rerank_top_k=rerank_top_k,
                 **kwargs
             )

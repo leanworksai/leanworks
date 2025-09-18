@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.3.10",
+    version="0.3.11",
     packages=find_packages(),
     install_requires=[
         "pinecone==7.2.0",
