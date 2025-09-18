@@ -40,13 +40,11 @@ class RerankerFactory:
             if model_client is None:
                 raise ValueError("model_client is required for LLM-based reranker")
             
-            cache_size = kwargs.get("cache_size", 1000)
-            max_concurrent_requests = kwargs.get("max_concurrent_requests", 3)
+            max_concurrent_requests = kwargs.get("max_concurrent_requests", 10)  # Updated default for Claude Haiku 3
             
             logger.info("Creating CrossEncoderReranker (LLM-based)")
             return CrossEncoderReranker(
                 model_client=model_client,
-                cache_size=cache_size,
                 max_concurrent_requests=max_concurrent_requests
             )
             

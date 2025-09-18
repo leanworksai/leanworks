@@ -5,9 +5,7 @@ import datetime
 import math
 import time
 import asyncio
-import threading
 import os
-import hashlib
 from leanworks.setting import *
 from leanworks.rag.reranker.base_reranker import BaseReranker
 from leanworks.rag.reranker.rate_limiter import (
@@ -27,37 +25,29 @@ class CrossEncoderReranker(BaseReranker):
     This provides more accurate semantic matching than vector similarity alone,
     especially for queries with minimal context.
     """
-    def __init__(self, model_client, cache_size: int = 1000, max_concurrent_requests: int = 3):
+    def __init__(self, model_client, max_concurrent_requests: int = 10):
         """
         Initialize the reranker with a model client.
         
         Args:
             model_client: The model client to use for scoring (e.g., OpenAI client)
-            cache_size: Size of the LRU cache for document scoring
             max_concurrent_requests: Maximum number of concurrent API requests
         """
         super().__init__()
         self.model_client = model_client
-        self._score_cache = {}
-        self._cache_lock = threading.Lock()
-        self._cache_size = cache_size
         self._max_retries = 3
         self._base_delay = 1.0  # Base delay for exponential backoff
         self._max_concurrent_requests = max_concurrent_requests
         
-        # Rate limiting configuration
-        self._rpm = int(os.getenv("RERANK_RPM", "60"))       # tune per environment/quota
-        self._tpm = int(os.getenv("RERANK_TPM", "120000"))   # tune per environment/quota
+        # Rate limiting configuration - Claude Haiku 3 limits
+        self._rpm = int(os.getenv("RERANK_RPM", "1000"))     # Claude Haiku 3: 1,000 RPM
+        self._tpm = int(os.getenv("RERANK_TPM", "100000"))   # Claude Haiku 3: 100,000 input TPM
         self._limiter = DualRateLimiter(rpm=self._rpm, tpm=self._tpm, burst_requests=self._rpm, burst_tokens=self._tpm)
-        self._hard_cap_batch = int(os.getenv("RERANK_BATCH_CAP", "8"))   # upper bound
-        self._target_latency = float(os.getenv("RERANK_TARGET_LATENCY_S", "1.2"))
+        self._hard_cap_batch = int(os.getenv("RERANK_BATCH_CAP", "30"))   # optimal for Claude Haiku 3
+        self._target_latency = float(os.getenv("RERANK_TARGET_LATENCY_S", "2.0"))
         self._inflight = asyncio.Semaphore(self._max_concurrent_requests)  # one global semaphore only
-        self._doc_token_cap = int(os.getenv("RERANK_DOC_TOKEN_CAP", "220"))  # per-doc cap
+        self._doc_token_cap = int(os.getenv("RERANK_DOC_TOKEN_CAP", "280"))  # per-doc cap
         self._prompt_overhead = 80  # system+formatting budget, keep it tiny
-        
-        # Cache TTL (in seconds)
-        self._cache_ttl = int(os.getenv("RERANK_CACHE_TTL", "3600"))  # 1 hour default
-        self._cache_timestamps = {}  # Track when cache entries were created
         
         logger.info(f"CrossEncoderReranker initialized with RPM={self._rpm}, TPM={self._tpm}, batch_cap={self._hard_cap_batch}")
     
@@ -68,13 +58,6 @@ class CrossEncoderReranker(BaseReranker):
         if len(text) <= approx_chars:
             return " ".join(text.split())
         return " ".join(text[:approx_chars].split()) + " …"
-    
-    def _is_cache_expired(self, cache_key: str) -> bool:
-        """Check if cache entry has expired."""
-        if cache_key not in self._cache_timestamps:
-            return True
-        return time.time() - self._cache_timestamps[cache_key] > self._cache_ttl
-    
     
     def rerank(self, query: str, documents: List[Any], **kwargs) -> List[Any]:
         """Synchronous wrapper that properly handles async context."""
@@ -186,12 +169,6 @@ class CrossEncoderReranker(BaseReranker):
         Returns:
             List of relevance scores
         """
-        # Check cache for entire query-documents combination
-        cache_key = self._create_cache_key(query, documents)
-        with self._cache_lock:
-            if cache_key in self._score_cache and not self._is_cache_expired(cache_key):
-                return self._score_cache[cache_key]
-        
         # Token-cap the documents to keep batches predictable
         capped_docs = [self._truncate_by_tokens(doc, self._doc_token_cap) for doc in documents]
         
@@ -224,18 +201,6 @@ class CrossEncoderReranker(BaseReranker):
             for i, s in zip(batch_idx, batch_scores):
                 scores[i] = s
         
-        # Update cache with TTL
-        with self._cache_lock:
-            # Simple cache management - if too many items, clear half the cache
-            if len(self._score_cache) >= self._cache_size:
-                keys_to_remove = list(self._score_cache.keys())[:self._cache_size // 2]
-                for k in keys_to_remove:
-                    self._score_cache.pop(k, None)
-                    self._cache_timestamps.pop(k, None)
-            
-            self._score_cache[cache_key] = scores
-            self._cache_timestamps[cache_key] = time.time()
-        
         return scores
 
     async def _batch_score_documents_async(self, query: str, documents: List[str]) -> List[float]:
@@ -253,55 +218,25 @@ class CrossEncoderReranker(BaseReranker):
         if not documents:
             return []
         
-        # Helper to create span-exact cache key
-        def _doc_cache_key(query: str, doc: str) -> str:
-            h = hashlib.md5(doc.encode()).hexdigest()
-            return f"{query}::{h}"
-        
-        # Check individual document caches
-        cached_scores = []
-        uncached_docs = []
-        uncached_indices = []
-        
-        for i, doc in enumerate(documents):
-            # Use span-exact cache key
-            doc_key = _doc_cache_key(query, doc)
-            score = None
-            
-            with self._cache_lock:
-                if doc_key in self._score_cache and not self._is_cache_expired(doc_key):
-                    score = self._score_cache[doc_key]
-            
-            if score is not None:
-                cached_scores.append((i, score))
-            else:
-                uncached_docs.append(doc)
-                uncached_indices.append(i)
-        
-        # If all documents are cached, return scores directly
-        if not uncached_docs:
-            # Sort by original index and return scores
-            return [score for _, score in sorted(cached_scores, key=lambda x: x[0])]
-        
         # Get model response with retry logic
         for attempt in range(self._max_retries):
             try:
-                logger.info(f"Requesting scores for {len(uncached_docs)} documents (attempt {attempt + 1})")
+                logger.info(f"Requesting scores for {len(documents)} documents (attempt {attempt + 1})")
                 
                 # Use a more robust approach with better prompting
                 prompt = f"Rate the relevance of each document to the query on a scale of 0 to 10, where 10 is extremely relevant and 0 is completely irrelevant.\n\n"
                 prompt += f"Query: {query}\n\n"
                 
-                for i, doc in enumerate(uncached_docs):
+                for i, doc in enumerate(documents):
                     prompt += f"Document {i+1}: {doc}\n\n"
                 
-                prompt += f"\nYou must return EXACTLY {len(uncached_docs)} scores, one for each document, in the format: Score1, Score2, Score3, ...\n"
-                if len(uncached_docs) <= 4:
-                    example_scores = ", ".join([str(i+5) for i in range(len(uncached_docs))])
-                    prompt += f"Example response format for {len(uncached_docs)} documents: {example_scores}\n"
+                prompt += f"\nYou must return EXACTLY {len(documents)} scores, one for each document, in the format: Score1, Score2, Score3, ...\n"
+                if len(documents) <= 4:
+                    example_scores = ", ".join([str(i+5) for i in range(len(documents))])
+                    prompt += f"Example response format for {len(documents)} documents: {example_scores}\n"
                 else:
                     prompt += "Example response format: 8, 7, 9, 5, 6, 3, 8, 4\n"
-                prompt += f"CRITICAL: Your response must contain exactly {len(uncached_docs)} comma-separated numbers. No more, no less.\n"
+                prompt += f"CRITICAL: Your response must contain exactly {len(documents)} comma-separated numbers. No more, no less.\n"
                 prompt += "DO NOT include any other text or explanation in your response."
                 
                 response = self.model_client.chat.completions.create(
@@ -321,12 +256,12 @@ class CrossEncoderReranker(BaseReranker):
                 # Quick validation: count commas to estimate number of scores
                 if answer and "," in answer:
                     comma_count = answer.count(",")
-                    expected_commas = len(uncached_docs) - 1  # n scores = n-1 commas
+                    expected_commas = len(documents) - 1  # n scores = n-1 commas
                     if comma_count != expected_commas:
-                        logger.debug(f"Response has {comma_count} commas, expected {expected_commas} for {len(uncached_docs)} scores")
+                        logger.debug(f"Response has {comma_count} commas, expected {expected_commas} for {len(documents)} scores")
                 
                 # Parse and process scores using the robust parser
-                scores = await self._parse_scores_async(answer, len(uncached_docs))
+                scores = await self._parse_scores_async(answer, len(documents))
                 
                 # (Optional) If your SDK exposes headers, feed them:
                 try:
@@ -334,25 +269,7 @@ class CrossEncoderReranker(BaseReranker):
                 except Exception:
                     pass
                 
-                # Update cache with new scores
-                with self._cache_lock:
-                    for i, doc in enumerate(uncached_docs):
-                        doc_key = _doc_cache_key(query, doc)
-                        self._score_cache[doc_key] = scores[i]
-                        self._cache_timestamps[doc_key] = time.time()
-                
-                # Combine cached and new scores
-                all_scores = [0.0] * len(documents)
-                
-                # Fill in cached scores
-                for idx, score in cached_scores:
-                    all_scores[idx] = score
-                    
-                # Fill in newly calculated scores
-                for i, orig_idx in enumerate(uncached_indices):
-                    all_scores[orig_idx] = scores[i]
-                    
-                return all_scores
+                return scores
                     
             except Exception as e:
                 # Check if it's a rate limit error
@@ -474,10 +391,3 @@ class CrossEncoderReranker(BaseReranker):
             "quota" in error_str
         )
 
-    def _create_cache_key(self, query: str, documents: List[str]) -> str:
-        """Create a unique cache key based on query and document content."""
-        # Create a hash of the full document content for better cache accuracy
-        doc_hashes = [hashlib.md5(doc.encode()).hexdigest() for doc in documents]
-        content_hash = hashlib.md5(f"{query}::{':'.join(doc_hashes)}".encode()).hexdigest()
-        
-        return f"rerank::{query}::{len(documents)}::{content_hash}"
