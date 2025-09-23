@@ -98,7 +98,7 @@ class CrossEncoderReranker(BaseReranker):
             logger.warning("No documents provided for reranking")
             return []
         
-        logger.info(f"Async reranking {len(documents)} documents for query: '{query}'")
+        logger.info(f"Async reranking {len(documents)} documents for query (length: {len(query)} chars)")
         
         # Extract document texts using query-focused extraction
         doc_texts = [self._extract_query_focused_text(doc, query) for doc in documents]
@@ -251,7 +251,7 @@ class CrossEncoderReranker(BaseReranker):
                 
                 # Parse scores from response
                 answer = response.choices[0].message.content
-                logger.debug(f"Raw reranking response: {answer}")
+                logger.debug(f"Raw reranking response received (length: {len(answer) if answer else 0} chars)")
                 
                 # Quick validation: count commas to estimate number of scores
                 if answer and "," in answer:
@@ -359,7 +359,7 @@ class CrossEncoderReranker(BaseReranker):
                 if len(scores) == expected_count - 1:
                     logger.info(f"Model returned {len(scores)} scores instead of {expected_count}. This is likely due to the model missing one document or response truncation. Adding default score.")
                 else:
-                    logger.warning(f"Failed to parse correct number of scores from: {response_text}. Found {len(scores)}, expected {expected_count}")
+                    logger.warning(f"Failed to parse correct number of scores from response (length: {len(response_text)} chars). Found {len(scores)}, expected {expected_count}")
                 # Use found scores and fill rest with default
                 scores = scores + [5.0] * (expected_count - len(scores))
             
@@ -370,7 +370,7 @@ class CrossEncoderReranker(BaseReranker):
             return [score / 10.0 for score in scores]
             
         except Exception as e:
-            logger.warning(f"Failed to parse scores from: {response_text}. Error: {str(e)}")
+            logger.warning(f"Failed to parse scores from response (length: {len(response_text)} chars). Error: {str(e)}")
             return [0.5] * expected_count  # Default score
 
     def _is_rate_limit_error(self, error: Exception) -> bool:
