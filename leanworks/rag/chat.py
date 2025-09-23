@@ -194,7 +194,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                     )
                     all_matches.append(match)
                 
-                logger.info(f"Retrieved {len(hybrid_results)} hybrid search results for query: '{q}'")
+                logger.info(f"Retrieved {len(hybrid_results)} hybrid search results")
                 
             # Deduplicate matches by ID
             seen_ids = set()
