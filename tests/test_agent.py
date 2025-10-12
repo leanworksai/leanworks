@@ -119,13 +119,13 @@ def get_cached_secret_client(client_name: str) -> GCPSecretLoader:
         raise
 
 # Performance optimization: Batch client initialization
-async def initialize_clients_async(bq_client, user_id: str) -> Tuple[CloudStorage, GCPSecretLoader, Anthropic, any, list, str]:
+async def initialize_clients_async(bq_client, user_id: str) -> Tuple[CloudStorage, GCPSecretLoader, Anthropic, any, list]:
     """Initialize all required clients asynchronously with caching"""
     start_time = time.time()
     
     try:
         # Get client info (cached)
-        client_name, available_tools, additional_context = get_cached_client_info(bq_client, user_id)
+        client_name, available_tools = get_cached_client_info(bq_client, user_id)
         
         if not client_name:
             raise ValueError(f"Could not determine client for user_id: {user_id}")
@@ -158,7 +158,7 @@ async def initialize_clients_async(bq_client, user_id: str) -> Tuple[CloudStorag
         init_time = time.time() - start_time
         logger.info(f"Client initialization completed in {init_time:.3f}s for user: {user_id}")
         
-        return storage_client, secret_client, model_client, bq_client_wrapper, available_tools, additional_context
+        return storage_client, secret_client, model_client, bq_client_wrapper, available_tools
     except Exception as e:
         logger.error(f"Error in initialize_clients_async for user {user_id}: {str(e)}")
         traceback.print_exc()
@@ -186,7 +186,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use optimized async client initialization
-        storage_client, secret_client, model_client, bq_client_wrapper, tools, additional_context = await initialize_clients_async(bq_client, user_id)
+        storage_client, secret_client, model_client, bq_client_wrapper, tools = await initialize_clients_async(bq_client, user_id)
         
         client_init_time = time.time() - client_init_start
         
@@ -202,8 +202,7 @@ async def main_async():
             user_id=user_id,
             session_id="jfwp3gy9",
             clear_conversation=True,
-            tools=tools,  # Only load what we need
-            additional_context=additional_context
+            tools=tools  # Only load what we need
         )
         
         agent_init_time = time.time() - agent_init_start
@@ -319,7 +318,7 @@ def run_performance_comparison():
     
     start_time = time.time()
     bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-    client_name, tools, additional_context = get_client_info(bq_client, user_id)
+    client_name, tools = get_client_info(bq_client, user_id)
     storage_client = CloudStorage("gcp_credential.json", bucket=client_name)
     secret_client = GCPSecretLoader("gcp_credential.json", client_name=client_name)
     model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))
@@ -339,7 +338,7 @@ def run_performance_comparison():
     start_time = time.time()
     
     # Use cached functions
-    client_name, tools, additional_context = get_cached_client_info(bq_client, user_id)
+    client_name, tools = get_cached_client_info(bq_client, user_id)
     storage_client = get_cached_storage_client(client_name)
     secret_client = get_cached_secret_client(client_name)
     model_client = Anthropic(api_key=secret_client.get("CLAUDE_API_KEY"))

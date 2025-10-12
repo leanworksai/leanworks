@@ -329,4 +329,4 @@ def get_client_info(bq_client, user_id: str) -> str:
             available_tools = row.available_tools.split(",")
         else:
             available_tools = []
-        return row.client_name, available_tools, row.additional_context
+        return row.client_name, available_tools
