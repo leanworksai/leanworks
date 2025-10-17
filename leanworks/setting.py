@@ -8,7 +8,7 @@ RECENCY_WEIGHT = 0.6
 RECENCY_COEFFICIENT = 0.1
 QUERY_REWRITES = True
 # GENERATION_MODEL = "claude-3-5-haiku-latest"
-GENERATION_MODEL = "claude-sonnet-4-20250514"
+GENERATION_MODEL = "claude-haiku-4-5-20251001"
 OTHER_MODEL = "claude-3-haiku-20240307"
 
 # Reranker configuration
