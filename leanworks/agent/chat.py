@@ -35,7 +35,7 @@ class ChatAgent:
                  storage_client,
                  secret_client,
                  model_client,
-                 bq_client_wrapper,
+                 firestore_client_wrapper,
                  user_id=None,
                  session_id=None,
                  clear_conversation=True,
@@ -49,18 +49,18 @@ class ChatAgent:
             storage_client: The storage client for GCS operations
             secret_client: The secret client for accessing secrets
             model_client: The Claude model client for main chat
-            bq_client_wrapper: The BigQuery client object that contains dataset_id
+            firestore_client_wrapper: The Firestore client object that contains domain attribute
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
-            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']. ToolUse handles the processing and filtering.
+            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'firestore', 'duckdb']. ToolUse handles the processing and filtering.
             additional_context (str): Additional context to add to the system prompt.
         """
         # Initialize clients
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.model_client = model_client
-        self.bq_client_wrapper = bq_client_wrapper
+        self.firestore_client_wrapper = firestore_client_wrapper
         self.additional_context = additional_context
         # Set parameters
         self.user_id = user_id
@@ -72,8 +72,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with BigQuery client and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(bq_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
+        # Initialize tool use with Firestore client and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(firestore_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
         
 
         
@@ -153,44 +153,87 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Query user information from BigQuery user_config table.
+        Query user information from Firestore users collection.
         
         Returns:
-            dict: User information dictionary with user_id, alias_email, first_name, last_name
+            dict: User information dictionary with user_id, first_name, last_name, job_title, responsibilities, domain
         """
         try:
             if not self.user_id:
-                return {"user_id": "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
-            
-            query = f"""
-            SELECT user_id, alias_email, first_name, last_name, timezone 
-            FROM `leanworks.{self.bq_client_wrapper.client_name}.user_config` 
-            WHERE user_id = '{self.user_id}'
-            """
-            
-            query_job = self.bq_client_wrapper.bq_client.query(query)
-            results = query_job.result()
-            
-            # Convert results to dict
-            for row in results:
-                user_info = {
-                    "user_id": row.user_id or "",
-                    "alias_email": row.alias_email or "",
-                    "first_name": row.first_name or "",
-                    "last_name": row.last_name or "",
-                    "timezone": row.timezone or "UTC"
+                return {
+                    "user_id": "Unknown", 
+                    "first_name": "", 
+                    "last_name": "", 
+                    "job_title": "",
+                    "responsibilities": "",
+                    "domain": "",
+                    "timezone": "UTC"
                 }
-                logger.info(f"Retrieved user info: {user_info}")
-                return user_info
             
-            # If no results found, return default dict
-            logger.warning(f"No user info found for user_id: {self.user_id}")
-            return {"user_id": self.user_id, "alias_email": "", "first_name": "", "last_name": ""}
+            # Get domain from firestore_client_wrapper
+            domain = getattr(self.firestore_client_wrapper, 'domain', None)
+            if not domain and '@' in self.user_id:
+                domain = self.user_id.split('@')[1]
+            
+            if not domain:
+                logger.warning("Could not determine domain for user info lookup")
+                return {
+                    "user_id": self.user_id, 
+                    "first_name": "", 
+                    "last_name": "", 
+                    "job_title": "",
+                    "responsibilities": "",
+                    "domain": "",
+                    "timezone": "UTC"
+                }
+            
+            # Initialize Firestore client
+            from leanworks.setting import _get_firestore_client
+            db = _get_firestore_client()
+            
+            # Query Firestore users collection
+            # Users are stored at domains/{domain}/users/{email}
+            collection_path = f"domains/{domain}/users"
+            user_doc_ref = db.collection(collection_path).document(self.user_id)
+            user_doc = user_doc_ref.get()
+            
+            if user_doc.exists:
+                user_data = user_doc.to_dict()
+                user_info = {
+                    "user_id": user_data.get("email", self.user_id),
+                    "first_name": user_data.get("firstName", ""),
+                    "last_name": user_data.get("lastName", ""),
+                    "job_title": user_data.get("jobTitle", ""),
+                    "responsibilities": user_data.get("responsibilities", ""),
+                    "domain": user_data.get("domain", domain),
+                    "timezone": "UTC"  # Default to UTC since timezone field doesn't exist in schema
+                }
+                logger.info(f"Retrieved user info from Firestore: {user_info}")
+                return user_info
+            else:
+                logger.warning(f"User document not found in Firestore: {self.user_id}")
+                return {
+                    "user_id": self.user_id, 
+                    "first_name": "", 
+                    "last_name": "", 
+                    "job_title": "",
+                    "responsibilities": "",
+                    "domain": domain,
+                    "timezone": "UTC"
+                }
             
         except Exception as e:
-            logger.error(f"Error retrieving user info from BigQuery: {str(e)}")
+            logger.error(f"Error retrieving user info from Firestore: {str(e)}")
             # Return default dict on error
-            return {"user_id": self.user_id or "Unknown", "alias_email": "", "first_name": "", "last_name": ""}
+            return {
+                "user_id": self.user_id or "Unknown", 
+                "first_name": "", 
+                "last_name": "", 
+                "job_title": "",
+                "responsibilities": "",
+                "domain": "",
+                "timezone": "UTC"
+            }
 
 
     def process_message(self, user_message, cited_context=None, thinking=False, streaming=False):

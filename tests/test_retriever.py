@@ -21,7 +21,7 @@ def main():
     try:
         # Initialize storage and secret clients
         storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-        secret_client = GCPSecretLoader("gcp_credential.json", "leanworks")
+        secret_client = GCPSecretLoader("gcp_credential.json")
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
         
         # Initialize embedding model

@@ -244,10 +244,21 @@ class ConversationManager:
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
                         
                         # Track data sources based on tool type
-                        if tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
-                            # For BigQuery tools, add the table name with dynamic dataset
-                            # Note: This assumes bq_client is accessible through data_sources context
-                            # If bq_client is not available, fall back to default
+                        if tool_name == "query_firestore":
+                            # For Firestore tools, add the collection name with domain
+                            try:
+                                # Try to get domain from the function's bound method
+                                firestore_tool = getattr(function_map[tool_name], '__self__', None)
+                                domain = getattr(firestore_tool, 'domain', 'leanworks.ai') if firestore_tool else 'leanworks.ai'
+                                
+                                # Extract collection from tool_input if available
+                                collection = tool_input.get('spec', {}).get('collection', 'unknown') if isinstance(tool_input, dict) else 'unknown'
+                                data_sources.append(f"Firestore collection: domains/{domain}/{collection}")
+                            except:
+                                data_sources.append("Firestore database")
+                        
+                        elif tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
+                            # Legacy BigQuery tools (kept for backward compatibility)
                             try:
                                 # Try to get dataset_id from the function's bound method
                                 dataset_id = getattr(function_map[tool_name].__self__, 'bq_client', None)

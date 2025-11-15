@@ -44,7 +44,7 @@ class SearchToolQualityTester:
             
             # Initialize storage and secret clients
             storage_client = CloudStorage("gcp_credential.json", bucket="leanworks")
-            secret_client = GCPSecretLoader("gcp_credential.json", client_name="leanworks")
+            secret_client = GCPSecretLoader("gcp_credential.json")
             
             # Initialize search tool
             self.search_tool = SearchTool(

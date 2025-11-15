@@ -1,5 +1,4 @@
-
-from leanworks.agent.tools.bigquery import BigQueryTool
+from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
@@ -8,34 +7,58 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
+    def __init__(self, firestore_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
         Args:
-            bq_client_wrapper: BigQuery client wrapper that has dataset_id attribute
+            firestore_client_wrapper: Firestore client wrapper that has domain attribute
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']
+            tools: List of additional tools to enable. These will be added to the internal tools ['search', 'firestore', 'duckdb'] which are always available.
+                   External tools (e.g., 'outlook') are only enabled if they appear in the Firestore integrations collection.
         """
         # Store initialization parameters for lazy loading
-        self.bq_client_wrapper = bq_client_wrapper
+        self.firestore_client_wrapper = firestore_client_wrapper
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         self.user_id = user_id
         self.session_id = session_id
         
+        # Get available integrations from Firestore
+        available_integrations = self._get_available_integrations()
+        logger.info(f"Available integrations from Firestore: {available_integrations}")
+        
+        # Internal tools that are always available
+        internal_tools = ['search', 'firestore', 'duckdb']
+        
         # Set default tools if not provided
         if tools is None:
-            requested_tools = ['search', 'bigquery', 'duckdb']
+            requested_tools = internal_tools
         else:
             # Add provided tools to default tools (with deduplication)
-            default_tools = ['search', 'bigquery', 'duckdb']
+            default_tools = internal_tools
             requested_tools = list(set(default_tools + tools))  # Remove duplicates while preserving functionality
         
-        self.requested_tools = requested_tools
+        # Filter requested tools based on available integrations
+        # Always include internal tools (firestore, search, duckdb), filter others
+        filtered_tools = []
+        for tool in requested_tools:
+            if tool in internal_tools:
+                # Always include internal tools
+                filtered_tools.append(tool)
+            elif tool in available_integrations:
+                # Include external tools only if they're in the integration list
+                filtered_tools.append(tool)
+                logger.info(f"Tool '{tool}' enabled (found in integrations)")
+            else:
+                # Skip tools not in integrations
+                logger.info(f"Tool '{tool}' disabled (not found in integrations)")
+        
+        self.requested_tools = filtered_tools
+        logger.info(f"Final enabled tools: {self.requested_tools}")
         
         # Tool instance cache - tools are initialized only when first accessed
         self._tool_cache = {}
@@ -48,33 +71,77 @@ class ToolUse:
         self._function_map_cache = None
         
         # Register DuckDB tools immediately (stateless wrappers; no instance required)
-        if 'duckdb' in requested_tools:
+        if 'duckdb' in self.requested_tools:
             self.enabled_tools.append('duckdb')
             logger.info("DuckDB tools registered (stateless)")
         
         # Log initialization completion
-        logger.info(f"ToolUse initialized with lazy loading for tools: {requested_tools}")
+        logger.info(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
+    
+    def _get_available_integrations(self):
+        """
+        Query Firestore integrations collection to get list of available integrations.
+        
+        Returns:
+            list: List of integration types (e.g., ['outlook', 'duckdb', 'gitlab', 'jira'])
+        """
+        try:
+            if not self.firestore_client_wrapper:
+                logger.warning("No Firestore client wrapper available, cannot fetch integrations")
+                return []
+            
+            # Get domain from wrapper
+            domain = getattr(self.firestore_client_wrapper, 'domain', None)
+            if not domain:
+                logger.warning("Domain not available in Firestore client wrapper")
+                return []
+            
+            # Initialize Firestore client using FirestoreTool's method
+            from leanworks.setting import _get_firestore_client
+            db = _get_firestore_client()
+            
+            # Query integrations collection
+            collection_path = f"domains/{domain}/integrations"
+            integrations_ref = db.collection(collection_path)
+            integrations_docs = integrations_ref.stream()
+            
+            # Extract integration types
+            available_integrations = []
+            for doc in integrations_docs:
+                doc_data = doc.to_dict()
+                if doc_data:
+                    # Get integration type (e.g., 'outlook', 'gitlab', 'jira')
+                    integration_type = doc_data.get('type') or doc_data.get('integrationType')
+                    if integration_type:
+                        available_integrations.append(integration_type.lower())
+            
+            logger.info(f"Found {len(available_integrations)} integrations in Firestore for domain {domain}")
+            return available_integrations
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch integrations from Firestore: {str(e)}")
+            return []
 
     # Lazy loading properties for individual tools
     @property
-    def bigquery_tool(self):
-        """Lazy-load BigQuery tool on first access."""
-        if 'bigquery_tool' not in self._tool_cache:
-            if 'bigquery' in self.requested_tools and self.bq_client_wrapper:
+    def firestore_tool(self):
+        """Lazy-load Firestore tool on first access."""
+        if 'firestore_tool' not in self._tool_cache:
+            if 'firestore' in self.requested_tools and self.firestore_client_wrapper:
                 try:
-                    self._tool_cache['bigquery_tool'] = BigQueryTool(self.bq_client_wrapper)
-                    if 'bigquery' not in self.enabled_tools:
-                        self.enabled_tools.append('bigquery')
-                    logger.info("BigQueryTool initialized successfully (lazy)")
+                    self._tool_cache['firestore_tool'] = FirestoreTool(self.firestore_client_wrapper)
+                    if 'firestore' not in self.enabled_tools:
+                        self.enabled_tools.append('firestore')
+                    logger.info("FirestoreTool initialized successfully (lazy)")
                 except Exception as e:
-                    logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
-                    self._tool_cache['bigquery_tool'] = None
-            elif 'bigquery' in self.requested_tools:
-                logger.warning("BigQueryTool not initialized: missing bq_client_wrapper")
-                self._tool_cache['bigquery_tool'] = None
+                    logger.error(f"Failed to initialize FirestoreTool: {str(e)}")
+                    self._tool_cache['firestore_tool'] = None
+            elif 'firestore' in self.requested_tools:
+                logger.warning("FirestoreTool not initialized: missing firestore_client_wrapper")
+                self._tool_cache['firestore_tool'] = None
             else:
-                self._tool_cache['bigquery_tool'] = None
-        return self._tool_cache['bigquery_tool']
+                self._tool_cache['firestore_tool'] = None
+        return self._tool_cache['firestore_tool']
     
     @property
     def search_tool(self):
@@ -82,9 +149,23 @@ class ToolUse:
         if 'search_tool' not in self._tool_cache:
             if 'search' in self.requested_tools and self.storage_client and self.secret_client:
                 try:
+                    # Get client_name from firestore_client_wrapper
+                    client_name = None
+                    if self.firestore_client_wrapper:
+                        if hasattr(self.firestore_client_wrapper, 'client_name'):
+                            client_name = self.firestore_client_wrapper.client_name
+                        elif hasattr(self.firestore_client_wrapper, 'domain'):
+                            # Extract client_name from domain by removing non-alphanumeric characters
+                            import re
+                            client_name = re.sub(r'[^a-zA-Z0-9]', '', self.firestore_client_wrapper.domain)
+                    
+                    if not client_name:
+                        raise ValueError("Cannot determine client_name from firestore_client_wrapper")
+                    
                     self._tool_cache['search_tool'] = SearchTool(
                         self.storage_client, 
-                        self.secret_client, 
+                        self.secret_client,
+                        client_name,
                         read_document_ids=self.read_document_ids
                     )
                     if 'search' not in self.enabled_tools:
@@ -136,11 +217,12 @@ class ToolUse:
         if self._tools_cache is None:
             self._tools_cache = []
             
-            # Add BigQuery tools if available
-            if self.bigquery_tool:
+            # Add Firestore tools if available
+            if self.firestore_tool:
                 self._tools_cache.extend([
-                    self.bigquery_tool.query_bigquery_property,
+                    self.firestore_tool.query_firestore_property,
                 ])
+                logger.info("Firestore tools added to tools list (lazy)")
             
             # Add Search tools if available
             if self.search_tool:
@@ -175,11 +257,12 @@ class ToolUse:
         if self._function_map_cache is None:
             self._function_map_cache = {}
             
-            # Add BigQuery functions if available
-            if self.bigquery_tool:
+            # Add Firestore functions if available
+            if self.firestore_tool:
                 self._function_map_cache.update({
-                    "query_bigquery": self.bigquery_tool.query_bigquery,
+                    "query_firestore": self.firestore_tool.query_firestore,
                 })
+                logger.info("Firestore functions added to function_map (lazy)")
             
             # Add search function if available
             if self.search_tool:

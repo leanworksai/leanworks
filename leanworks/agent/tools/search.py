@@ -38,23 +38,23 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, storage_client, secret_client, read_document_ids: set | None = None):
+    def __init__(self, storage_client, secret_client, client_name: str, read_document_ids: set | None = None):
         
-        model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+        model_client = OpenAI(api_key=secret_client.get("claude-api-key"), base_url="https://api.anthropic.com/v1")
         
         # Use the module-level imports directly
-        embedding_model_client = GoogleEmbedding(secret_client.get("GEMINI_API_KEY"))
+        embedding_model_client = GoogleEmbedding(secret_client.get("gemini-api-key"))
         
         # Initialize vector database client
         vectordb_client = PineconeHybridIndex(
-            pinecone_key=secret_client.get("PINECONE_API_KEY"),
+            pinecone_key=secret_client.get("pinecone-api-key"),
             embedding_model_client=embedding_model_client
         )
         
         # Load hybrid indexes
         vectordb_client.load_hybrid_index(
-            dense_index_name=secret_client.client_name + "-dense",
-            sparse_index_name=secret_client.client_name + "-sparse"
+            dense_index_name=client_name + "-dense",
+            sparse_index_name=client_name + "-sparse"
         )
         
         self.chat = AsyncChat(
