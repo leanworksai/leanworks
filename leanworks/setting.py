@@ -122,12 +122,12 @@ AGENT_SYSTEM_PROMPT = """
 
     <tool_calling>
     You have below tools at your disposal to answer project management related questions.
-    Bigquery tools: query_bigquery
+    PostgreSQL tools: query_postgres
     Search tools: search_documents
     Outlook tools: list_upcoming_meetings,find_available_slots
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Bigquery tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, Bigquery tools should be your primary tools to answer questions.
+    - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, PostgreSQL tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
@@ -234,61 +234,131 @@ Generate an improved response now."""
 
 import logging
 import json
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 logger = logging.getLogger(__name__)
 
-# Table schemas template in string format
-# Use {dataset_id} as placeholder for the actual dataset name
+# Firestore client initialization (class-level singleton)
+_firestore_initialized = False
+_firestore_lock = None
+_firestore_db = None
+
+def _get_firestore_client():
+    """Initialize and return Firestore client."""
+    global _firestore_initialized, _firestore_lock, _firestore_db
+    
+    if _firestore_lock is None:
+        import threading
+        _firestore_lock = threading.Lock()
+    
+    if not _firestore_initialized:
+        with _firestore_lock:
+            if not _firestore_initialized:
+                try:
+                    if not firebase_admin._apps:
+                        cred = credentials.Certificate("gcp_credential.json")
+                        firebase_admin.initialize_app(cred)
+                    # Use Firebase Admin SDK's firestore.client() with database_id parameter
+                    # This is the recommended approach per Firebase documentation (firebase-admin 7.1.0+)
+                    _firestore_db = firestore.client(database_id="leanworks-prod")
+                    _firestore_initialized = True
+                    logger.info("Firestore client initialized (database: leanworks-prod)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Firestore: {e}")
+                    raise
+    return _firestore_db
+
+# PostgreSQL table schemas template in string format (PostgreSQL tables with snake_case fields)
+# Use {dataset_id} as placeholder for the actual dataset name (for backward compatibility)
+# All tables are in the PostgreSQL database (no path structure)
 TABLE_SCHEMAS = """
-**Table: leanworks.{dataset_id}.project_config**
-  Description: Configuration and metadata for projects, including project details, collaborators, and settings
-  - created_by (STRING)
-  - project_id (STRING) - Id of the project. This is not the project name.
-  - project_name (STRING)
-  - description (STRING) - The project description and scope.
-  - last_n_days (INTEGER)
-  - collaborators (STRING)
-  - created_ts (INTEGER) - Unix timestamp
+**Table: tasks**
+  Description: Stores task/action items for projects
+  Primary Key: id field
+  - id (TEXT) - Task ID (primary key)
+  - title (TEXT) - Task name/title
+  - assignee_id (TEXT) - User ID assigned to this task (user email)
+  - project_id (TEXT) - Project ID this task belongs to (project name)
+  - created_at (BIGINT) - Creation timestamp in milliseconds
+  - created_date (TEXT) - Creation date in YYYY-MM-DD format
+  - updated_at (BIGINT) - Last update timestamp in milliseconds
+  - due_date (TEXT) - Deadline in YYYY-MM-DD format
+  - status (TEXT) - Task status: 'todo', 'in-progress', 'completed', 'blocked'
+  - description (TEXT) - Detailed task description
+  - priority (TEXT) - Priority level: 'high', 'medium', 'low'
+  - reason (TEXT) - Reason for task creation/update
+  - tags (JSONB/ARRAY) - Optional tags
+  - progress_updates (JSONB/ARRAY) - Optional progress updates
+  - comments (JSONB/ARRAY) - Optional comments
+  - estimated_hours (NUMERIC) - Optional estimated hours
+  - actual_hours (NUMERIC) - Optional actual hours spent
+  - teams (JSONB/ARRAY) - Optional team associations
+  - created_by (TEXT) - Optional creator ID
+  - assignee_avatar (TEXT) - Optional assignee avatar URL
+  - project (TEXT) - Optional project name
 
-**Table: leanworks.{dataset_id}.tasks**
-  Description: Individual tasks within projects, tracking task details, status, priority, and deadlines
-  - project_id (STRING) - Id of the project. This is not the project name.
-  - user_id (STRING) - user email under company domain. This is not user name.
-  - task_id (STRING) - Id of the task. This is not the task name.
-  - created_at (FLOAT) - Unix timestamp
-  - updated_at (FLOAT) - Unix timestamp
-  - task_name (STRING)
-  - status (STRING) - Status includes 'to_do', 'in_progress', 'completed and 'blocked'
-  - description (STRING) - Task details. It may also include additional information not covered by the other fields.
-  - priority (STRING) - Priority includes 'high', 'medium' and 'low'
-  - deadline (FLOAT) - Unix timestamp
-  - reason (STRING) - The reason for the task to be created. If it is synchronized from 3rd party provider, it will include label like 'Synced from GitLab project' or 'Synced from Jira project'
+**Table: task_progress_updates**
+  Description: Stores work updates/progress reports for team members
+  Primary Key: update_id field
+  - update_id (TEXT) - Unique update ID (primary key)
+  - date_id (TEXT) - Date in YYYY-MM-DD format
+  - project_id (TEXT) - Project ID (project name)
+  - user_id (TEXT) - User ID who made the update (user email)
+  - timestamp (BIGINT) - Update timestamp in milliseconds
+  - update (TEXT) - Update description/content
+  - associated_tasks (TEXT) - JSON string array of task IDs (e.g., '["task1", "task2"]')
+  - reason (TEXT) - Supporting evidence/reason for the update
 
-**Table: leanworks.{dataset_id}.update_summaries**
-  Description: Daily summaries of project updates, providing high-level overview of project progress
-  - project_id (STRING) - Id of the project. This is not the project name.
-  - update_summary (STRING) - The update summary content.
-  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update summary.
+**Table: project_progress_updates**
+  Description: Stores aggregated summaries of updates per project per day
+  Primary Key: project_id, date_id (composite)
+  - project_id (TEXT) - Project ID (project name)
+  - date_id (TEXT) - Date in YYYY-MM-DD format
+  - update_summary (TEXT) - AI-generated summary of all updates
+  - created_at (BIGINT) - Optional timestamp in milliseconds when summary was created
 
-**Table: leanworks.{dataset_id}.updates**
-  Description: Individual project updates from team members, including progress reports and task associations
-  - date_id (DATE) - For example, '2025-08-01' - It is the date of the update.
-  - project_id (STRING) - Id of the project. This is not the project name.
-  - user_id (STRING) - user email under company domain. This is not user name.
-  - update_id (STRING) - Id of the update. This is not the update content.
-  - ts (FLOAT) - Unix timestamp
-  - update (STRING) - The update content.
-  - associated_tasks (STRING) - It is a list of task ids. For example, ['task_1', 'task_2', 'task_3']
-  - reason (STRING) - The reason for the update to be created.
+**Table: users**
+  Description: Stores user information
+  Primary Key: email field
+  - email (TEXT) - User email (primary key, also used as user_id internally)
+  - first_name (TEXT) - User's first name
+  - last_name (TEXT) - User's last name
+  - job_title (TEXT) - Optional user's job title
+  - job_responsibilities (TEXT) - Optional user's job responsibilities
+  - timezone (TEXT) - Optional timezone (e.g., 'America/New_York')
 
-**Table: leanworks.{dataset_id}.user_config**
-  Description: User profile information and configuration settings for team members
-  - user_id (STRING) - user email under company domain. This is not user name.
-  - first_name (STRING)
-  - last_name (STRING)
-  - alias_email (STRING) - Secondary user id/ email address for the user.
-  - job_title (STRING)
-  - job_responsibilities (STRING)
-  - timezone (STRING) - The timezone of the user. For example, 'America/New_York'
+**Table: projects**
+  Description: Stores project information
+  Primary Key: name field (or id field)
+  - id (TEXT/UUID) - Project ID (primary key)
+  - name (TEXT) - Project name
+  - description (TEXT) - Project description
+  - collaborators (JSONB/ARRAY) - Array of user IDs (emails)
+  - detailed_description (TEXT) - Optional extended project description
+  - created_by (TEXT) - Optional creator email
+  - created_at (BIGINT) - Optional creation timestamp in milliseconds
+
+**Table: integrations**
+  Description: Stores external integration configurations
+  Primary Key: integration name (e.g., 'gitlab', 'atlassian', 'jira')
+  - connected (BOOLEAN) - Whether the integration is enabled
+  - sub_tools (JSONB) - Sub-tool configurations
+  - Additional integration-specific configuration fields
+
+**Table: teams**
+  Description: Team information and membership (optional table)
+  Primary Key: id field
+  - id (TEXT) - Team ID (primary key)
+  - name (TEXT) - The team name
+  - description (TEXT) - Team description
+  - members (JSONB/ARRAY) - List of user emails who are team members
+  - created_by (TEXT) - Email of the user who created the team
+  - created_at (BIGINT) - Unix timestamp in milliseconds
+  - team_name (TEXT) - The team name (alternative field name)
+  - projects (JSONB/ARRAY) - List of project IDs associated with the team
+  - leads (JSONB/ARRAY) - List of user emails who are team leads
+  - settings (JSONB) - Team-specific settings and configurations
 """
 
 def get_tables_and_schemas(dataset_id: str) -> str:
@@ -304,29 +374,34 @@ def get_tables_and_schemas(dataset_id: str) -> str:
     # Replace {dataset_id} placeholder with actual dataset_id
     return TABLE_SCHEMAS.format(dataset_id=dataset_id)
 
-def get_client_info(bq_client, user_id: str) -> str:
+def get_client_info(user_id: str) -> tuple:
     """
-    Get client name from BigQuery table for a given user_id.
+    Get client domain from user_id email.
     
     Args:
-        bq_client: Initialized BigQuery client
-        user_id: ID of the user
+        firestore_client: Initialized Firestore client (not used, kept for backward compatibility)
+        user_id: ID of the user (email address)
         
     Returns:
-        Client name as string, available tools as list of strings
+        Tuple of (domain, available_tools) where:
+        - domain: The domain extracted from user_id email (e.g., 'leanworks.ai')
+        - available_tools: Empty list (tools are determined by toolkit)
     """
-    query = f"""
-    SELECT client_name, available_tools
-    FROM `leanworks.clients.config`
-    WHERE domain = '{user_id.split("@")[1]}'
-    LIMIT 1
-    """
+    try:
+        # Extract domain from user_id email
+        if "@" not in user_id:
+            logger.error(f"Invalid user_id format (expected email): {user_id}")
+            raise ValueError(f"Invalid user_id format: {user_id}")
+        
+        domain = user_id.split("@")[1]
+        
+        # Return domain with empty tools list
+        # Tools will be determined by the toolkit based on initialization
+        logger.info(f"Retrieved domain for user {user_id}: {domain}")
+        return domain, []
     
-    query_job = bq_client.query(query)
-    results = query_job.result()
-    for row in results:
-        if row.available_tools:
-            available_tools = row.available_tools.split(",")
-        else:
-            available_tools = []
-        return row.client_name, available_tools
+    except Exception as e:
+        logger.error(f"Error getting client info for user {user_id}: {str(e)}")
+        # Fallback: extract domain and return empty tools list
+        domain = user_id.split("@")[1] if "@" in user_id else "leanworks.ai"
+        return domain, []

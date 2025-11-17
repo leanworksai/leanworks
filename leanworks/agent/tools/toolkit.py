@@ -1,5 +1,4 @@
-
-from leanworks.agent.tools.bigquery import BigQueryTool
+from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
@@ -8,34 +7,39 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, bq_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
+    def __init__(self, postgres_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
         Args:
-            bq_client_wrapper: BigQuery client wrapper that has dataset_id attribute
+            postgres_client_wrapper: PostgreSQL client wrapper that has domain attribute
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of additional tools to enable. These will be added to the default tools ['search', 'bigquery', 'duckdb']
+            tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
+                   External tools (e.g., 'outlook') should be explicitly provided in this list.
         """
         # Store initialization parameters for lazy loading
-        self.bq_client_wrapper = bq_client_wrapper
+        self.postgres_client_wrapper = postgres_client_wrapper
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         self.user_id = user_id
         self.session_id = session_id
         
+        # Internal tools that are always available
+        internal_tools = ['search', 'postgres', 'duckdb']
+        
         # Set default tools if not provided
         if tools is None:
-            requested_tools = ['search', 'bigquery', 'duckdb']
+            requested_tools = internal_tools
         else:
             # Add provided tools to default tools (with deduplication)
-            default_tools = ['search', 'bigquery', 'duckdb']
+            default_tools = internal_tools
             requested_tools = list(set(default_tools + tools))  # Remove duplicates while preserving functionality
         
         self.requested_tools = requested_tools
+        logger.info(f"Final enabled tools: {self.requested_tools}")
         
         # Tool instance cache - tools are initialized only when first accessed
         self._tool_cache = {}
@@ -48,33 +52,34 @@ class ToolUse:
         self._function_map_cache = None
         
         # Register DuckDB tools immediately (stateless wrappers; no instance required)
-        if 'duckdb' in requested_tools:
+        if 'duckdb' in self.requested_tools:
             self.enabled_tools.append('duckdb')
             logger.info("DuckDB tools registered (stateless)")
         
         # Log initialization completion
-        logger.info(f"ToolUse initialized with lazy loading for tools: {requested_tools}")
+        logger.info(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
+    
 
     # Lazy loading properties for individual tools
     @property
-    def bigquery_tool(self):
-        """Lazy-load BigQuery tool on first access."""
-        if 'bigquery_tool' not in self._tool_cache:
-            if 'bigquery' in self.requested_tools and self.bq_client_wrapper:
+    def postgres_tool(self):
+        """Lazy-load PostgreSQL tool on first access."""
+        if 'postgres_tool' not in self._tool_cache:
+            if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
                 try:
-                    self._tool_cache['bigquery_tool'] = BigQueryTool(self.bq_client_wrapper)
-                    if 'bigquery' not in self.enabled_tools:
-                        self.enabled_tools.append('bigquery')
-                    logger.info("BigQueryTool initialized successfully (lazy)")
+                    self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper)
+                    if 'postgres' not in self.enabled_tools:
+                        self.enabled_tools.append('postgres')
+                    logger.info("PostgresTool initialized successfully (lazy)")
                 except Exception as e:
-                    logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
-                    self._tool_cache['bigquery_tool'] = None
-            elif 'bigquery' in self.requested_tools:
-                logger.warning("BigQueryTool not initialized: missing bq_client_wrapper")
-                self._tool_cache['bigquery_tool'] = None
+                    logger.error(f"Failed to initialize PostgresTool: {str(e)}")
+                    self._tool_cache['postgres_tool'] = None
+            elif 'postgres' in self.requested_tools:
+                logger.warning("PostgresTool not initialized: missing postgres_client_wrapper")
+                self._tool_cache['postgres_tool'] = None
             else:
-                self._tool_cache['bigquery_tool'] = None
-        return self._tool_cache['bigquery_tool']
+                self._tool_cache['postgres_tool'] = None
+        return self._tool_cache['postgres_tool']
     
     @property
     def search_tool(self):
@@ -82,9 +87,23 @@ class ToolUse:
         if 'search_tool' not in self._tool_cache:
             if 'search' in self.requested_tools and self.storage_client and self.secret_client:
                 try:
+                    # Get client_name from postgres_client_wrapper
+                    client_name = None
+                    if self.postgres_client_wrapper:
+                        if hasattr(self.postgres_client_wrapper, 'client_name'):
+                            client_name = self.postgres_client_wrapper.client_name
+                        elif hasattr(self.postgres_client_wrapper, 'domain'):
+                            # Extract client_name from domain by removing non-alphanumeric characters
+                            import re
+                            client_name = re.sub(r'[^a-zA-Z0-9]', '', self.postgres_client_wrapper.domain)
+                    
+                    if not client_name:
+                        raise ValueError("Cannot determine client_name from postgres_client_wrapper")
+                    
                     self._tool_cache['search_tool'] = SearchTool(
                         self.storage_client, 
-                        self.secret_client, 
+                        self.secret_client,
+                        client_name,
                         read_document_ids=self.read_document_ids
                     )
                     if 'search' not in self.enabled_tools:
@@ -136,11 +155,12 @@ class ToolUse:
         if self._tools_cache is None:
             self._tools_cache = []
             
-            # Add BigQuery tools if available
-            if self.bigquery_tool:
+            # Add PostgreSQL tools if available
+            if self.postgres_tool:
                 self._tools_cache.extend([
-                    self.bigquery_tool.query_bigquery_property,
+                    self.postgres_tool.query_postgres_property,
                 ])
+                logger.info("PostgreSQL tools added to tools list (lazy)")
             
             # Add Search tools if available
             if self.search_tool:
@@ -175,11 +195,12 @@ class ToolUse:
         if self._function_map_cache is None:
             self._function_map_cache = {}
             
-            # Add BigQuery functions if available
-            if self.bigquery_tool:
+            # Add PostgreSQL functions if available
+            if self.postgres_tool:
                 self._function_map_cache.update({
-                    "query_bigquery": self.bigquery_tool.query_bigquery,
+                    "query_postgres": self.postgres_tool.query_postgres,
                 })
+                logger.info("PostgreSQL functions added to function_map (lazy)")
             
             # Add search function if available
             if self.search_tool:

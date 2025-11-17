@@ -1,7 +1,7 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.bigquery import BigQueryTool
 from leanworks.agent.tools.outlook import OutlookTool
+from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.duckdb import (
     DuckDBTool,
     save_data,
@@ -14,7 +14,7 @@ from leanworks.agent.tools.duckdb import (
 __all__ = [
     'ToolUse',
     'SearchTool',
-    'BigQueryTool',
+    'PostgresTool',
     'OutlookTool',
     'DuckDBTool',
     'save_data',

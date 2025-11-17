@@ -118,6 +118,13 @@ class MemoryManager:
                 "recent_turns_to_keep": 25,
                 "summarization_model": "claude-3-haiku-20240307"
             },
+            "claude-haiku-4": {
+                "max_context_tokens": 180000,
+                "trigger_threshold": 150000,
+                "summary_max_tokens": 1500,
+                "recent_turns_to_keep": 20,
+                "summarization_model": "claude-3-haiku-20240307"
+            },
             # Claude 3.7 - 200K context  
             "claude-3-7-sonnet": {
                 "max_context_tokens": 180000,
