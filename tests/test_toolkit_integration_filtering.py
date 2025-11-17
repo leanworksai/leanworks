@@ -2,8 +2,8 @@
 Test suite for ToolUse integration filtering functionality.
 
 This test verifies that:
-1. Internal tools (firestore, search) are always enabled
-2. External tools are filtered based on Firestore integrations collection
+1. Internal tools (postgres, search, duckdb) are always enabled
+2. External tools are filtered based on PostgreSQL integrations table
 3. Tools not in the integration list are properly disabled
 """
 
@@ -18,29 +18,21 @@ logger = logging.getLogger(__name__)
 def test_integration_filtering_with_outlook():
     """Test that outlook tool is enabled when it's in the integration list"""
     
-    # Mock Firestore client wrapper
-    firestore_wrapper = Mock()
-    firestore_wrapper.domain = "test.leanworks.ai"
+    # Mock PostgreSQL client wrapper
+    postgres_wrapper = Mock()
+    postgres_wrapper.domain = "test.leanworks.ai"
     
-    # Mock Firestore client and integration documents
-    mock_db = MagicMock()
-    mock_collection = MagicMock()
-    mock_db.collection.return_value = mock_collection
-    
-    # Create mock integration documents
-    outlook_doc = Mock()
-    outlook_doc.to_dict.return_value = {'type': 'outlook', 'enabled': True}
-    
-    duckdb_doc = Mock()
-    duckdb_doc.to_dict.return_value = {'type': 'duckdb', 'enabled': True}
-    
-    mock_collection.stream.return_value = [outlook_doc, duckdb_doc]
-    
-    # Patch _get_firestore_client to return our mock
-    with patch('leanworks.setting._get_firestore_client', return_value=mock_db):
+    # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
+    with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
+        mock_postgres_instance = MagicMock()
+        mock_postgres_instance.query_postgres.return_value = [
+            {'integration_name': 'outlook', 'connected': True},
+            {'integration_name': 'duckdb', 'connected': True}
+        ]
+        mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            firestore_client_wrapper=firestore_wrapper,
+            postgres_client_wrapper=postgres_wrapper,
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
@@ -50,7 +42,7 @@ def test_integration_filtering_with_outlook():
         assert 'outlook' in tool_use.requested_tools, "Outlook should be enabled (in integration list)"
         
         # Verify internal tools are always included
-        assert 'firestore' in tool_use.requested_tools, "Firestore should always be enabled (internal tool)"
+        assert 'postgres' in tool_use.requested_tools, "PostgreSQL should always be enabled (internal tool)"
         assert 'search' in tool_use.requested_tools, "Search should always be enabled (internal tool)"
         
         logger.info(f"✅ Test passed: outlook enabled with integrations: {tool_use.requested_tools}")
@@ -59,26 +51,20 @@ def test_integration_filtering_with_outlook():
 def test_integration_filtering_without_outlook():
     """Test that outlook tool is disabled when it's NOT in the integration list"""
     
-    # Mock Firestore client wrapper
-    firestore_wrapper = Mock()
-    firestore_wrapper.domain = "test.leanworks.ai"
+    # Mock PostgreSQL client wrapper
+    postgres_wrapper = Mock()
+    postgres_wrapper.domain = "test.leanworks.ai"
     
-    # Mock Firestore client with no outlook integration
-    mock_db = MagicMock()
-    mock_collection = MagicMock()
-    mock_db.collection.return_value = mock_collection
-    
-    # Only duckdb integration, no outlook
-    duckdb_doc = Mock()
-    duckdb_doc.to_dict.return_value = {'type': 'duckdb', 'enabled': True}
-    
-    mock_collection.stream.return_value = [duckdb_doc]
-    
-    # Patch _get_firestore_client to return our mock
-    with patch('leanworks.setting._get_firestore_client', return_value=mock_db):
+    # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
+    with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
+        mock_postgres_instance = MagicMock()
+        mock_postgres_instance.query_postgres.return_value = [
+            {'integration_name': 'duckdb', 'connected': True}
+        ]
+        mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            firestore_client_wrapper=firestore_wrapper,
+            postgres_client_wrapper=postgres_wrapper,
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
@@ -88,7 +74,7 @@ def test_integration_filtering_without_outlook():
         assert 'outlook' not in tool_use.requested_tools, "Outlook should be disabled (not in integration list)"
         
         # Verify internal tools are always included
-        assert 'firestore' in tool_use.requested_tools, "Firestore should always be enabled (internal tool)"
+        assert 'postgres' in tool_use.requested_tools, "PostgreSQL should always be enabled (internal tool)"
         assert 'search' in tool_use.requested_tools, "Search should always be enabled (internal tool)"
         
         # Verify duckdb is included
@@ -98,29 +84,26 @@ def test_integration_filtering_without_outlook():
 
 
 def test_internal_tools_always_enabled():
-    """Test that internal tools (firestore, search, duckdb) are always enabled even with empty integrations"""
+    """Test that internal tools (postgres, search, duckdb) are always enabled even with empty integrations"""
     
-    # Mock Firestore client wrapper
-    firestore_wrapper = Mock()
-    firestore_wrapper.domain = "test.leanworks.ai"
+    # Mock PostgreSQL client wrapper
+    postgres_wrapper = Mock()
+    postgres_wrapper.domain = "test.leanworks.ai"
     
-    # Mock Firestore client with NO integrations
-    mock_db = MagicMock()
-    mock_collection = MagicMock()
-    mock_db.collection.return_value = mock_collection
-    mock_collection.stream.return_value = []  # No integrations
-    
-    # Patch _get_firestore_client to return our mock
-    with patch('leanworks.setting._get_firestore_client', return_value=mock_db):
+    # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
+    with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
+        mock_postgres_instance = MagicMock()
+        mock_postgres_instance.query_postgres.return_value = []  # No integrations
+        mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse without any additional tools
         tool_use = ToolUse(
-            firestore_client_wrapper=firestore_wrapper,
+            postgres_client_wrapper=postgres_wrapper,
             storage_client=Mock(),
             secret_client=Mock()
         )
         
         # Verify internal tools are always included
-        assert 'firestore' in tool_use.requested_tools, "Firestore should always be enabled (internal tool)"
+        assert 'postgres' in tool_use.requested_tools, "PostgreSQL should always be enabled (internal tool)"
         assert 'search' in tool_use.requested_tools, "Search should always be enabled (internal tool)"
         assert 'duckdb' in tool_use.requested_tools, "DuckDB should always be enabled (internal tool)"
         
@@ -131,24 +114,27 @@ def test_internal_tools_always_enabled():
 
 
 def test_integration_filtering_error_handling():
-    """Test that integration filtering handles Firestore errors gracefully"""
+    """Test that integration filtering handles PostgreSQL errors gracefully"""
     
-    # Mock Firestore client wrapper
-    firestore_wrapper = Mock()
-    firestore_wrapper.domain = "test.leanworks.ai"
+    # Mock PostgreSQL client wrapper
+    postgres_wrapper = Mock()
+    postgres_wrapper.domain = "test.leanworks.ai"
     
-    # Patch _get_firestore_client to raise an exception
-    with patch('leanworks.setting._get_firestore_client', side_effect=Exception("Firestore error")):
+    # Mock PostgresTool.query_postgres method to raise an exception
+    with patch('leanworks.agent.tools.toolkit.PostgresTool') as mock_postgres_class:
+        mock_postgres_instance = MagicMock()
+        mock_postgres_instance.query_postgres.side_effect = Exception("PostgreSQL error")
+        mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            firestore_client_wrapper=firestore_wrapper,
+            postgres_client_wrapper=postgres_wrapper,
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
         )
         
         # Verify internal tools are still enabled
-        assert 'firestore' in tool_use.requested_tools, "Firestore should always be enabled (internal tool)"
+        assert 'postgres' in tool_use.requested_tools, "PostgreSQL should always be enabled (internal tool)"
         assert 'search' in tool_use.requested_tools, "Search should always be enabled (internal tool)"
         assert 'duckdb' in tool_use.requested_tools, "DuckDB should always be enabled (internal tool)"
         
@@ -159,39 +145,31 @@ def test_integration_filtering_error_handling():
 
 
 def test_integration_type_field_variations():
-    """Test that integration filtering works with different field names (type vs integrationType)"""
+    """Test that integration filtering works with integration_name and integration_id fields"""
     
-    # Mock Firestore client wrapper
-    firestore_wrapper = Mock()
-    firestore_wrapper.domain = "test.leanworks.ai"
+    # Mock PostgreSQL client wrapper
+    postgres_wrapper = Mock()
+    postgres_wrapper.domain = "test.leanworks.ai"
     
-    # Mock Firestore client with different field names
-    mock_db = MagicMock()
-    mock_collection = MagicMock()
-    mock_db.collection.return_value = mock_collection
-    
-    # One doc uses 'type', another uses 'integrationType'
-    outlook_doc = Mock()
-    outlook_doc.to_dict.return_value = {'type': 'outlook', 'enabled': True}
-    
-    gitlab_doc = Mock()
-    gitlab_doc.to_dict.return_value = {'integrationType': 'gitlab', 'enabled': True}
-    
-    mock_collection.stream.return_value = [outlook_doc, gitlab_doc]
-    
-    # Patch _get_firestore_client to return our mock
-    with patch('leanworks.setting._get_firestore_client', return_value=mock_db):
+    # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
+    with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
+        mock_postgres_instance = MagicMock()
+        mock_postgres_instance.query_postgres.return_value = [
+            {'integration_name': 'outlook', 'connected': True},
+            {'integration_id': 'gitlab', 'connected': True}  # No integration_name, fallback to integration_id
+        ]
+        mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse
         tool_use = ToolUse(
-            firestore_client_wrapper=firestore_wrapper,
+            postgres_client_wrapper=postgres_wrapper,
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook', 'gitlab']
         )
         
         # Verify both integrations are recognized
-        assert 'outlook' in tool_use.requested_tools, "Outlook should be enabled (type field)"
-        assert 'gitlab' in tool_use.requested_tools, "GitLab should be enabled (integrationType field)"
+        assert 'outlook' in tool_use.requested_tools, "Outlook should be enabled (integration_name field)"
+        assert 'gitlab' in tool_use.requested_tools, "GitLab should be enabled (integration_id fallback)"
         
         logger.info(f"✅ Test passed: field variations handled: {tool_use.requested_tools}")
 

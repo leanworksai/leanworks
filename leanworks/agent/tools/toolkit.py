@@ -1,4 +1,4 @@
-from leanworks.agent.tools.firestore import FirestoreTool
+from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
@@ -7,32 +7,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, firestore_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
+    def __init__(self, postgres_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
         Args:
-            firestore_client_wrapper: Firestore client wrapper that has domain attribute
+            postgres_client_wrapper: PostgreSQL client wrapper that has domain attribute
             storage_client: Google Cloud Storage client
             secret_client: Secret management client
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of additional tools to enable. These will be added to the internal tools ['search', 'firestore', 'duckdb'] which are always available.
-                   External tools (e.g., 'outlook') are only enabled if they appear in the Firestore integrations collection.
+            tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
+                   External tools (e.g., 'outlook') should be explicitly provided in this list.
         """
         # Store initialization parameters for lazy loading
-        self.firestore_client_wrapper = firestore_client_wrapper
+        self.postgres_client_wrapper = postgres_client_wrapper
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         self.user_id = user_id
         self.session_id = session_id
         
-        # Get available integrations from Firestore
-        available_integrations = self._get_available_integrations()
-        logger.info(f"Available integrations from Firestore: {available_integrations}")
-        
         # Internal tools that are always available
-        internal_tools = ['search', 'firestore', 'duckdb']
+        internal_tools = ['search', 'postgres', 'duckdb']
         
         # Set default tools if not provided
         if tools is None:
@@ -42,22 +38,7 @@ class ToolUse:
             default_tools = internal_tools
             requested_tools = list(set(default_tools + tools))  # Remove duplicates while preserving functionality
         
-        # Filter requested tools based on available integrations
-        # Always include internal tools (firestore, search, duckdb), filter others
-        filtered_tools = []
-        for tool in requested_tools:
-            if tool in internal_tools:
-                # Always include internal tools
-                filtered_tools.append(tool)
-            elif tool in available_integrations:
-                # Include external tools only if they're in the integration list
-                filtered_tools.append(tool)
-                logger.info(f"Tool '{tool}' enabled (found in integrations)")
-            else:
-                # Skip tools not in integrations
-                logger.info(f"Tool '{tool}' disabled (not found in integrations)")
-        
-        self.requested_tools = filtered_tools
+        self.requested_tools = requested_tools
         logger.info(f"Final enabled tools: {self.requested_tools}")
         
         # Tool instance cache - tools are initialized only when first accessed
@@ -78,70 +59,27 @@ class ToolUse:
         # Log initialization completion
         logger.info(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
     
-    def _get_available_integrations(self):
-        """
-        Query Firestore integrations collection to get list of available integrations.
-        
-        Returns:
-            list: List of integration types (e.g., ['outlook', 'duckdb', 'gitlab', 'jira'])
-        """
-        try:
-            if not self.firestore_client_wrapper:
-                logger.warning("No Firestore client wrapper available, cannot fetch integrations")
-                return []
-            
-            # Get domain from wrapper
-            domain = getattr(self.firestore_client_wrapper, 'domain', None)
-            if not domain:
-                logger.warning("Domain not available in Firestore client wrapper")
-                return []
-            
-            # Initialize Firestore client using FirestoreTool's method
-            from leanworks.setting import _get_firestore_client
-            db = _get_firestore_client()
-            
-            # Query integrations collection
-            collection_path = f"domains/{domain}/integrations"
-            integrations_ref = db.collection(collection_path)
-            integrations_docs = integrations_ref.stream()
-            
-            # Extract integration types
-            available_integrations = []
-            for doc in integrations_docs:
-                doc_data = doc.to_dict()
-                if doc_data:
-                    # Get integration type (e.g., 'outlook', 'gitlab', 'jira')
-                    integration_type = doc_data.get('type') or doc_data.get('integrationType')
-                    if integration_type:
-                        available_integrations.append(integration_type.lower())
-            
-            logger.info(f"Found {len(available_integrations)} integrations in Firestore for domain {domain}")
-            return available_integrations
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch integrations from Firestore: {str(e)}")
-            return []
 
     # Lazy loading properties for individual tools
     @property
-    def firestore_tool(self):
-        """Lazy-load Firestore tool on first access."""
-        if 'firestore_tool' not in self._tool_cache:
-            if 'firestore' in self.requested_tools and self.firestore_client_wrapper:
+    def postgres_tool(self):
+        """Lazy-load PostgreSQL tool on first access."""
+        if 'postgres_tool' not in self._tool_cache:
+            if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
                 try:
-                    self._tool_cache['firestore_tool'] = FirestoreTool(self.firestore_client_wrapper)
-                    if 'firestore' not in self.enabled_tools:
-                        self.enabled_tools.append('firestore')
-                    logger.info("FirestoreTool initialized successfully (lazy)")
+                    self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper)
+                    if 'postgres' not in self.enabled_tools:
+                        self.enabled_tools.append('postgres')
+                    logger.info("PostgresTool initialized successfully (lazy)")
                 except Exception as e:
-                    logger.error(f"Failed to initialize FirestoreTool: {str(e)}")
-                    self._tool_cache['firestore_tool'] = None
-            elif 'firestore' in self.requested_tools:
-                logger.warning("FirestoreTool not initialized: missing firestore_client_wrapper")
-                self._tool_cache['firestore_tool'] = None
+                    logger.error(f"Failed to initialize PostgresTool: {str(e)}")
+                    self._tool_cache['postgres_tool'] = None
+            elif 'postgres' in self.requested_tools:
+                logger.warning("PostgresTool not initialized: missing postgres_client_wrapper")
+                self._tool_cache['postgres_tool'] = None
             else:
-                self._tool_cache['firestore_tool'] = None
-        return self._tool_cache['firestore_tool']
+                self._tool_cache['postgres_tool'] = None
+        return self._tool_cache['postgres_tool']
     
     @property
     def search_tool(self):
@@ -149,18 +87,18 @@ class ToolUse:
         if 'search_tool' not in self._tool_cache:
             if 'search' in self.requested_tools and self.storage_client and self.secret_client:
                 try:
-                    # Get client_name from firestore_client_wrapper
+                    # Get client_name from postgres_client_wrapper
                     client_name = None
-                    if self.firestore_client_wrapper:
-                        if hasattr(self.firestore_client_wrapper, 'client_name'):
-                            client_name = self.firestore_client_wrapper.client_name
-                        elif hasattr(self.firestore_client_wrapper, 'domain'):
+                    if self.postgres_client_wrapper:
+                        if hasattr(self.postgres_client_wrapper, 'client_name'):
+                            client_name = self.postgres_client_wrapper.client_name
+                        elif hasattr(self.postgres_client_wrapper, 'domain'):
                             # Extract client_name from domain by removing non-alphanumeric characters
                             import re
-                            client_name = re.sub(r'[^a-zA-Z0-9]', '', self.firestore_client_wrapper.domain)
+                            client_name = re.sub(r'[^a-zA-Z0-9]', '', self.postgres_client_wrapper.domain)
                     
                     if not client_name:
-                        raise ValueError("Cannot determine client_name from firestore_client_wrapper")
+                        raise ValueError("Cannot determine client_name from postgres_client_wrapper")
                     
                     self._tool_cache['search_tool'] = SearchTool(
                         self.storage_client, 
@@ -217,12 +155,12 @@ class ToolUse:
         if self._tools_cache is None:
             self._tools_cache = []
             
-            # Add Firestore tools if available
-            if self.firestore_tool:
+            # Add PostgreSQL tools if available
+            if self.postgres_tool:
                 self._tools_cache.extend([
-                    self.firestore_tool.query_firestore_property,
+                    self.postgres_tool.query_postgres_property,
                 ])
-                logger.info("Firestore tools added to tools list (lazy)")
+                logger.info("PostgreSQL tools added to tools list (lazy)")
             
             # Add Search tools if available
             if self.search_tool:
@@ -257,12 +195,12 @@ class ToolUse:
         if self._function_map_cache is None:
             self._function_map_cache = {}
             
-            # Add Firestore functions if available
-            if self.firestore_tool:
+            # Add PostgreSQL functions if available
+            if self.postgres_tool:
                 self._function_map_cache.update({
-                    "query_firestore": self.firestore_tool.query_firestore,
+                    "query_postgres": self.postgres_tool.query_postgres,
                 })
-                logger.info("Firestore functions added to function_map (lazy)")
+                logger.info("PostgreSQL functions added to function_map (lazy)")
             
             # Add search function if available
             if self.search_tool:

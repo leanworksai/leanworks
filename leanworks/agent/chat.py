@@ -35,7 +35,7 @@ class ChatAgent:
                  storage_client,
                  secret_client,
                  model_client,
-                 firestore_client_wrapper,
+                 postgres_client_wrapper,
                  user_id=None,
                  session_id=None,
                  clear_conversation=True,
@@ -49,18 +49,18 @@ class ChatAgent:
             storage_client: The storage client for GCS operations
             secret_client: The secret client for accessing secrets
             model_client: The Claude model client for main chat
-            firestore_client_wrapper: The Firestore client object that contains domain attribute
+            postgres_client_wrapper: The PostgreSQL client object that contains domain attribute
             user_id (str): The user ID for conversation tracking
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
-            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'firestore', 'duckdb']. ToolUse handles the processing and filtering.
+            tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'postgres', 'duckdb']. ToolUse handles the processing and filtering.
             additional_context (str): Additional context to add to the system prompt.
         """
         # Initialize clients
         self.storage_client = storage_client
         self.secret_client = secret_client
         self.model_client = model_client
-        self.firestore_client_wrapper = firestore_client_wrapper
+        self.postgres_client_wrapper = postgres_client_wrapper
         self.additional_context = additional_context
         # Set parameters
         self.user_id = user_id
@@ -72,8 +72,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with Firestore client and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(firestore_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
+        # Initialize tool use with PostgreSQL client and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(postgres_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
         
 
         
@@ -109,7 +109,7 @@ class ChatAgent:
             if self.memory_manager:
                 self.memory_manager.clear_memory()
         
-        # Get user info from BigQuery
+        # Get user info from Firestore
         user_info = self._get_user_info()
         user_timezone = user_info.get("timezone", "UTC")
         user_timezone = pytz.timezone(user_timezone)
@@ -170,8 +170,8 @@ class ChatAgent:
                     "timezone": "UTC"
                 }
             
-            # Get domain from firestore_client_wrapper
-            domain = getattr(self.firestore_client_wrapper, 'domain', None)
+            # Get domain from postgres_client_wrapper
+            domain = getattr(self.postgres_client_wrapper, 'domain', None)
             if not domain and '@' in self.user_id:
                 domain = self.user_id.split('@')[1]
             
@@ -344,21 +344,7 @@ class ChatAgent:
                                 tool_name = block.name
                                 tool_input = block.input
                                 print(f"🔧 Using tool: {tool_name}")
-                                
-                                # Special handling for BigQuery tools - show the SQL query
-                                if tool_name == "query_bigquery" and tool_input and 'spec' in tool_input:
-                                    try:
-                                        # Compile the query spec to SQL using the BigQuery tool
-                                        if self.tool_use.bigquery_tool:
-                                            sql = self.tool_use.bigquery_tool._compile_query_spec(tool_input['spec'])
-                                            print(f"   📝 SQL Query:")
-                                            print(f"   {sql}")
-                                        else:
-                                            print(f"   Parameters: spec: {tool_input['spec']}")
-                                    except Exception as e:
-                                        print(f"   Parameters: spec: {tool_input['spec']}")
-                                        logger.debug(f"Failed to compile SQL for display: {e}")
-                                elif tool_input:
+                                if tool_input:
                                     # Show key parameters for other tools
                                     key_params = []
                                     for key, value in tool_input.items():

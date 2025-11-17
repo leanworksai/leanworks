@@ -2,6 +2,7 @@ import json
 import re
 import copy
 import logging
+from typing import List
 
 logger = logging.getLogger(__name__)
 class ConversationManager:
@@ -233,9 +234,6 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
-                        # Debug logging for BigQuery tool calls
-                        if tool_name == "query_bigquery":
-                            logger.info(f"Calling {tool_name}")
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         
@@ -244,38 +242,29 @@ class ConversationManager:
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
                         
                         # Track data sources based on tool type
-                        if tool_name == "query_firestore":
-                            # For Firestore tools, add the collection name with domain
+                        if tool_name == "query_postgres":
+                            # For PostgreSQL tools, extract table names from SQL query
                             try:
                                 # Try to get domain from the function's bound method
-                                firestore_tool = getattr(function_map[tool_name], '__self__', None)
-                                domain = getattr(firestore_tool, 'domain', 'leanworks.ai') if firestore_tool else 'leanworks.ai'
+                                postgres_tool = getattr(function_map[tool_name], '__self__', None)
+                                domain = getattr(postgres_tool, 'domain', 'leanworks.ai') if postgres_tool else 'leanworks.ai'
                                 
-                                # Extract collection from tool_input if available
-                                collection = tool_input.get('spec', {}).get('collection', 'unknown') if isinstance(tool_input, dict) else 'unknown'
-                                data_sources.append(f"Firestore collection: domains/{domain}/{collection}")
-                            except:
-                                data_sources.append("Firestore database")
-                        
-                        elif tool_name in ["list_projects", "list_tasks", "list_progress_updates", "list_users"]:
-                            # Legacy BigQuery tools (kept for backward compatibility)
-                            try:
-                                # Try to get dataset_id from the function's bound method
-                                dataset_id = getattr(function_map[tool_name].__self__, 'bq_client', None)
-                                if dataset_id and hasattr(dataset_id, 'dataset_id'):
-                                    dataset_name = dataset_id.dataset_id
+                                # Extract SQL query from tool_input
+                                sql_query = tool_input.get('sql', '') if isinstance(tool_input, dict) else ''
+                                
+                                if sql_query:
+                                    # Parse SQL to extract table names
+                                    table_names = self._extract_table_names_from_sql(sql_query)
+                                    if table_names:
+                                        tables_str = ', '.join(table_names)
+                                        data_sources.append(f"PostgreSQL tables: {tables_str} (domain: {domain})")
+                                    else:
+                                        data_sources.append(f"PostgreSQL database (domain: {domain})")
                                 else:
-                                    dataset_name = "leanworks"  # fallback
-                            except:
-                                dataset_name = "leanworks"  # fallback
-                                
-                            table_mapping = {
-                                "list_projects": f"leanworks.{dataset_name}.project_config",
-                                "list_tasks": f"leanworks.{dataset_name}.tasks", 
-                                "list_progress_updates": f"leanworks.{dataset_name}.updates",
-                                "list_users": f"leanworks.{dataset_name}.user_config"
-                            }
-                            data_sources.append(f"BigQuery table: {table_mapping[tool_name]}")
+                                    data_sources.append(f"PostgreSQL database (domain: {domain})")
+                            except Exception as e:
+                                logger.warning(f"Failed to extract table names from SQL: {e}")
+                                data_sources.append("PostgreSQL database")
                         
                         elif tool_name in ["find_available_slots", "list_upcoming_meetings"]:
                             # For Outlook/calendar tools, add calendar data source
@@ -423,7 +412,54 @@ class ConversationManager:
             return text
         else:
             return text[:max_length] + "..."
-
+    
+    def _extract_table_names_from_sql(self, sql: str) -> List[str]:
+        """
+        Extract table names from SQL SELECT/WITH queries.
+        
+        Args:
+            sql: SQL query string
+            
+        Returns:
+            List of table names found in the query
+        """
+        if not sql or not isinstance(sql, str):
+            return []
+        
+        table_names = set()
+        
+        # Remove comments and normalize whitespace
+        sql_clean = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
+        sql_clean = re.sub(r'/\*.*?\*/', '', sql_clean, flags=re.DOTALL)
+        sql_clean = ' '.join(sql_clean.split())
+        
+        # Pattern to match FROM and JOIN clauses
+        # Match: FROM table_name, FROM schema.table_name, FROM "table_name"
+        # Match: JOIN table_name, JOIN schema.table_name, JOIN "table_name"
+        patterns = [
+            r'\bFROM\s+["\']?(\w+)["\']?',  # FROM table
+            r'\bJOIN\s+["\']?(\w+)["\']?',  # JOIN table
+            r'\bINTO\s+["\']?(\w+)["\']?',  # INTO table (for CTEs)
+        ]
+        
+        for pattern in patterns:
+            matches = re.finditer(pattern, sql_clean, re.IGNORECASE)
+            for match in matches:
+                table_name = match.group(1).lower()
+                # Filter out common SQL keywords that might be matched
+                if table_name not in ['select', 'where', 'group', 'order', 'having', 'limit', 'offset', 'as']:
+                    table_names.add(table_name)
+        
+        # Also check for CTE names in WITH clauses
+        with_pattern = r'\bWITH\s+(\w+)\s+AS'
+        with_matches = re.finditer(with_pattern, sql_clean, re.IGNORECASE)
+        for match in with_matches:
+            cte_name = match.group(1).lower()
+            # CTE names are temporary, but we can still track them
+            # For now, we'll skip CTE names as they're not actual tables
+        
+        return sorted(list(table_names))
+    
     def extract_json_from_text(self, text):
         """
         Extract and parse JSON from text content.

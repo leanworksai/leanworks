@@ -122,12 +122,12 @@ AGENT_SYSTEM_PROMPT = """
 
     <tool_calling>
     You have below tools at your disposal to answer project management related questions.
-    Firestore tools: query_firestore
+    PostgreSQL tools: query_postgres
     Search tools: search_documents
     Outlook tools: list_upcoming_meetings,find_available_slots
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
-    - Firestore tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, Firestore tools should be your primary tools to answer questions.
+    - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, PostgreSQL tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
@@ -269,101 +269,96 @@ def _get_firestore_client():
                     raise
     return _firestore_db
 
-# Table schemas template in string format (Firestore collections with camelCase fields)
+# PostgreSQL table schemas template in string format (PostgreSQL tables with snake_case fields)
 # Use {dataset_id} as placeholder for the actual dataset name (for backward compatibility)
-# All collections use path structure: domains/{dataset_id}/{collection_name}
-# Database ID: leanworks-prod
+# All tables are in the PostgreSQL database (no path structure)
 TABLE_SCHEMAS = """
-**Collection: domains/{dataset_id}/tasks**
+**Table: tasks**
   Description: Stores task/action items for projects
-  Document ID: Task ID (id field)
-  - id (STRING) - Task ID (also used as document ID)
-  - title (STRING) - Task name/title
-  - assigneeId (STRING) - User ID assigned to this task (user email)
-  - projectId (STRING) - Project ID this task belongs to (project name)
-  - createdAt (NUMBER) - Creation timestamp in milliseconds
-  - createdDate (STRING) - Creation date in YYYY-MM-DD format
-  - updatedAt (NUMBER) - Last update timestamp in milliseconds
-  - dueDate (STRING) - Deadline in YYYY-MM-DD format
-  - status (STRING) - Task status: 'todo', 'in-progress', 'completed', 'blocked'
-  - description (STRING) - Detailed task description
-  - priority (STRING) - Priority level: 'high', 'medium', 'low'
-  - reason (STRING) - Reason for task creation/update
-  - tags (ARRAY) - Optional tags
-  - progressUpdates (ARRAY) - Optional progress updates
-  - comments (ARRAY) - Optional comments
-  - estimatedHours (NUMBER) - Optional estimated hours
-  - actualHours (NUMBER) - Optional actual hours spent
-  - teams (ARRAY) - Optional team associations
-  - createdBy (STRING) - Optional creator ID
-  - assigneeAvatar (STRING) - Optional assignee avatar URL
-  - project (STRING) - Optional project name
+  Primary Key: id field
+  - id (TEXT) - Task ID (primary key)
+  - title (TEXT) - Task name/title
+  - assignee_id (TEXT) - User ID assigned to this task (user email)
+  - project_id (TEXT) - Project ID this task belongs to (project name)
+  - created_at (BIGINT) - Creation timestamp in milliseconds
+  - created_date (TEXT) - Creation date in YYYY-MM-DD format
+  - updated_at (BIGINT) - Last update timestamp in milliseconds
+  - due_date (TEXT) - Deadline in YYYY-MM-DD format
+  - status (TEXT) - Task status: 'todo', 'in-progress', 'completed', 'blocked'
+  - description (TEXT) - Detailed task description
+  - priority (TEXT) - Priority level: 'high', 'medium', 'low'
+  - reason (TEXT) - Reason for task creation/update
+  - tags (JSONB/ARRAY) - Optional tags
+  - progress_updates (JSONB/ARRAY) - Optional progress updates
+  - comments (JSONB/ARRAY) - Optional comments
+  - estimated_hours (NUMERIC) - Optional estimated hours
+  - actual_hours (NUMERIC) - Optional actual hours spent
+  - teams (JSONB/ARRAY) - Optional team associations
+  - created_by (TEXT) - Optional creator ID
+  - assignee_avatar (TEXT) - Optional assignee avatar URL
+  - project (TEXT) - Optional project name
 
-**Collection: domains/{dataset_id}/updates**
+**Table: task_progress_updates**
   Description: Stores work updates/progress reports for team members
-  Document ID: updateId field
-  - updateId (STRING) - Unique update ID (also used as document ID)
-  - dateId (STRING) - Date in YYYY-MM-DD format
-  - projectId (STRING) - Project ID (project name)
-  - userId (STRING) - User ID who made the update (user email)
-  - timestamp (NUMBER) - Update timestamp in milliseconds
-  - update (STRING) - Update description/content
-  - associatedTasks (STRING) - JSON string array of task IDs (e.g., '["task1", "task2"]')
-  - reason (STRING) - Supporting evidence/reason for the update
+  Primary Key: update_id field
+  - update_id (TEXT) - Unique update ID (primary key)
+  - date_id (TEXT) - Date in YYYY-MM-DD format
+  - project_id (TEXT) - Project ID (project name)
+  - user_id (TEXT) - User ID who made the update (user email)
+  - timestamp (BIGINT) - Update timestamp in milliseconds
+  - update (TEXT) - Update description/content
+  - associated_tasks (TEXT) - JSON string array of task IDs (e.g., '["task1", "task2"]')
+  - reason (TEXT) - Supporting evidence/reason for the update
 
-**Collection: domains/{dataset_id}/update_summaries**
+**Table: project_progress_updates**
   Description: Stores aggregated summaries of updates per project per day
-  Document ID: {{projectId}}_{{dateId}}
-  - projectId (STRING) - Project ID (project name)
-  - dateId (STRING) - Date in YYYY-MM-DD format
-  - updateSummary (STRING) - AI-generated summary of all updates
-  - createdAt (NUMBER) - Optional timestamp in milliseconds when summary was created
+  Primary Key: project_id, date_id (composite)
+  - project_id (TEXT) - Project ID (project name)
+  - date_id (TEXT) - Date in YYYY-MM-DD format
+  - update_summary (TEXT) - AI-generated summary of all updates
+  - created_at (BIGINT) - Optional timestamp in milliseconds when summary was created
 
-**Collection: domains/{dataset_id}/users**
+**Table: users**
   Description: Stores user information
-  Document ID: User email or unique user identifier
-  - email (STRING) - User email (also used as user_id internally)
-  - firstName (STRING) - User's first name
-  - lastName (STRING) - User's last name
-  - jobTitle (STRING) - Optional user's job title
-  - jobResponsibilities (STRING) - Optional user's job responsibilities
-  - timezone (STRING) - Optional timezone (e.g., 'America/New_York')
+  Primary Key: email field
+  - email (TEXT) - User email (primary key, also used as user_id internally)
+  - first_name (TEXT) - User's first name
+  - last_name (TEXT) - User's last name
+  - job_title (TEXT) - Optional user's job title
+  - job_responsibilities (TEXT) - Optional user's job responsibilities
+  - timezone (TEXT) - Optional timezone (e.g., 'America/New_York')
 
-**Collection: domains/{dataset_id}/projects**
+**Table: projects**
   Description: Stores project information
-  Document ID: Project name (also used as project_id internally)
-  - name (STRING) - Project name
-  - description (STRING) - Project description
-  - collaborators (ARRAY) - Array of user IDs (emails)
-  - detailedDescription (STRING) - Optional extended project description
-  - createdBy (STRING) - Optional creator email
-  - createdAt (NUMBER) - Optional creation timestamp in milliseconds
+  Primary Key: name field (or id field)
+  - id (TEXT/UUID) - Project ID (primary key)
+  - name (TEXT) - Project name
+  - description (TEXT) - Project description
+  - collaborators (JSONB/ARRAY) - Array of user IDs (emails)
+  - detailed_description (TEXT) - Optional extended project description
+  - created_by (TEXT) - Optional creator email
+  - created_at (BIGINT) - Optional creation timestamp in milliseconds
 
-**Collection: domains/{dataset_id}/integrations**
+**Table: integrations**
   Description: Stores external integration configurations
-  Document ID: Integration name (e.g., 'gitlab', 'atlassian', 'jira')
+  Primary Key: integration name (e.g., 'gitlab', 'atlassian', 'jira')
   - connected (BOOLEAN) - Whether the integration is enabled
-  - subTools (OBJECT) - Sub-tool configurations
+  - sub_tools (JSONB) - Sub-tool configurations
   - Additional integration-specific configuration fields
 
-**Collection: domains/{dataset_id}/teams**
-  Description: Team information and membership (optional collection)
-  Document ID: Team ID
-  - id (STRING) - Team ID
-  - name (STRING) - The team name
-  - description (STRING) - Team description
-  - members (ARRAY of STRING) - List of user emails who are team members
-  - createdBy (STRING) - Email of the user who created the team
-  - createdAt (NUMBER) - Unix timestamp in milliseconds
-
-**Collection: domains/{dataset_id}/teamDetails**
-  Description: Detailed team information and settings (optional collection)
-  Document ID: Team ID
-  - id (STRING) - Team ID
-  - teamName (STRING) - The team name
-  - projects (ARRAY of STRING) - List of project IDs associated with the team
-  - leads (ARRAY of STRING) - List of user emails who are team leads
-  - settings (OBJECT) - Team-specific settings and configurations
+**Table: teams**
+  Description: Team information and membership (optional table)
+  Primary Key: id field
+  - id (TEXT) - Team ID (primary key)
+  - name (TEXT) - The team name
+  - description (TEXT) - Team description
+  - members (JSONB/ARRAY) - List of user emails who are team members
+  - created_by (TEXT) - Email of the user who created the team
+  - created_at (BIGINT) - Unix timestamp in milliseconds
+  - team_name (TEXT) - The team name (alternative field name)
+  - projects (JSONB/ARRAY) - List of project IDs associated with the team
+  - leads (JSONB/ARRAY) - List of user emails who are team leads
+  - settings (JSONB) - Team-specific settings and configurations
 """
 
 def get_tables_and_schemas(dataset_id: str) -> str:

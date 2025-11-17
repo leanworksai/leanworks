@@ -2,11 +2,11 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.3.16",
+    version="0.3.2",
     packages=find_packages(),
     install_requires=[
         "pinecone==7.2.0",
-        "google-cloud-storage==2.19.0",
+        "google-cloud-storage>=3.1.1",
         "google-cloud-secret-manager==2.22.0",
         "google-auth==2.37.0",
         "google-auth-oauthlib==1.2.1",
@@ -18,12 +18,13 @@ setup(
         "numpy==1.26.0",
         "tiktoken==0.9.0",
         "pyyaml==6.0.2",
-        "google-cloud-bigquery==3.34.0",
+        "firebase-admin>=7.1.0",
         "requests==2.32.4",
         "msal==1.33.0",
         "python-dotenv==1.0.1",
         "pytz==2024.1",
         "duckdb==1.1.3",
+        "psycopg2-binary>=2.9.0",
         "nltk>=3.8"
     ],
     author="Yanfu Zhu",

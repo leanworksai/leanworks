@@ -20,7 +20,7 @@ logging.basicConfig(
     ]
 )
 
-async def initialize_clients_async(user_id: str) -> Tuple[CloudStorage, GCPSecretLoader, Anthropic, any, list]:
+async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -> Tuple[CloudStorage, GCPSecretLoader, Anthropic, any, list]:
     """Initialize all required clients asynchronously"""
     start_time = time.time()
     
@@ -37,7 +37,7 @@ async def initialize_clients_async(user_id: str) -> Tuple[CloudStorage, GCPSecre
             logger.error(f"get_client_info returned invalid result type: {type(result)} for user_id: {user_id}")
             raise ValueError(f"Invalid client info format for user_id: {user_id}")
         
-        domain, available_tools = result
+        domain, _ = result  # available_tools is no longer used (tools are user-provided)
         
         if not domain:
             raise ValueError(f"Could not determine domain for user_id: {user_id}")
@@ -63,18 +63,25 @@ async def initialize_clients_async(user_id: str) -> Tuple[CloudStorage, GCPSecre
         # Initialize Anthropic client
         model_client = Anthropic(api_key=claude_api_key)
         
-        # Create Firestore client wrapper
-        class FirestoreClientWrapper:
+        # Create PostgreSQL client wrapper
+        class PostgresClientWrapper:
             def __init__(self, domain, client_name):
                 self.domain = domain
-                self.client_name = client_name  # For backward compatibility
+                self.client_name = client_name
         
-        firestore_client_wrapper = FirestoreClientWrapper(domain, client_name)
+        postgres_client_wrapper = PostgresClientWrapper(domain, client_name)
+        
+        # Tools are now user-provided (not queried from database)
+        # Default to internal tools only, user can add external tools explicitly
+        # Internal tools: ['search', 'postgres', 'duckdb'] are always available
+        # External tools (e.g., 'outlook') should be explicitly provided if needed
+        if tools is None:
+            tools = []  # Empty list means only internal tools will be enabled
         
         init_time = time.time() - start_time
         logger.info(f"Client initialization completed in {init_time:.3f}s for user: {user_id}")
         
-        return storage_client, secret_client, model_client, firestore_client_wrapper, available_tools
+        return storage_client, secret_client, model_client, postgres_client_wrapper, tools
     except Exception as e:
         logger.error(f"Error in initialize_clients_async for user {user_id}: {str(e)}")
         traceback.print_exc()
@@ -97,7 +104,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        storage_client, secret_client, model_client, firestore_client_wrapper, tools = await initialize_clients_async(user_id)
+        storage_client, secret_client, model_client, postgres_client_wrapper, tools = await initialize_clients_async(user_id)
         
         client_init_time = time.time() - client_init_start
         
@@ -109,7 +116,7 @@ async def main_async():
             storage_client=storage_client,
             secret_client=secret_client,
             model_client=model_client,
-            firestore_client_wrapper=firestore_client_wrapper,
+            postgres_client_wrapper=postgres_client_wrapper,
             user_id=user_id,
             session_id="hf38r89r",
             clear_conversation=True,
@@ -127,7 +134,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-        summarize the ai backend progress using github commits for last two weeks
+        what's the latest progress of web development?
 '''
         
         print("💬 Processing user message:")
