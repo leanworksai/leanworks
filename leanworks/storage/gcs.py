@@ -19,8 +19,7 @@ class CloudStorage:
             print(f"Bucket '{self.bucket}' already exists.")
         self.bucket = bucket_obj
 
-    def upload_blob_from_memory(self, contents, destination_blob_name, client_domain):
-        destination_blob_name = f"domains/{client_domain}/{destination_blob_name}"
+    def upload_blob_from_memory(self, contents, destination_blob_name):
         blob = self.bucket.blob(destination_blob_name)
         blob.upload_from_string(contents)
 
@@ -60,11 +59,9 @@ class CloudStorage:
             self, 
             source_dir, 
             destination_dir,
-            client_domain,
             exclusion_keywords=[],
             workers=8
             ):
-        destination_dir = f"domains/{client_domain}/{destination_dir}"
         directory_as_path_obj = Path(source_dir)
         paths = directory_as_path_obj.rglob("*")
         file_paths = [path for path in paths if path.is_file()]
