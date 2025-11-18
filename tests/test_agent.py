@@ -1,6 +1,6 @@
 from leanworks.agent.chat import ChatAgent
-from leanworks.storage.gcs import CloudStorage
-from leanworks.secret import GCPSecretLoader
+from google.cloud import firestore, secretmanager
+from google.oauth2 import service_account
 from anthropic import Anthropic
 import logging
 import traceback
@@ -8,7 +8,6 @@ import time
 import asyncio
 import json
 from typing import Dict, Tuple, Optional
-from leanworks.setting import get_client_info
 import re
 logger = logging.getLogger(__name__)
 # Configure logging
@@ -20,93 +19,67 @@ logging.basicConfig(
     ]
 )
 
-async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -> Tuple[CloudStorage, GCPSecretLoader, Anthropic, any, list]:
+async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -> Tuple[firestore.Client, secretmanager.SecretManagerServiceClient, Anthropic, list]:
     """Initialize all required clients asynchronously"""
     start_time = time.time()
     
     try:
-        # Get client info
-        logger.info(f"Fetching client info for user: {user_id}")
-        result = get_client_info(user_id)
-        if result is None:
-            logger.error(f"get_client_info returned None for user_id: {user_id}")
-            raise ValueError(f"Could not get client info for user_id: {user_id}")
-        
-        # Validate that result is a tuple with at least 2 elements
-        if not isinstance(result, tuple) or len(result) < 2:
-            logger.error(f"get_client_info returned invalid result type: {type(result)} for user_id: {user_id}")
-            raise ValueError(f"Invalid client info format for user_id: {user_id}")
-        
-        domain, available_tools_from_db = result
-        
-        if not domain:
-            raise ValueError(f"Could not determine domain for user_id: {user_id}")
-        
-        # Extract client_name from domain by removing all non-alphanumeric characters
-        client_name = re.sub(r'[^a-zA-Z0-9]', '', domain)
+        # Extract domain from user_id email
+        if "@" not in user_id:
+            raise ValueError(f"Invalid user_id format (expected email): {user_id}")
+        domain = user_id.split("@")[1]
+        logger.info(f"Extracted domain for user {user_id}: {domain}")
         
         # Initialize clients in parallel using asyncio.gather
         loop = asyncio.get_event_loop()
         
-        # Run client initializations in executor to avoid blocking
-        logger.info(f"Initializing storage and secret clients for domain: {domain}")
-        storage_client, secret_client = await asyncio.gather(
-            loop.run_in_executor(None, lambda: CloudStorage("gcp_credential.json")),
-            loop.run_in_executor(None, lambda: GCPSecretLoader("gcp_credential.json"))
-        )
+        # Load credentials and get project_id
+        def init_clients():
+            credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+            with open("gcp_credential.json", "r") as f:
+                credential_data = json.load(f)
+            project_id = credential_data["project_id"]
+            
+            # Initialize Firestore client
+            firestore_client = firestore.Client(credentials=credentials, project=project_id, database="leanworks-prod")
+            
+            # Initialize Secret Manager client
+            secret_manager_client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+            
+            return firestore_client, secret_manager_client
         
-        # Get Claude API key
-        claude_api_key = await loop.run_in_executor(None, lambda: secret_client.get("claude-api-key"))
+        # Run client initializations in executor to avoid blocking
+        logger.info(f"Initializing Firestore and Secret Manager clients for domain: {domain}")
+        firestore_client, secret_manager_client = await loop.run_in_executor(None, init_clients)
+        
+        # Get Claude API key (project_id will be read from credential file in ChatAgent)
+        def get_secret(name):
+            with open("gcp_credential.json", "r") as f:
+                credential_data = json.load(f)
+            project_id = credential_data["project_id"]
+            full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+            response = secret_manager_client.access_secret_version(name=full_name)
+            return response.payload.data.decode("UTF-8")
+        
+        claude_api_key = await loop.run_in_executor(None, lambda: get_secret("claude-api-key"))
         if not claude_api_key:
             raise ValueError(f"claude-api-key not found for domain: {domain}")
         
         # Initialize Anthropic client
         model_client = Anthropic(api_key=claude_api_key)
         
-        # Create PostgreSQL client wrapper
-        class PostgresClientWrapper:
-            def __init__(self, domain, client_name):
-                self.domain = domain
-                self.client_name = client_name
-        
-        postgres_client_wrapper = PostgresClientWrapper(domain, client_name)
-        
-        # Validate and filter tools based on connected integrations
+        # Tools are now passed explicitly - no database fetching
         if tools is None:
             # No tools provided - use only default/internal tools (search, postgres, duckdb)
             tools = []
             logger.info("No tools provided - using only default internal tools (search, postgres, duckdb)")
         else:
-            # Tools provided - filter to only include tools that are in connected integrations
-            # Normalize provided tools to lowercase for comparison
-            provided_tools_normalized = [tool.lower().strip() if isinstance(tool, str) else tool for tool in tools]
-            available_tools_normalized = [tool.lower().strip() for tool in available_tools_from_db]
-            
-            # Filter provided tools to only include those in connected integrations
-            valid_tools = [tool for tool in provided_tools_normalized if tool in available_tools_normalized]
-            invalid_tools = [tool for tool in provided_tools_normalized if tool not in available_tools_normalized]
-            
-            if invalid_tools:
-                logger.warning(
-                    f"The following tools are not in connected integrations and will be ignored: {invalid_tools}. "
-                    f"Available connected integrations: {available_tools_from_db}"
-                )
-            
-            if not valid_tools:
-                logger.warning(
-                    f"None of the provided tools ({tools}) are in connected integrations. "
-                    f"Available connected integrations: {available_tools_from_db}. "
-                    f"Using empty tool list (only internal tools will be available)."
-                )
-                tools = []
-            else:
-                tools = valid_tools
-                logger.info(f"Using {len(tools)} valid tools from provided list: {tools}")
+            logger.info(f"Using {len(tools)} tools from provided list: {tools}")
         
         init_time = time.time() - start_time
         logger.info(f"Client initialization completed in {init_time:.3f}s for user: {user_id}")
         
-        return storage_client, secret_client, model_client, postgres_client_wrapper, tools
+        return firestore_client, secret_manager_client, model_client, tools
     except Exception as e:
         logger.error(f"Error in initialize_clients_async for user {user_id}: {str(e)}")
         traceback.print_exc()
@@ -129,7 +102,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        storage_client, secret_client, model_client, postgres_client_wrapper, tools = await initialize_clients_async(user_id)
+        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id)
         
         client_init_time = time.time() - client_init_start
         
@@ -138,10 +111,9 @@ async def main_async():
         agent_init_start = time.time()
 
         agent = ChatAgent(
-            storage_client=storage_client,
-            secret_client=secret_client,
+            firestore_client=firestore_client,
+            secret_manager_client=secret_manager_client,
             model_client=model_client,
-            postgres_client_wrapper=postgres_client_wrapper,
             user_id=user_id,
             session_id="hf38r89r",
             clear_conversation=True,

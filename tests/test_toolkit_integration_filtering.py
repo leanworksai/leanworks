@@ -18,10 +18,6 @@ logger = logging.getLogger(__name__)
 def test_integration_filtering_with_outlook():
     """Test that outlook tool is enabled when it's in the integration list"""
     
-    # Mock PostgreSQL client wrapper
-    postgres_wrapper = Mock()
-    postgres_wrapper.domain = "test.leanworks.ai"
-    
     # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
     with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
         mock_postgres_instance = MagicMock()
@@ -32,7 +28,7 @@ def test_integration_filtering_with_outlook():
         mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            postgres_client_wrapper=postgres_wrapper,
+            domain="test.leanworks.ai",
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
@@ -51,10 +47,6 @@ def test_integration_filtering_with_outlook():
 def test_integration_filtering_without_outlook():
     """Test that outlook tool is disabled when it's NOT in the integration list"""
     
-    # Mock PostgreSQL client wrapper
-    postgres_wrapper = Mock()
-    postgres_wrapper.domain = "test.leanworks.ai"
-    
     # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
     with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
         mock_postgres_instance = MagicMock()
@@ -64,7 +56,7 @@ def test_integration_filtering_without_outlook():
         mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            postgres_client_wrapper=postgres_wrapper,
+            domain="test.leanworks.ai",
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
@@ -86,10 +78,6 @@ def test_integration_filtering_without_outlook():
 def test_internal_tools_always_enabled():
     """Test that internal tools (postgres, search, duckdb) are always enabled even with empty integrations"""
     
-    # Mock PostgreSQL client wrapper
-    postgres_wrapper = Mock()
-    postgres_wrapper.domain = "test.leanworks.ai"
-    
     # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
     with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
         mock_postgres_instance = MagicMock()
@@ -97,7 +85,7 @@ def test_internal_tools_always_enabled():
         mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse without any additional tools
         tool_use = ToolUse(
-            postgres_client_wrapper=postgres_wrapper,
+            domain="test.leanworks.ai",
             storage_client=Mock(),
             secret_client=Mock()
         )
@@ -116,10 +104,6 @@ def test_internal_tools_always_enabled():
 def test_integration_filtering_error_handling():
     """Test that integration filtering handles PostgreSQL errors gracefully"""
     
-    # Mock PostgreSQL client wrapper
-    postgres_wrapper = Mock()
-    postgres_wrapper.domain = "test.leanworks.ai"
-    
     # Mock PostgresTool.query_postgres method to raise an exception
     with patch('leanworks.agent.tools.toolkit.PostgresTool') as mock_postgres_class:
         mock_postgres_instance = MagicMock()
@@ -127,7 +111,7 @@ def test_integration_filtering_error_handling():
         mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse with outlook requested
         tool_use = ToolUse(
-            postgres_client_wrapper=postgres_wrapper,
+            domain="test.leanworks.ai",
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook']
@@ -147,10 +131,6 @@ def test_integration_filtering_error_handling():
 def test_integration_type_field_variations():
     """Test that integration filtering works with integration_name and integration_id fields"""
     
-    # Mock PostgreSQL client wrapper
-    postgres_wrapper = Mock()
-    postgres_wrapper.domain = "test.leanworks.ai"
-    
     # Mock PostgresTool.query_postgres method (patch where it's imported inside _get_available_integrations)
     with patch('leanworks.agent.tools.postgres.PostgresTool') as mock_postgres_class:
         mock_postgres_instance = MagicMock()
@@ -161,7 +141,7 @@ def test_integration_type_field_variations():
         mock_postgres_class.return_value = mock_postgres_instance
         # Initialize ToolUse
         tool_use = ToolUse(
-            postgres_client_wrapper=postgres_wrapper,
+            domain="test.leanworks.ai",
             storage_client=Mock(),
             secret_client=Mock(),
             tools=['outlook', 'gitlab']

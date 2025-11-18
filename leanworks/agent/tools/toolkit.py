@@ -2,27 +2,39 @@ from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
+from leanworks.agent.helpers import AgentHelpers
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, postgres_client_wrapper=None, storage_client=None, secret_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None):
+    def __init__(self, domain=None, firestore_client=None, secret_manager_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
         Args:
-            postgres_client_wrapper: PostgreSQL client wrapper that has domain attribute
-            storage_client: Google Cloud Storage client
-            secret_client: Secret management client
+            domain: Client domain (e.g., 'leanworks.ai') extracted from user_id. Used to determine database and client_name.
+            firestore_client: Firestore client
+            secret_manager_client: Secret Manager client
             read_document_ids: Set of document IDs already read for deduplication
             tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
                    External tools (e.g., 'outlook') should be explicitly provided in this list.
+            credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
         """
         # Store initialization parameters for lazy loading
-        self.postgres_client_wrapper = postgres_client_wrapper
-        self.storage_client = storage_client
-        self.secret_client = secret_client
+        self.domain = domain
+        # Create postgres_client_wrapper internally if domain is provided
+        if domain:
+            class PostgresClientWrapper:
+                def __init__(self, domain):
+                    self.domain = domain
+            self.postgres_client_wrapper = PostgresClientWrapper(domain)
+        else:
+            self.postgres_client_wrapper = None
+        self.firestore_client = firestore_client
+        self.secret_manager_client = secret_manager_client
+        self.credential_path = credential_path
+        self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         self.user_id = user_id
         self.session_id = session_id
@@ -67,6 +79,9 @@ class ToolUse:
         if 'postgres_tool' not in self._tool_cache:
             if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
                 try:
+                    # Set Secret Manager client for PostgresTool
+                    if self.secret_manager_client:
+                        PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
                     self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper)
                     if 'postgres' not in self.enabled_tools:
                         self.enabled_tools.append('postgres')
@@ -85,26 +100,25 @@ class ToolUse:
     def search_tool(self):
         """Lazy-load Search tool on first access."""
         if 'search_tool' not in self._tool_cache:
-            if 'search' in self.requested_tools and self.storage_client and self.secret_client:
+            if 'search' in self.requested_tools and self.firestore_client and self.secret_manager_client and self.project_id:
                 try:
-                    # Get client_name from postgres_client_wrapper
+                    # Get client_name from domain
                     client_name = None
-                    if self.postgres_client_wrapper:
-                        if hasattr(self.postgres_client_wrapper, 'client_name'):
-                            client_name = self.postgres_client_wrapper.client_name
-                        elif hasattr(self.postgres_client_wrapper, 'domain'):
-                            # Extract client_name from domain by removing non-alphanumeric characters
-                            import re
-                            client_name = re.sub(r'[^a-zA-Z0-9]', '', self.postgres_client_wrapper.domain)
+                    if self.domain:
+                        # Extract client_name from domain by removing non-alphanumeric characters
+                        import re
+                        client_name = re.sub(r'[^a-zA-Z0-9]', '', self.domain)
                     
                     if not client_name:
-                        raise ValueError("Cannot determine client_name from postgres_client_wrapper")
+                        raise ValueError("Cannot determine client_name from domain")
                     
                     self._tool_cache['search_tool'] = SearchTool(
-                        self.storage_client, 
-                        self.secret_client,
+                        self.firestore_client,
+                        self.domain,
+                        self.secret_manager_client,
                         client_name,
-                        read_document_ids=self.read_document_ids
+                        read_document_ids=self.read_document_ids,
+                        credential_path=self.credential_path
                     )
                     if 'search' not in self.enabled_tools:
                         self.enabled_tools.append('search')
@@ -113,7 +127,7 @@ class ToolUse:
                     logger.error(f"Failed to initialize SearchTool: {str(e)}")
                     self._tool_cache['search_tool'] = None
             elif 'search' in self.requested_tools:
-                logger.warning("SearchTool not initialized: missing storage_client or secret_client")
+                logger.warning("SearchTool not initialized: missing firestore_client, secret_manager_client, or project_id")
                 self._tool_cache['search_tool'] = None
             else:
                 self._tool_cache['search_tool'] = None
@@ -124,12 +138,18 @@ class ToolUse:
     def outlook_tool(self):
         """Lazy-load Outlook tool on first access."""
         if 'outlook_tool' not in self._tool_cache:
-            if 'outlook' in self.requested_tools and self.secret_client:
+            if 'outlook' in self.requested_tools and self.secret_manager_client and self.project_id:
                 try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
                     outlook_auth = {
-                        'azure_client_id': self.secret_client.get('AD_CLIENT_ID'),
-                        'azure_client_secret': self.secret_client.get('AD_CLIENT_SECRET'),
-                        'azure_tenant_id': self.secret_client.get('AD_TENANT_ID')
+                        'azure_client_id': get_secret('AD_CLIENT_ID'),
+                        'azure_client_secret': get_secret('AD_CLIENT_SECRET'),
+                        'azure_tenant_id': get_secret('AD_TENANT_ID')
                     }
                     self._tool_cache['outlook_tool'] = OutlookTool(
                         client_id=outlook_auth.get('azure_client_id'),

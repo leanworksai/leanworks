@@ -38,16 +38,27 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, storage_client, secret_client, client_name: str, read_document_ids: set | None = None):
+    def __init__(self, firestore_client, domain, secret_manager_client, client_name: str, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
+        # Read project_id from credential file
+        import json
+        with open(credential_path, "r") as f:
+            credential_data = json.load(f)
+        project_id = credential_data.get("project_id")
         
-        model_client = OpenAI(api_key=secret_client.get("claude-api-key"), base_url="https://api.anthropic.com/v1")
+        # Helper function to get secret
+        def get_secret(name):
+            full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+            response = secret_manager_client.access_secret_version(name=full_name)
+            return response.payload.data.decode("UTF-8")
+        
+        model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
         
         # Use the module-level imports directly
-        embedding_model_client = GoogleEmbedding(secret_client.get("gemini-api-key"))
+        embedding_model_client = GoogleEmbedding(get_secret("gemini-api-key"))
         
         # Initialize vector database client
         vectordb_client = PineconeHybridIndex(
-            pinecone_key=secret_client.get("pinecone-api-key"),
+            pinecone_key=get_secret("pinecone-api-key"),
             embedding_model_client=embedding_model_client
         )
         
@@ -59,7 +70,8 @@ class SearchTool:
         
         self.chat = AsyncChat(
             vectordb_client=vectordb_client,
-            storage_client=storage_client,
+            firestore_client=firestore_client,
+            domain=domain,
             model_client=model_client
         )
         # Shared deduplication set used across searches

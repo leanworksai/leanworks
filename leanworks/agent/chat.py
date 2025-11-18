@@ -1,29 +1,15 @@
 from leanworks.agent.tools.toolkit import ToolUse
 from leanworks.agent.tools.duckdb import cleanup_responses, clear_session_response_ids
+from leanworks.agent.helpers import AgentHelpers
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
+from google.cloud import firestore, secretmanager
 import traceback
 import logging
 import pytz
-import sys
-import time
 logger = logging.getLogger(__name__)
-
-def _stream_text(text, delay=0.02):
-    """
-    Stream text output with a typewriter effect.
-    
-    Args:
-        text (str): Text to stream
-        delay (float): Delay between characters in seconds
-    """
-    for char in text:
-        sys.stdout.write(char)
-        sys.stdout.flush()
-        time.sleep(delay)
-    print()  # Add newline at the end
 
 class ChatAgent:
     """
@@ -32,36 +18,46 @@ class ChatAgent:
     """
     
     def __init__(self, 
-                 storage_client,
-                 secret_client,
+                 firestore_client,
+                 secret_manager_client,
                  model_client,
-                 postgres_client_wrapper,
                  user_id=None,
                  session_id=None,
                  clear_conversation=True,
                  tools=None,
                  additional_context=None,
+                 credential_path: str = "gcp_credential.json",
                  ):
         """
         Initialize the ChatAgent with necessary clients and settings.
         
         Args:
-            storage_client: The storage client for GCS operations
-            secret_client: The secret client for accessing secrets
+            firestore_client: The official Firestore client (google.cloud.firestore.Client)
+            secret_manager_client: The official Secret Manager client (google.cloud.secretmanager.SecretManagerServiceClient)
             model_client: The Claude model client for main chat
-            postgres_client_wrapper: The PostgreSQL client object that contains domain attribute
-            user_id (str): The user ID for conversation tracking
+            user_id (str): The user ID for conversation tracking (email address, used to extract domain)
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
             tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'postgres', 'duckdb']. ToolUse handles the processing and filtering.
             additional_context (str): Additional context to add to the system prompt.
+            credential_path (str): Path to GCP credential JSON file (default: "gcp_credential.json")
         """
-        # Initialize clients
-        self.storage_client = storage_client
-        self.secret_client = secret_client
+        # Extract domain from user_id automatically
+        if user_id and '@' in user_id:
+            self.domain = user_id.split('@')[1]
+        else:
+            self.domain = None
+            logger.warning(f"Could not extract domain from user_id: {user_id}")
+        
+        # Read project_id from credential file
+        self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
+        
+        # Store the original clients
+        self.firestore_client = firestore_client
+        self.secret_manager_client = secret_manager_client
         self.model_client = model_client
-        self.postgres_client_wrapper = postgres_client_wrapper
         self.additional_context = additional_context
+        
         # Set parameters
         self.user_id = user_id
         self.session_id = session_id
@@ -72,8 +68,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with PostgreSQL client and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(postgres_client_wrapper, storage_client, secret_client, self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id)
+        # Initialize tool use with domain and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(domain=self.domain, firestore_client=firestore_client, secret_manager_client=secret_manager_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
         
 
         
@@ -83,7 +79,8 @@ class ChatAgent:
             self.memory_manager = MemoryManager.create_for_model(
                 model_name=GENERATION_MODEL,
                 model_client=model_client,
-                storage_client=storage_client,
+                firestore_client=firestore_client,
+                domain=self.domain,
                 user_id=user_id,
                 session_id=session_id
             )
@@ -96,7 +93,8 @@ class ChatAgent:
         # Initialize conversation manager
         self.conversation = ConversationManager(
             self.model_client, 
-            self.storage_client, 
+            self.firestore_client,
+            self.domain,
             self.user_id, 
             self.session_id
         )
@@ -170,10 +168,8 @@ class ChatAgent:
                     "timezone": "UTC"
                 }
             
-            # Get domain from postgres_client_wrapper
-            domain = getattr(self.postgres_client_wrapper, 'domain', None)
-            if not domain and '@' in self.user_id:
-                domain = self.user_id.split('@')[1]
+            # Use domain extracted from user_id
+            domain = self.domain
             
             if not domain:
                 logger.warning("Could not determine domain for user info lookup")
@@ -187,14 +183,10 @@ class ChatAgent:
                     "timezone": "UTC"
                 }
             
-            # Initialize Firestore client
-            from leanworks.setting import _get_firestore_client
-            db = _get_firestore_client()
-            
-            # Query Firestore users collection
+            # Query Firestore users collection using the provided client
             # Users are stored at domains/{domain}/users/{email}
             collection_path = f"domains/{domain}/users"
-            user_doc_ref = db.collection(collection_path).document(self.user_id)
+            user_doc_ref = self.firestore_client.collection(collection_path).document(self.user_id)
             user_doc = user_doc_ref.get()
             
             if user_doc.exists:
@@ -388,7 +380,7 @@ class ChatAgent:
                         if streaming:
                             print("🤖 Assistant response:")
                             print("-" * 50)
-                            _stream_text(response_text, delay=0.01)
+                            AgentHelpers.stream_text(response_text, delay=0.01)
                             print("-" * 50)
                         
                         assistant_message_obj = {
@@ -415,7 +407,7 @@ class ChatAgent:
                         if streaming:
                             print("🤖 Assistant response (evaluated):")
                             print("-" * 50)
-                            _stream_text(response_text, delay=0.01)
+                            AgentHelpers.stream_text(response_text, delay=0.01)
                             print("-" * 50)
                         
                         # Create assistant message object
@@ -479,7 +471,7 @@ class ChatAgent:
                                 if streaming:
                                     print("🤖 Assistant response (retry successful):")
                                     print("-" * 50)
-                                    _stream_text(response_text, delay=0.01)
+                                    AgentHelpers.stream_text(response_text, delay=0.01)
                                     print("-" * 50)
                                 
                                 # Remove the inadequate response and critique from conversation

@@ -23,7 +23,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     def __init__(
         self,
         vectordb_client,
-        storage_client,
+        firestore_client,
+        domain,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None
@@ -33,7 +34,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         Args:
             vectordb_client: Initialized PineconeHybridIndex client for hybrid search
-            storage_client: Initialized CloudStorage client for memory persistence
+            firestore_client: Firestore client for memory persistence
+            domain: Client domain for Firestore path
             model_client: Initialized OpenAI client for LLM generation
             user_id: ID of the user
             session_id: ID of the current conversation session
@@ -46,7 +48,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
         if self.memory_enabled:
-            MemoryManager.__init__(self, model_client, storage_client, user_id, session_id)
+            MemoryManager.__init__(self, model_client, firestore_client, domain, user_id, session_id)
             logger.info(f"Memory enabled for user_id: {user_id}, session_id: {session_id}")
         else:
             logger.info("Memory disabled - no user_id or session_id provided")
@@ -507,7 +509,8 @@ class AsyncChat(Chat):
     def __init__(
         self,
         vectordb_client,
-        storage_client,
+        firestore_client,
+        domain,
         model_client,
         user_id: str | None = None,
         session_id: str | None = None
@@ -515,7 +518,8 @@ class AsyncChat(Chat):
         """Initialize AsyncChat with the same parameters as Chat."""
         super().__init__(
             vectordb_client=vectordb_client,
-            storage_client=storage_client,
+            firestore_client=firestore_client,
+            domain=domain,
             model_client=model_client,
             user_id=user_id,
             session_id=session_id

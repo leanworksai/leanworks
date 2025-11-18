@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,8 @@ class MemoryManager:
     
     def __init__(self, 
                  model_client,
-                 storage_client,
+                 firestore_client,
+                 domain,
                  user_id: str = None,
                  session_id: str = None,
                  max_context_tokens: int = 180000,  # Conservative for 200K models
@@ -35,7 +37,8 @@ class MemoryManager:
         
         Args:
             model_client: Claude model client for summarization
-            storage_client: Storage client for persisting memory state
+            firestore_client: Firestore client for persisting memory state
+            domain: Client domain for Firestore path
             user_id: User identifier for storage
             session_id: Session identifier for storage
             max_context_tokens: Maximum tokens allowed in context
@@ -46,7 +49,8 @@ class MemoryManager:
             main_model: Model used for main conversation (for accurate token counting)
         """
         self.model_client = model_client
-        self.storage_client = storage_client
+        self.firestore_client = firestore_client
+        self.domain = domain
         self.user_id = user_id
         self.session_id = session_id
         
@@ -65,7 +69,7 @@ class MemoryManager:
         self.user_profile = ""
         
         # Storage path for memory state
-        self.memory_path = f"memory_store/{self.user_id}/{self.session_id}_memory.json"
+        self.memory_path = f"memory_store/{self.user_id}/{self.session_id}_memory"
         
         # Background processing setup
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory-bg")
@@ -82,7 +86,8 @@ class MemoryManager:
     def create_for_model(cls, 
                         model_name: str,
                         model_client,
-                        storage_client,
+                        firestore_client,
+                        domain,
                         user_id: str = None,
                         session_id: str = None,
                         **kwargs):
@@ -92,7 +97,8 @@ class MemoryManager:
         Args:
             model_name: Claude model name (e.g., 'claude-sonnet-4-20250514')
             model_client: Claude model client
-            storage_client: Storage client
+            firestore_client: Firestore client
+            domain: Client domain for Firestore path
             user_id: User identifier
             session_id: Session identifier
             **kwargs: Override any default settings
@@ -183,7 +189,8 @@ class MemoryManager:
         
         return cls(
             model_client=model_client,
-            storage_client=storage_client,
+            firestore_client=firestore_client,
+            domain=domain,
             user_id=user_id,
             session_id=session_id,
             main_model=model_name,  # Pass the actual model name for accurate token counting
@@ -274,15 +281,19 @@ class MemoryManager:
         return sum(self.estimate_message_tokens(msg) for msg in messages)
     
     def load_memory_state(self):
-        """Load memory state from storage."""
-        if not self.storage_client or not self.user_id:
-            logger.info("No storage client or user_id provided, starting with empty memory")
+        """Load memory state from Firestore."""
+        if not self.firestore_client or not self.user_id or not self.domain:
+            logger.info("No firestore client, domain, or user_id provided, starting with empty memory")
             return
             
         try:
-            memory_data = self.storage_client.download_blob_to_memory(self.memory_path)
-            if memory_data:
-                state = json.loads(memory_data)
+            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+            doc = file_ref.get()
+            
+            if doc.exists:
+                data = doc.to_dict()
+                state = data.get('content', {})
+                
                 self.running_summary = state.get("running_summary", "")
                 self.conversation_turns = state.get("conversation_turns", [])
                 self.system_prompt = state.get("system_prompt", "")
@@ -297,11 +308,12 @@ class MemoryManager:
             self.conversation_turns = []
     
     def save_memory_state(self):
-        """Save memory state to storage."""
-        if not self.storage_client or not self.user_id:
+        """Save memory state to Firestore."""
+        if not self.firestore_client or not self.user_id or not self.domain:
             return
             
         try:
+            # Save state directly as dict (no JSON conversion)
             state = {
                 "running_summary": self.running_summary,
                 "conversation_turns": self.conversation_turns,
@@ -310,8 +322,11 @@ class MemoryManager:
                 "last_updated": datetime.now().isoformat()
             }
             
-            memory_json = json.dumps(state)
-            self.storage_client.upload_blob_from_memory(memory_json, self.memory_path)
+            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+            file_ref.set({
+                'content': state,  # Save directly as dict
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
             logger.info("Saved memory state")
         except Exception as e:
             logger.error(f"Error saving memory state: {str(e)}")

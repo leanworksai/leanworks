@@ -7,7 +7,7 @@ import datetime
 import re
 import os
 import threading
-from leanworks.secret import GCPSecretLoader
+from google.cloud import secretmanager
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,20 @@ class PostgresTool:
     _pools: Dict[str, pool.ThreadedConnectionPool] = {}
     _pools_lock = threading.Lock()
     _cached_password: Optional[str] = None
+    _secret_manager_client: Optional[secretmanager.SecretManagerServiceClient] = None
+    _project_id: Optional[str] = None
+    
+    @classmethod
+    def set_secret_manager(cls, secret_manager_client: secretmanager.SecretManagerServiceClient, credential_path: str = "gcp_credential.json"):
+        """Set the Secret Manager client and read project ID from credential file."""
+        cls._secret_manager_client = secret_manager_client
+        try:
+            with open(credential_path, "r") as f:
+                credential_data = json.load(f)
+            cls._project_id = credential_data.get("project_id")
+        except Exception as e:
+            logger.error(f"Failed to read project_id from {credential_path}: {e}")
+            raise
     
     @classmethod
     def _get_domain_from_email(cls, email: str) -> str:
@@ -68,10 +82,14 @@ class PostgresTool:
             return cls._cached_password
         
         try:
-            secret_client = GCPSecretLoader(credential_path)
-            cls._cached_password = secret_client.get("postgresdb-password")
-            logger.info("PostgreSQL password fetched from Secret Manager")
-            return cls._cached_password
+            if cls._secret_manager_client and cls._project_id:
+                full_name = f"projects/{cls._project_id}/secrets/postgresdb-password/versions/latest"
+                response = cls._secret_manager_client.access_secret_version(name=full_name)
+                cls._cached_password = response.payload.data.decode("UTF-8")
+                logger.info("PostgreSQL password fetched from Secret Manager")
+                return cls._cached_password
+            else:
+                raise ValueError("Secret Manager client not set")
         except Exception as e:
             logger.warning(f"Failed to fetch password from Secret Manager: {e}, trying environment variable")
             # Fallback to environment variable
@@ -488,7 +506,6 @@ class PostgresTool:
         Table Schemas (REQUIRED READING - check these to understand table structure and column names):
         {self.schemas}
         """
-        print(self.schemas)
         return {
             "type": "custom",
             "name": "query_postgres",

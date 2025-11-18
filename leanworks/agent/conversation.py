@@ -3,60 +3,71 @@ import re
 import copy
 import logging
 from typing import List
+from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
-    def __init__(self, model_client, storage_client, user_id=None, session_id=None):
+    def __init__(self, model_client, firestore_client, domain, user_id=None, session_id=None):
         self.model_client = model_client
-        self.storage_client = storage_client
+        self.firestore_client = firestore_client
+        self.domain = domain
         self.user_id = user_id
         self.session_id = session_id
-        self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}.json"
+        self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
         self.slim_conversation = []  # Only tracks initial user query and verified responses
         
-        # Load previous conversation if storage client and user_id are provided
-        if storage_client and user_id and session_id:
+        # Load previous conversation if firestore client and user_id are provided
+        if firestore_client and user_id and session_id:
             self.load_conversation()
         
     def load_conversation(self):
-        """Load the most recent slim conversation from CloudStorage."""
-        if not self.storage_client or not self.user_id:
+        """Load the most recent slim conversation from Firestore."""
+        if not self.firestore_client or not self.user_id or not self.domain:
             return
-            
-        conversation_data = self.storage_client.download_blob_to_memory(self.conversation_path)
         
-        if conversation_data:
-            try:
-                loaded_data = json.loads(conversation_data)
+        try:
+            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.conversation_path)
+            doc = file_ref.get()
+            
+            if doc.exists:
+                data = doc.to_dict()
+                content = data.get('content', [])
+                
                 # Ensure slim_conversation is always a list and take last 6 messages
-                if isinstance(loaded_data, list):
-                    self.slim_conversation = loaded_data[-6:] if len(loaded_data) > 6 else loaded_data
+                if isinstance(content, list):
+                    self.slim_conversation = content[-6:] if len(content) > 6 else content
                 else:
                     print(f"Conversation data for user {self.user_id} is not a list. Creating new list.")
                     self.slim_conversation = []
                 print(f"Loaded slim conversation history for user {self.user_id}")
-            except json.JSONDecodeError:
-                print(f"Error decoding conversation data for user {self.user_id}")
+            else:
+                print(f"No previous conversation found for user {self.user_id}")
                 self.slim_conversation = []
-        else:
-            print(f"No previous conversation found for user {self.user_id}")
+        except Exception as e:
+            logger.error(f"Error loading conversation from Firestore: {e}")
             self.slim_conversation = []
         
         # Initialize the current conversation as empty
         self.conversation = self.slim_conversation.copy()
     
     def save_conversation(self):
-        """Save the slim conversation to CloudStorage"""
-        if not self.storage_client or not self.user_id:
+        """Save the slim conversation to Firestore"""
+        if not self.firestore_client or not self.user_id or not self.domain:
             return
-            
-        # Save slim conversation
-        conversation_json = json.dumps(self.slim_conversation)
-        self.storage_client.upload_blob_from_memory(conversation_json, self.conversation_path)
-        print(f"Saved slim conversation for user {self.user_id}")
+        
+        try:
+            # Save slim conversation directly as list (no JSON conversion)
+            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.conversation_path)
+            file_ref.set({
+                'content': self.slim_conversation,  # Save directly as list
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
+            print(f"Saved slim conversation for user {self.user_id}")
+        except Exception as e:
+            logger.error(f"Error saving conversation to Firestore: {e}")
         
     def add_user_message(self, content, include_in_slim=False):
         """Add a user message to the conversation history"""
