@@ -37,7 +37,7 @@ async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -
             logger.error(f"get_client_info returned invalid result type: {type(result)} for user_id: {user_id}")
             raise ValueError(f"Invalid client info format for user_id: {user_id}")
         
-        domain, _ = result  # available_tools is no longer used (tools are user-provided)
+        domain, available_tools_from_db = result
         
         if not domain:
             raise ValueError(f"Could not determine domain for user_id: {user_id}")
@@ -71,12 +71,37 @@ async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -
         
         postgres_client_wrapper = PostgresClientWrapper(domain, client_name)
         
-        # Tools are now user-provided (not queried from database)
-        # Default to internal tools only, user can add external tools explicitly
-        # Internal tools: ['search', 'postgres', 'duckdb'] are always available
-        # External tools (e.g., 'outlook') should be explicitly provided if needed
+        # Validate and filter tools based on connected integrations
         if tools is None:
-            tools = []  # Empty list means only internal tools will be enabled
+            # No tools provided - use only default/internal tools (search, postgres, duckdb)
+            tools = []
+            logger.info("No tools provided - using only default internal tools (search, postgres, duckdb)")
+        else:
+            # Tools provided - filter to only include tools that are in connected integrations
+            # Normalize provided tools to lowercase for comparison
+            provided_tools_normalized = [tool.lower().strip() if isinstance(tool, str) else tool for tool in tools]
+            available_tools_normalized = [tool.lower().strip() for tool in available_tools_from_db]
+            
+            # Filter provided tools to only include those in connected integrations
+            valid_tools = [tool for tool in provided_tools_normalized if tool in available_tools_normalized]
+            invalid_tools = [tool for tool in provided_tools_normalized if tool not in available_tools_normalized]
+            
+            if invalid_tools:
+                logger.warning(
+                    f"The following tools are not in connected integrations and will be ignored: {invalid_tools}. "
+                    f"Available connected integrations: {available_tools_from_db}"
+                )
+            
+            if not valid_tools:
+                logger.warning(
+                    f"None of the provided tools ({tools}) are in connected integrations. "
+                    f"Available connected integrations: {available_tools_from_db}. "
+                    f"Using empty tool list (only internal tools will be available)."
+                )
+                tools = []
+            else:
+                tools = valid_tools
+                logger.info(f"Using {len(tools)} valid tools from provided list: {tools}")
         
         init_time = time.time() - start_time
         logger.info(f"Client initialization completed in {init_time:.3f}s for user: {user_id}")
