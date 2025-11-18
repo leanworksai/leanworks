@@ -6,17 +6,17 @@ from google.cloud import storage  # Ensure you have this import
 from pathlib import Path
 
 class CloudStorage:
-    def __init__(self, gcp_credential_path, bucket='leanworks'):
+    def __init__(self, gcp_credential_path):
         self.storage_client = storage.Client.from_service_account_json(gcp_credential_path)
-        
+        self.bucket = "leanworks-prod"
         # Check if the bucket exists
-        bucket_obj = self.storage_client.lookup_bucket(bucket)
+        bucket_obj = self.storage_client.lookup_bucket(self.bucket)
         if bucket_obj is None:
             # Bucket does not exist; create it
-            bucket_obj = self.storage_client.create_bucket(bucket)
-            print(f"Bucket '{bucket}' created.")
+            bucket_obj = self.storage_client.create_bucket(self.bucket)
+            print(f"Bucket '{self.bucket}' created.")
         else:
-            print(f"Bucket '{bucket}' already exists.")
+            print(f"Bucket '{self.bucket}' already exists.")
         self.bucket = bucket_obj
 
     def upload_blob_from_memory(self, contents, destination_blob_name):
