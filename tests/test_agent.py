@@ -51,7 +51,7 @@ async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -
         # Run client initializations in executor to avoid blocking
         logger.info(f"Initializing storage and secret clients for domain: {domain}")
         storage_client, secret_client = await asyncio.gather(
-            loop.run_in_executor(None, lambda: CloudStorage("gcp_credential.json", bucket=client_name)),
+            loop.run_in_executor(None, lambda: CloudStorage("gcp_credential.json")),
             loop.run_in_executor(None, lambda: GCPSecretLoader("gcp_credential.json"))
         )
         
