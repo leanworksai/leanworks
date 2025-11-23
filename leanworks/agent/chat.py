@@ -6,6 +6,7 @@ from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 from google.cloud import firestore, secretmanager
+from typing import Dict, Any
 import traceback
 import logging
 import pytz
@@ -137,7 +138,8 @@ class ChatAgent:
         # Set the system prompt and user profile for memory manager
         if self.memory_manager:
             self.memory_manager.set_system_prompt(self.system_prompt)
-            self.memory_manager.set_user_profile(str(user_info))
+            # Pass user_info as dict so it can be updated later
+            self.memory_manager.set_user_profile(user_info)
         
         self.api_params = {
             "model": GENERATION_MODEL,
@@ -151,10 +153,10 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Query user information from Firestore users collection.
+        Query user information from PostgreSQL users table.
         
         Returns:
-            dict: User information dictionary with user_id, first_name, last_name, job_title, responsibilities, domain
+            dict: User information dictionary with user_id, first_name, last_name, job_title, responsibilities, domain, work_style
         """
         try:
             if not self.user_id:
@@ -165,7 +167,8 @@ class ChatAgent:
                     "job_title": "",
                     "responsibilities": "",
                     "domain": "",
-                    "timezone": "UTC"
+                    "timezone": "UTC",
+                    "work_style": ""
                 }
             
             # Use domain extracted from user_id
@@ -180,30 +183,77 @@ class ChatAgent:
                     "job_title": "",
                     "responsibilities": "",
                     "domain": "",
-                    "timezone": "UTC"
+                    "timezone": "UTC",
+                    "work_style": ""
                 }
             
-            # Query Firestore users collection using the provided client
-            # Users are stored at domains/{domain}/users/{email}
-            collection_path = f"domains/{domain}/users"
-            user_doc_ref = self.firestore_client.collection(collection_path).document(self.user_id)
-            user_doc = user_doc_ref.get()
-            
-            if user_doc.exists:
-                user_data = user_doc.to_dict()
-                user_info = {
-                    "user_id": user_data.get("email", self.user_id),
-                    "first_name": user_data.get("firstName", ""),
-                    "last_name": user_data.get("lastName", ""),
-                    "job_title": user_data.get("jobTitle", ""),
-                    "responsibilities": user_data.get("responsibilities", ""),
-                    "domain": user_data.get("domain", domain),
-                    "timezone": "UTC"  # Default to UTC since timezone field doesn't exist in schema
-                }
-                logger.info(f"Retrieved user info from Firestore: {user_info}")
-                return user_info
-            else:
-                logger.warning(f"User document not found in Firestore: {self.user_id}")
+            # Query PostgreSQL users table using the postgres tool
+            try:
+                # Initialize postgres tool if not already initialized
+                if not self.tool_use.postgres_tool:
+                    logger.warning("PostgreSQL tool not available, falling back to default user info")
+                    return {
+                        "user_id": self.user_id, 
+                        "first_name": "", 
+                        "last_name": "", 
+                        "job_title": "",
+                        "responsibilities": "",
+                        "domain": domain,
+                        "timezone": "UTC",
+                        "work_style": ""
+                    }
+                
+                # Query PostgreSQL users table (using parameterized query pattern)
+                # Note: Since postgres tool only accepts SQL strings, we sanitize the email
+                # The email should already be validated, but we escape single quotes as a safety measure
+                sanitized_email = self.user_id.replace("'", "''")
+                sql_query = f"SELECT email, first_name, last_name, job_title, responsibilities, timezone FROM users WHERE email = '{sanitized_email}'"
+                results = self.tool_use.postgres_tool.query_postgres(sql=sql_query)
+                
+                if isinstance(results, dict) and "error" in results:
+                    logger.error(f"PostgreSQL query error: {results['error']}")
+                    # Fallback to default
+                    return {
+                        "user_id": self.user_id, 
+                        "first_name": "", 
+                        "last_name": "", 
+                        "job_title": "",
+                        "responsibilities": "",
+                        "domain": domain,
+                        "timezone": "UTC",
+                        "work_style": ""
+                    }
+                
+                if results and len(results) > 0:
+                    user_data = results[0]
+                    user_info = {
+                        "user_id": user_data.get("email", self.user_id),
+                        "first_name": user_data.get("first_name", ""),
+                        "last_name": user_data.get("last_name", ""),
+                        "job_title": user_data.get("job_title", ""),
+                        "responsibilities": user_data.get("responsibilities", ""),  # Column name is 'responsibilities' not 'job_responsibilities'
+                        "domain": domain,
+                        "timezone": user_data.get("timezone", "UTC"),
+                        "work_style": ""  # Will be populated from memory or conversation analysis
+                    }
+                    logger.info(f"Retrieved user info from PostgreSQL: {user_info}")
+                    return user_info
+                else:
+                    logger.warning(f"User not found in PostgreSQL users table: {self.user_id}")
+                    return {
+                        "user_id": self.user_id, 
+                        "first_name": "", 
+                        "last_name": "", 
+                        "job_title": "",
+                        "responsibilities": "",
+                        "domain": domain,
+                        "timezone": "UTC",
+                        "work_style": ""
+                    }
+                    
+            except Exception as pg_error:
+                logger.error(f"Error querying PostgreSQL for user info: {str(pg_error)}")
+                # Fallback to default
                 return {
                     "user_id": self.user_id, 
                     "first_name": "", 
@@ -211,11 +261,12 @@ class ChatAgent:
                     "job_title": "",
                     "responsibilities": "",
                     "domain": domain,
-                    "timezone": "UTC"
+                    "timezone": "UTC",
+                    "work_style": ""
                 }
             
         except Exception as e:
-            logger.error(f"Error retrieving user info from Firestore: {str(e)}")
+            logger.error(f"Error retrieving user info: {str(e)}")
             # Return default dict on error
             return {
                 "user_id": self.user_id or "Unknown", 
@@ -224,7 +275,8 @@ class ChatAgent:
                 "job_title": "",
                 "responsibilities": "",
                 "domain": "",
-                "timezone": "UTC"
+                "timezone": "UTC",
+                "work_style": ""
             }
 
 
@@ -587,6 +639,8 @@ class ChatAgent:
         # Log memory stats if using memory manager
         if self.memory_manager:
             logger.info(f"Memory stats: {self.memory_manager.get_memory_stats()}")
+            # Periodically update user profile based on conversation
+            self._update_user_profile_from_conversation()
         
         # Return dictionary with content and data sources
         result = {
@@ -681,6 +735,145 @@ class ChatAgent:
 
         return "\n\n---\n\n".join(source_content_with_attribution) if source_content_with_attribution else "No source content available."
 
+    def _update_user_profile_from_conversation(self):
+        """
+        Analyze recent conversation to update user profile (responsibilities and work_style).
+        This runs periodically after responses to keep the profile up-to-date.
+        """
+        if not self.memory_manager:
+            return
+        
+        try:
+            # Only update if we have enough conversation turns (at least 3)
+            if len(self.memory_manager.conversation_turns) < 3:
+                return
+            
+            # Get recent conversation turns (last 10 turns for analysis)
+            recent_turns = self.memory_manager.conversation_turns[-10:]
+            
+            # Convert to text for analysis
+            conversation_text = ""
+            for turn in recent_turns:
+                user_msg = turn.get("user_message", {})
+                assistant_msg = turn.get("assistant_message", {})
+                
+                # Extract text from messages
+                user_text = self._extract_message_text(user_msg)
+                assistant_text = self._extract_message_text(assistant_msg) if assistant_msg else ""
+                
+                if user_text:
+                    conversation_text += f"User: {user_text}\n"
+                if assistant_text:
+                    conversation_text += f"Assistant: {assistant_text}\n"
+                conversation_text += "\n"
+            
+            if not conversation_text.strip():
+                return
+            
+            # Get current user profile
+            current_profile = self.memory_manager.get_user_profile_dict()
+            current_responsibilities = current_profile.get("responsibilities", "")
+            current_work_style = current_profile.get("work_style", "")
+            
+            # Create prompt for analyzing user profile
+            analysis_prompt = f"""Analyze the following conversation to extract insights about the user's job responsibilities and work style.
+
+Current user profile:
+- Responsibilities: {current_responsibilities or "Not yet determined"}
+- Work Style: {current_work_style or "Not yet determined"}
+
+Recent conversation:
+{conversation_text}
+
+Based on this conversation, provide updated information about:
+1. Job Responsibilities: Extract or refine the user's job responsibilities based on what they work on, tasks they mention, projects they're involved in, etc. If current responsibilities are empty or incomplete, add new information. If they already exist, update them with new insights.
+2. Work Style: Identify the user's work style, preferences, and patterns. Consider:
+   - Communication style (concise vs detailed, formal vs casual)
+   - Problem-solving approach (analytical, creative, systematic, etc.)
+   - Work preferences (collaborative vs independent, structured vs flexible)
+   - Time management style
+   - Tools and methods they prefer
+   - How they approach tasks and projects
+
+Return a JSON object with this structure:
+{{
+    "responsibilities": "Updated or refined job responsibilities based on conversation",
+    "work_style": "Description of work style, preferences, and patterns observed"
+}}
+
+If there's not enough information to make meaningful updates, return the current values. Be specific and concrete based on what you observe in the conversation."""
+            
+            # Call Claude to analyze
+            messages = [{"role": "user", "content": [{"type": "text", "text": analysis_prompt}]}]
+            
+            response = self.model_client.messages.create(
+                model="claude-3-haiku-20240307",  # Use cheaper model for analysis
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.3,
+                timeout=30
+            )
+            
+            analysis_text = next((block.text for block in response.content if block.type == "text"), "")
+            
+            if analysis_text:
+                # Parse JSON response
+                import json
+                try:
+                    # Extract JSON from response
+                    json_start = analysis_text.find('{')
+                    json_end = analysis_text.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_text = analysis_text[json_start:json_end]
+                        analysis_result = json.loads(json_text)
+                        
+                        new_responsibilities = analysis_result.get("responsibilities", current_responsibilities)
+                        new_work_style = analysis_result.get("work_style", current_work_style)
+                        
+                        # Only update if there are meaningful changes
+                        if new_responsibilities != current_responsibilities or new_work_style != current_work_style:
+                            self.memory_manager.update_user_profile(
+                                responsibilities=new_responsibilities if new_responsibilities != current_responsibilities else None,
+                                work_style=new_work_style if new_work_style != current_work_style else None
+                            )
+                            logger.info(f"Updated user profile from conversation analysis")
+                        else:
+                            logger.debug("User profile analysis found no significant updates")
+                    else:
+                        logger.warning("Could not extract JSON from profile analysis response")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse profile analysis JSON: {e}")
+        except Exception as e:
+            logger.error(f"Error updating user profile from conversation: {str(e)}")
+            # Don't fail the main conversation flow if profile update fails
+    
+    def _extract_message_text(self, message: Dict[str, Any]) -> str:
+        """Extract readable text from a message in Claude format."""
+        if not message:
+            return ""
+        
+        content = message.get("content", [])
+        
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        # Summarize tool use
+                        tool_name = block.get("name", "unknown_tool")
+                        text_parts.append(f"[Used tool: {tool_name}]")
+                    elif block.get("type") == "tool_result":
+                        # Summarize tool result
+                        result_preview = str(block.get("content", ""))[:100]
+                        text_parts.append(f"[Tool result: {result_preview}...]")
+            return " ".join(text_parts)
+        
+        return ""
+    
     def _perform_evaluation(self, response_text, source_content=""):
         """
         Performs evaluation on the response using a separate evaluation conversation flow.

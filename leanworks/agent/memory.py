@@ -68,8 +68,11 @@ class MemoryManager:
         self.system_prompt = ""
         self.user_profile = ""
         
-        # Storage path for memory state
+        # Storage paths: separate user-level profile from session-level memory
+        # Session-level memory (conversation history, summaries)
         self.memory_path = f"memory_store/{self.user_id}/{self.session_id}_memory"
+        # User-level profile (shared across all sessions)
+        self.profile_path = f"memory_store/{self.user_id}/profile" if self.user_id else None
         
         # Background processing setup
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory-bg")
@@ -281,53 +284,85 @@ class MemoryManager:
         return sum(self.estimate_message_tokens(msg) for msg in messages)
     
     def load_memory_state(self):
-        """Load memory state from Firestore."""
+        """Load memory state from Firestore.
+        
+        Loads session-level memory (conversation_turns, running_summary) from session storage
+        and user-level profile from user storage.
+        """
         if not self.firestore_client or not self.user_id or not self.domain:
             logger.info("No firestore client, domain, or user_id provided, starting with empty memory")
             return
             
         try:
-            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
-            doc = file_ref.get()
-            
-            if doc.exists:
-                data = doc.to_dict()
-                state = data.get('content', {})
+            # Load session-level memory (conversation history, summaries)
+            if self.session_id:
+                file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+                doc = file_ref.get()
                 
-                self.running_summary = state.get("running_summary", "")
-                self.conversation_turns = state.get("conversation_turns", [])
-                self.system_prompt = state.get("system_prompt", "")
-                self.user_profile = state.get("user_profile", "")
-                logger.info(f"Loaded memory state with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
-            else:
-                logger.info("No existing memory state found, starting fresh")
+                if doc.exists:
+                    data = doc.to_dict()
+                    state = data.get('content', {})
+                    
+                    self.running_summary = state.get("running_summary", "")
+                    self.conversation_turns = state.get("conversation_turns", [])
+                    self.system_prompt = state.get("system_prompt", "")
+                    logger.info(f"Loaded session memory with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
+                else:
+                    logger.info("No existing session memory found, starting fresh")
+            
+            # Load user-level profile (shared across all sessions)
+            if self.profile_path:
+                profile_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.profile_path)
+                profile_doc = profile_ref.get()
+                
+                if profile_doc.exists:
+                    profile_data = profile_doc.to_dict()
+                    profile_content = profile_data.get('content', {})
+                    
+                    # Handle both old format (string) and new format (dict)
+                    if isinstance(profile_content, dict):
+                        self.user_profile = profile_content.get("user_profile", "")
+                    else:
+                        self.user_profile = profile_content if profile_content else ""
+                    
+                    if self.user_profile:
+                        logger.info(f"Loaded user profile from user-level storage")
+                else:
+                    logger.info("No existing user profile found, starting fresh")
+                    
         except Exception as e:
             logger.error(f"Error loading memory state: {str(e)}")
             # Start with empty state on error
             self.running_summary = ""
             self.conversation_turns = []
+            # Don't clear user_profile on error - keep it if it was loaded
     
     def save_memory_state(self):
-        """Save memory state to Firestore."""
+        """Save memory state to Firestore.
+        
+        Saves session-level memory (conversation_turns, running_summary) to session storage
+        and user-level profile to user storage separately.
+        """
         if not self.firestore_client or not self.user_id or not self.domain:
             return
             
         try:
-            # Save state directly as dict (no JSON conversion)
-            state = {
-                "running_summary": self.running_summary,
-                "conversation_turns": self.conversation_turns,
-                "system_prompt": self.system_prompt,
-                "user_profile": self.user_profile,
-                "last_updated": datetime.now().isoformat()
-            }
-            
-            file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
-            file_ref.set({
-                'content': state,  # Save directly as dict
-                'updated_at': firestore.SERVER_TIMESTAMP
-            })
-            logger.info("Saved memory state")
+            # Save session-level memory (conversation history, summaries)
+            if self.session_id:
+                session_state = {
+                    "running_summary": self.running_summary,
+                    "conversation_turns": self.conversation_turns,
+                    "system_prompt": self.system_prompt,
+                    "last_updated": datetime.now().isoformat()
+                }
+                
+                file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+                file_ref.set({
+                    'content': session_state,  # Save directly as dict
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+                logger.info("Saved session memory state")
+                
         except Exception as e:
             logger.error(f"Error saving memory state: {str(e)}")
     
@@ -626,7 +661,35 @@ Please provide an updated running summary that incorporates both the existing su
         
         # Add user profile if available
         if self.user_profile:
-            context_parts.append(f"User Profile: {self.user_profile}")
+            # Format user profile nicely
+            try:
+                profile_dict = self.get_user_profile_dict()
+                if isinstance(profile_dict, dict) and profile_dict:
+                    # Format as readable text
+                    profile_lines = ["User Profile:"]
+                    if profile_dict.get("user_id"):
+                        profile_lines.append(f"  User ID: {profile_dict.get('user_id')}")
+                    if profile_dict.get("first_name") or profile_dict.get("last_name"):
+                        name = f"{profile_dict.get('first_name', '')} {profile_dict.get('last_name', '')}".strip()
+                        if name:
+                            profile_lines.append(f"  Name: {name}")
+                    if profile_dict.get("job_title"):
+                        profile_lines.append(f"  Job Title: {profile_dict.get('job_title')}")
+                    if profile_dict.get("responsibilities"):
+                        profile_lines.append(f"  Responsibilities: {profile_dict.get('responsibilities')}")
+                    if profile_dict.get("work_style"):
+                        profile_lines.append(f"  Work Style: {profile_dict.get('work_style')}")
+                    if profile_dict.get("domain"):
+                        profile_lines.append(f"  Domain: {profile_dict.get('domain')}")
+                    if profile_dict.get("timezone"):
+                        profile_lines.append(f"  Timezone: {profile_dict.get('timezone')}")
+                    context_parts.append("\n".join(profile_lines))
+                else:
+                    # Fallback to raw string
+                    context_parts.append(f"User Profile: {self.user_profile}")
+            except Exception:
+                # Fallback to raw string on error
+                context_parts.append(f"User Profile: {self.user_profile}")
         
         # Add running summary if available
         if self.running_summary:
@@ -648,17 +711,85 @@ Please provide an updated running summary that incorporates both the existing su
         self.system_prompt = system_prompt
         self.save_memory_state()
     
-    def set_user_profile(self, user_profile: str):
-        """Set the user profile information."""
-        self.user_profile = user_profile
-        self.save_memory_state()
+    def set_user_profile(self, user_profile):
+        """
+        Set the user profile information.
+        
+        Args:
+            user_profile: Can be a dict or string. If dict, will be stored as JSON string.
+        """
+        if isinstance(user_profile, dict):
+            import json
+            self.user_profile = json.dumps(user_profile, ensure_ascii=False)
+        else:
+            self.user_profile = user_profile
+        # Save profile to user-level storage (not session-level)
+        self._save_user_profile()
+    
+    def _save_user_profile(self):
+        """Save user profile to user-level storage (shared across all sessions)."""
+        if not self.firestore_client or not self.user_id or not self.domain or not self.profile_path:
+            return
+        
+        try:
+            profile_state = {
+                "user_profile": self.user_profile,
+                "last_updated": datetime.now().isoformat()
+            }
+            
+            profile_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.profile_path)
+            profile_ref.set({
+                'content': profile_state,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
+            logger.info("Saved user profile to user-level storage")
+        except Exception as e:
+            logger.error(f"Error saving user profile: {str(e)}")
+    
+    def get_user_profile_dict(self) -> Dict[str, Any]:
+        """Get user profile as a dictionary."""
+        if not self.user_profile:
+            return {}
+        try:
+            import json
+            if isinstance(self.user_profile, str):
+                return json.loads(self.user_profile)
+            return self.user_profile
+        except (json.JSONDecodeError, TypeError):
+            # If it's not valid JSON, return as a simple dict with the string as a value
+            return {"raw": self.user_profile}
+    
+    def update_user_profile(self, responsibilities: str = None, work_style: str = None):
+        """
+        Update user profile fields (responsibilities and/or work_style).
+        
+        Args:
+            responsibilities: Updated responsibilities text
+            work_style: Updated work style description
+        """
+        profile = self.get_user_profile_dict()
+        
+        if responsibilities is not None:
+            profile["responsibilities"] = responsibilities
+        if work_style is not None:
+            profile["work_style"] = work_style
+        
+        # Store back as JSON string
+        import json
+        self.user_profile = json.dumps(profile, ensure_ascii=False)
+        # Save profile to user-level storage (not session-level)
+        self._save_user_profile()
+        logger.info(f"Updated user profile: responsibilities={responsibilities is not None}, work_style={work_style is not None}")
     
     def clear_memory(self):
-        """Clear all memory state."""
+        """Clear session-level memory state (conversation history, summaries).
+        
+        Note: User profile is NOT cleared as it's stored at user-level and shared across sessions.
+        """
         self.running_summary = ""
         self.conversation_turns = []
         self.system_prompt = ""
-        self.user_profile = ""
+        # Do NOT clear user_profile - it's user-level, not session-level
         
         # Clear background processing state
         with self._token_count_lock:
@@ -668,8 +799,8 @@ Please provide an updated running summary that incorporates both the existing su
                 self._token_count_future.cancel()
                 self._token_count_future = None
         
-        self.save_memory_state()
-        logger.info("Memory cleared")
+        self.save_memory_state()  # This will save session memory (without user_profile)
+        logger.info("Session memory cleared (user profile preserved)")
     
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about current memory usage."""
