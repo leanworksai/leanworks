@@ -4,6 +4,7 @@ import copy
 import logging
 from typing import List
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 logger = logging.getLogger(__name__)
 class ConversationManager:
@@ -93,7 +94,7 @@ class ConversationManager:
             chat_id = self.session_id  # Use session_id as chatId
             
             # Get existing messages for this chatId to avoid duplicates
-            existing_messages_query = messages_collection.where('chatId', '==', chat_id).where('userId', '==', self.user_id.lower())
+            existing_messages_query = messages_collection.where(filter=FieldFilter('chatId', '==', chat_id)).where(filter=FieldFilter('userId', '==', self.user_id.lower()))
             existing_docs = existing_messages_query.get()
             existing_contents = {doc.get('content') for doc in existing_docs}
             
