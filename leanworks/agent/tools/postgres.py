@@ -56,20 +56,12 @@ class PostgresTool:
     SHARED_DB_NAME = 'shared'
     
     @classmethod
-    def _sanitize_for_db_name(cls, name: str) -> str:
-        """Sanitize a name for use in database naming (remove special characters)."""
-        sanitized = name.lower().replace('.', '').replace('-', '')
-        # Ensure database name doesn't start with a number (PostgreSQL requirement)
-        if sanitized and sanitized[0].isdigit():
-            sanitized = 'db_' + sanitized
-        return sanitized
-    
-    @classmethod
     def _get_database_name(cls, org_slug: str) -> str:
-        """Get org database name from org_slug (with org_ prefix)."""
-        # Sanitize org name and add org_ prefix
-        sanitized = cls._sanitize_for_db_name(org_slug)
-        return f'org_{sanitized}'
+        """Get org database name from org_slug (with org_ prefix).
+        
+        Note: org_slug is expected to be already sanitized (lowercase, no special characters).
+        """
+        return f'org_{org_slug}'
     
     @classmethod
     def get_shared_pool(cls, credential_path: str = "gcp_credential.json") -> pool.ThreadedConnectionPool:
