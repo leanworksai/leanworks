@@ -23,7 +23,7 @@ class MemoryManager:
     def __init__(self, 
                  model_client,
                  firestore_client,
-                 domain,
+                 org_name,
                  user_id: str = None,
                  session_id: str = None,
                  max_context_tokens: int = 180000,  # Conservative for 200K models
@@ -38,7 +38,7 @@ class MemoryManager:
         Args:
             model_client: Claude model client for summarization
             firestore_client: Firestore client for persisting memory state
-            domain: Client domain for Firestore path
+            org_name: Organization name for Firestore path
             user_id: User identifier for storage
             session_id: Session identifier for storage
             max_context_tokens: Maximum tokens allowed in context
@@ -50,7 +50,7 @@ class MemoryManager:
         """
         self.model_client = model_client
         self.firestore_client = firestore_client
-        self.domain = domain
+        self.org_name = org_name
         self.user_id = user_id
         self.session_id = session_id
         
@@ -90,7 +90,7 @@ class MemoryManager:
                         model_name: str,
                         model_client,
                         firestore_client,
-                        domain,
+                        org_name,
                         user_id: str = None,
                         session_id: str = None,
                         **kwargs):
@@ -101,7 +101,7 @@ class MemoryManager:
             model_name: Claude model name (e.g., 'claude-sonnet-4-20250514')
             model_client: Claude model client
             firestore_client: Firestore client
-            domain: Client domain for Firestore path
+            org_name: Organization name for Firestore path
             user_id: User identifier
             session_id: Session identifier
             **kwargs: Override any default settings
@@ -193,7 +193,7 @@ class MemoryManager:
         return cls(
             model_client=model_client,
             firestore_client=firestore_client,
-            domain=domain,
+            org_name=org_name,
             user_id=user_id,
             session_id=session_id,
             main_model=model_name,  # Pass the actual model name for accurate token counting
@@ -289,14 +289,14 @@ class MemoryManager:
         Loads session-level memory (conversation_turns, running_summary) from session storage
         and user-level profile from user storage.
         """
-        if not self.firestore_client or not self.user_id or not self.domain:
-            logger.info("No firestore client, domain, or user_id provided, starting with empty memory")
+        if not self.firestore_client or not self.user_id or not self.org_name:
+            logger.info("No firestore client, org_name, or user_id provided, starting with empty memory")
             return
             
         try:
             # Load session-level memory (conversation history, summaries)
             if self.session_id:
-                file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+                file_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('files').document(self.memory_path)
                 doc = file_ref.get()
                 
                 if doc.exists:
@@ -312,7 +312,7 @@ class MemoryManager:
             
             # Load user-level profile (shared across all sessions)
             if self.profile_path:
-                profile_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.profile_path)
+                profile_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('files').document(self.profile_path)
                 profile_doc = profile_ref.get()
                 
                 if profile_doc.exists:
@@ -343,7 +343,7 @@ class MemoryManager:
         Saves session-level memory (conversation_turns, running_summary) to session storage
         and user-level profile to user storage separately.
         """
-        if not self.firestore_client or not self.user_id or not self.domain:
+        if not self.firestore_client or not self.user_id or not self.org_name:
             return
             
         try:
@@ -356,7 +356,7 @@ class MemoryManager:
                     "last_updated": datetime.now().isoformat()
                 }
                 
-                file_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.memory_path)
+                file_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('files').document(self.memory_path)
                 file_ref.set({
                     'content': session_state,  # Save directly as dict
                     'updated_at': firestore.SERVER_TIMESTAMP
@@ -679,8 +679,8 @@ Please provide an updated running summary that incorporates both the existing su
                         profile_lines.append(f"  Responsibilities: {profile_dict.get('responsibilities')}")
                     if profile_dict.get("work_style"):
                         profile_lines.append(f"  Work Style: {profile_dict.get('work_style')}")
-                    if profile_dict.get("domain"):
-                        profile_lines.append(f"  Domain: {profile_dict.get('domain')}")
+                    if profile_dict.get("org_name"):
+                        profile_lines.append(f"  Organization: {profile_dict.get('org_name')}")
                     if profile_dict.get("timezone"):
                         profile_lines.append(f"  Timezone: {profile_dict.get('timezone')}")
                     context_parts.append("\n".join(profile_lines))
@@ -728,7 +728,7 @@ Please provide an updated running summary that incorporates both the existing su
     
     def _save_user_profile(self):
         """Save user profile to user-level storage (shared across all sessions)."""
-        if not self.firestore_client or not self.user_id or not self.domain or not self.profile_path:
+        if not self.firestore_client or not self.user_id or not self.org_name or not self.profile_path:
             return
         
         try:
@@ -737,7 +737,7 @@ Please provide an updated running summary that incorporates both the existing su
                 "last_updated": datetime.now().isoformat()
             }
             
-            profile_ref = self.firestore_client.collection('domains').document(self.domain).collection('files').document(self.profile_path)
+            profile_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('files').document(self.profile_path)
             profile_ref.set({
                 'content': profile_state,
                 'updated_at': firestore.SERVER_TIMESTAMP

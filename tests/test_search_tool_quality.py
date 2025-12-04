@@ -43,7 +43,7 @@ class SearchToolQualityTester:
             bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
             
             # Initialize storage and secret clients
-            storage_client = CloudStorage("gcp_credential.json", client_domain="leanworks.ai")
+            storage_client = CloudStorage("gcp_credential.json", org_name="leanworks.ai")
             secret_client = GCPSecretLoader("gcp_credential.json")
             
             # Initialize search tool

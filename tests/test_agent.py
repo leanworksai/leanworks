@@ -19,16 +19,12 @@ logging.basicConfig(
     ]
 )
 
-async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -> Tuple[firestore.Client, secretmanager.SecretManagerServiceClient, Anthropic, list]:
+async def initialize_clients_async(user_id: str, org_name: str, tools: Optional[list] = None) -> Tuple[firestore.Client, secretmanager.SecretManagerServiceClient, Anthropic, list]:
     """Initialize all required clients asynchronously"""
     start_time = time.time()
     
     try:
-        # Extract domain from user_id email
-        if "@" not in user_id:
-            raise ValueError(f"Invalid user_id format (expected email): {user_id}")
-        domain = user_id.split("@")[1]
-        logger.info(f"Extracted domain for user {user_id}: {domain}")
+        logger.info(f"Initializing clients for user {user_id} in org {org_name}")
         
         # Initialize clients in parallel using asyncio.gather
         loop = asyncio.get_event_loop()
@@ -49,7 +45,7 @@ async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -
             return firestore_client, secret_manager_client
         
         # Run client initializations in executor to avoid blocking
-        logger.info(f"Initializing Firestore and Secret Manager clients for domain: {domain}")
+        logger.info(f"Initializing Firestore and Secret Manager clients for org: {org_name}")
         firestore_client, secret_manager_client = await loop.run_in_executor(None, init_clients)
         
         # Get Claude API key (project_id will be read from credential file in ChatAgent)
@@ -63,7 +59,7 @@ async def initialize_clients_async(user_id: str, tools: Optional[list] = None) -
         
         claude_api_key = await loop.run_in_executor(None, lambda: get_secret("claude-api-key"))
         if not claude_api_key:
-            raise ValueError(f"claude-api-key not found for domain: {domain}")
+            raise ValueError(f"claude-api-key not found for org: {org_name}")
         
         # Initialize Anthropic client
         model_client = Anthropic(api_key=claude_api_key)
@@ -89,6 +85,7 @@ async def main_async():
     """Async version of main function with async client initialization"""
     # user_id = "bharathkumar.l@sbnasoftware.com"
     user_id = "yanfu@leanworks.ai"
+    org_name = "leanworks.ai"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING")
@@ -102,7 +99,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id)
+        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_name)
         
         client_init_time = time.time() - client_init_start
         
@@ -115,6 +112,7 @@ async def main_async():
             secret_manager_client=secret_manager_client,
             model_client=model_client,
             user_id=user_id,
+            org_name=org_name,
             session_id="hf38r89r",
             clear_conversation=True,
             tools=tools
