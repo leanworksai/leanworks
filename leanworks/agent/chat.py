@@ -23,7 +23,7 @@ class ChatAgent:
                  secret_manager_client,
                  model_client,
                  user_id,
-                 org_name,
+                 org_slug,
                  session_id=None,
                  clear_conversation=True,
                  tools=None,
@@ -38,16 +38,16 @@ class ChatAgent:
             secret_manager_client: The official Secret Manager client (google.cloud.secretmanager.SecretManagerServiceClient)
             model_client: The Claude model client for main chat
             user_id (str): The user ID for conversation tracking (email address)
-            org_name (str): The organization name for data isolation (e.g., 'leanworks.ai')
+            org_slug (str): The organization name for data isolation (e.g., 'leanworks.ai')
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
             tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'postgres', 'duckdb']. ToolUse handles the processing and filtering.
             additional_context (str): Additional context to add to the system prompt.
             credential_path (str): Path to GCP credential JSON file (default: "gcp_credential.json")
         """
-        self.org_name = org_name
-        if not self.org_name:
-            raise ValueError("org_name is required for ChatAgent initialization")
+        self.org_slug = org_slug
+        if not self.org_slug:
+            raise ValueError("org_slug is required for ChatAgent initialization")
         
         # Read project_id from credential file
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
@@ -68,8 +68,8 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
-        # Initialize tool use with org_name and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(org_name=self.org_name, firestore_client=firestore_client, secret_manager_client=secret_manager_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
+        # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
+        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
         
 
         
@@ -80,7 +80,7 @@ class ChatAgent:
                 model_name=GENERATION_MODEL,
                 model_client=model_client,
                 firestore_client=firestore_client,
-                org_name=self.org_name,
+                org_slug=self.org_slug,
                 user_id=user_id,
                 session_id=session_id
             )
@@ -94,7 +94,7 @@ class ChatAgent:
         self.conversation = ConversationManager(
             self.model_client, 
             self.firestore_client,
-            self.org_name,
+            self.org_slug,
             self.user_id, 
             self.session_id
         )
@@ -152,78 +152,22 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Query user information from PostgreSQL shared database users table.
+        Get user information. Since org_slug is already provided directly,
+        returns default user info without database lookup.
         
         Returns:
-            dict: User information dictionary with user_id, first_name, last_name, job_title, responsibilities, org_name, work_style
+            dict: User information dictionary with user_id, org_slug, and default values
         """
-        from leanworks.agent.tools.postgres import PostgresTool
-        from psycopg2.extras import RealDictCursor
-        
-        default_user_info = {
+        return {
             "user_id": self.user_id or "Unknown", 
             "first_name": "", 
             "last_name": "", 
             "job_title": "",
             "responsibilities": "",
-            "org_name": self.org_name or "",
+            "org_slug": self.org_slug or "",
             "timezone": "UTC",
             "work_style": ""
         }
-        
-        try:
-            if not self.user_id:
-                return default_user_info
-            
-            # Query shared database for user info (users table is in shared DB)
-            try:
-                # Set Secret Manager client for PostgresTool if not already set
-                if self.secret_manager_client and not PostgresTool._secret_manager_client:
-                    PostgresTool.set_secret_manager(self.secret_manager_client)
-                
-                # Get shared database pool
-                shared_pool = PostgresTool.get_shared_pool()
-                
-                conn = None
-                try:
-                    conn = shared_pool.getconn()
-                    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                        # Query users table in shared database
-                        sanitized_email = self.user_id.replace("'", "''")
-                        sql_query = f"SELECT email, first_name, last_name, job_title, responsibilities, timezone FROM users WHERE email = '{sanitized_email}'"
-                        
-                        logger.info(f"Querying shared database for user info: {self.user_id}")
-                        cursor.execute(sql_query)
-                        results = cursor.fetchall()
-                        
-                        if results and len(results) > 0:
-                            user_data = dict(results[0])
-                            user_info = {
-                                "user_id": user_data.get("email", self.user_id),
-                                "first_name": user_data.get("first_name", ""),
-                                "last_name": user_data.get("last_name", ""),
-                                "job_title": user_data.get("job_title", ""),
-                                "responsibilities": user_data.get("responsibilities", ""),
-                                "org_name": self.org_name,
-                                "timezone": user_data.get("timezone", "UTC"),
-                                "work_style": ""  # Will be populated from memory or conversation analysis
-                            }
-                            logger.info(f"Retrieved user info from shared database: {user_info}")
-                            return user_info
-                        else:
-                            logger.warning(f"User not found in shared database users table: {self.user_id}")
-                            return default_user_info
-                finally:
-                    if conn:
-                        shared_pool.putconn(conn)
-                    
-            except Exception as pg_error:
-                logger.error(f"Error querying shared database for user info: {str(pg_error)}")
-                return default_user_info
-            
-        except Exception as e:
-            logger.error(f"Error retrieving user info: {str(e)}")
-            return default_user_info
 
 
     def process_message(self, user_message, cited_context=None, thinking=False, streaming=False):

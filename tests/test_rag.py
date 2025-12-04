@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # query = "how was the interview with Alan"
 query = "give me a summary of iOS app progress so far"
 def test_sync_chat():
-    storage_client = CloudStorage("gcp_credential.json", org_name="leanworks.ai")
+    storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
     secret_client = GCPSecretLoader("gcp_credential.json")
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
@@ -58,7 +58,7 @@ def test_sync_chat():
     print("\n" + "-"*50 + "\n")
 
 async def test_async_chat():
-    storage_client = CloudStorage("gcp_credential.json", org_name="leanworks.ai")
+    storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
     secret_client = GCPSecretLoader("gcp_credential.json")
     embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
     model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")

@@ -7,9 +7,110 @@ import traceback
 import time
 import asyncio
 import json
+import subprocess
+import socket
+import os
+import atexit
 from typing import Dict, Tuple, Optional
 import re
 logger = logging.getLogger(__name__)
+
+# Global reference to Cloud SQL Proxy process for cleanup
+_cloud_sql_proxy_process = None
+
+def is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def start_cloud_sql_proxy(credential_path: str = "gcp_credential.json") -> subprocess.Popen:
+    """
+    Start Cloud SQL Proxy for local development if not already running.
+    
+    Returns:
+        subprocess.Popen: The proxy process, or None if already running
+    """
+    global _cloud_sql_proxy_process
+    
+    # Check if we're in k8s (has /cloudsql directory)
+    if os.path.exists("/cloudsql"):
+        logger.info("Running in k8s environment, Cloud SQL Proxy not needed")
+        return None
+    
+    # Check if proxy is already running on port 5432
+    if is_port_in_use(5432):
+        logger.info("Port 5432 already in use, assuming Cloud SQL Proxy is running")
+        return None
+    
+    # Read project ID from credentials
+    try:
+        with open(credential_path, "r") as f:
+            credential_data = json.load(f)
+        project_id = credential_data.get("project_id", "leanworks-474204")
+    except Exception as e:
+        logger.warning(f"Could not read project_id from {credential_path}: {e}")
+        project_id = "leanworks-474204"
+    
+    region = os.getenv("DB_REGION", "us-west1")
+    instance = os.getenv("DB_INSTANCE", "leanworks-prod")
+    instance_connection = f"{project_id}:{region}:{instance}"
+    
+    logger.info(f"Starting Cloud SQL Proxy for {instance_connection}...")
+    
+    # Try cloud-sql-proxy (newer) first, then cloud_sql_proxy (older)
+    proxy_commands = [
+        ["cloud-sql-proxy", instance_connection, "--port", "5432", f"--credentials-file={credential_path}"],
+        ["cloud_sql_proxy", f"-instances={instance_connection}=tcp:5432", f"-credential_file={credential_path}"],
+    ]
+    
+    for cmd in proxy_commands:
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True
+            )
+            
+            # Wait a bit for the proxy to start
+            time.sleep(2)
+            
+            # Check if it's running
+            if process.poll() is None and is_port_in_use(5432):
+                logger.info(f"Cloud SQL Proxy started successfully (PID: {process.pid})")
+                _cloud_sql_proxy_process = process
+                
+                # Register cleanup on exit
+                atexit.register(stop_cloud_sql_proxy)
+                
+                return process
+            else:
+                # Process died, try next command
+                if process.poll() is not None:
+                    stderr = process.stderr.read().decode() if process.stderr else ""
+                    logger.debug(f"Proxy command failed: {cmd[0]} - {stderr}")
+                    
+        except FileNotFoundError:
+            logger.debug(f"Proxy command not found: {cmd[0]}")
+            continue
+        except Exception as e:
+            logger.debug(f"Error starting proxy with {cmd[0]}: {e}")
+            continue
+    
+    logger.warning("Could not start Cloud SQL Proxy - database features may not work")
+    return None
+
+def stop_cloud_sql_proxy():
+    """Stop the Cloud SQL Proxy if we started it."""
+    global _cloud_sql_proxy_process
+    if _cloud_sql_proxy_process:
+        logger.info("Stopping Cloud SQL Proxy...")
+        try:
+            _cloud_sql_proxy_process.terminate()
+            _cloud_sql_proxy_process.wait(timeout=5)
+        except Exception as e:
+            logger.warning(f"Error stopping Cloud SQL Proxy: {e}")
+        _cloud_sql_proxy_process = None
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -19,12 +120,12 @@ logging.basicConfig(
     ]
 )
 
-async def initialize_clients_async(user_id: str, org_name: str, tools: Optional[list] = None) -> Tuple[firestore.Client, secretmanager.SecretManagerServiceClient, Anthropic, list]:
+async def initialize_clients_async(user_id: str, org_slug: str, tools: Optional[list] = None) -> Tuple[firestore.Client, secretmanager.SecretManagerServiceClient, Anthropic, list]:
     """Initialize all required clients asynchronously"""
     start_time = time.time()
     
     try:
-        logger.info(f"Initializing clients for user {user_id} in org {org_name}")
+        logger.info(f"Initializing clients for user {user_id} in org {org_slug}")
         
         # Initialize clients in parallel using asyncio.gather
         loop = asyncio.get_event_loop()
@@ -45,7 +146,7 @@ async def initialize_clients_async(user_id: str, org_name: str, tools: Optional[
             return firestore_client, secret_manager_client
         
         # Run client initializations in executor to avoid blocking
-        logger.info(f"Initializing Firestore and Secret Manager clients for org: {org_name}")
+        logger.info(f"Initializing Firestore and Secret Manager clients for org: {org_slug}")
         firestore_client, secret_manager_client = await loop.run_in_executor(None, init_clients)
         
         # Get Claude API key (project_id will be read from credential file in ChatAgent)
@@ -59,7 +160,7 @@ async def initialize_clients_async(user_id: str, org_name: str, tools: Optional[
         
         claude_api_key = await loop.run_in_executor(None, lambda: get_secret("claude-api-key"))
         if not claude_api_key:
-            raise ValueError(f"claude-api-key not found for org: {org_name}")
+            raise ValueError(f"claude-api-key not found for org: {org_slug}")
         
         # Initialize Anthropic client
         model_client = Anthropic(api_key=claude_api_key)
@@ -85,11 +186,15 @@ async def main_async():
     """Async version of main function with async client initialization"""
     # user_id = "bharathkumar.l@sbnasoftware.com"
     user_id = "yanfu@leanworks.ai"
-    org_name = "leanworks.ai"
+    org_slug = "leanworksai"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING")
     print("=" * 80)
+    
+    # Auto-start Cloud SQL Proxy for local development
+    print("🔌 Checking Cloud SQL Proxy...")
+    start_cloud_sql_proxy()
     
     try:
         # Time the overall setup
@@ -99,7 +204,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_name)
+        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_slug)
         
         client_init_time = time.time() - client_init_start
         
@@ -112,7 +217,7 @@ async def main_async():
             secret_manager_client=secret_manager_client,
             model_client=model_client,
             user_id=user_id,
-            org_name=org_name,
+            org_slug=org_slug,
             session_id="hf38r89r",
             clear_conversation=True,
             tools=tools

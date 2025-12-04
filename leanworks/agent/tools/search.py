@@ -38,7 +38,7 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, firestore_client, org_name, secret_manager_client, client_name: str, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, firestore_client, org_slug, secret_manager_client, client_name: str, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
         # Read project_id from credential file
         import json
         with open(credential_path, "r") as f:
@@ -71,7 +71,7 @@ class SearchTool:
         self.chat = AsyncChat(
             vectordb_client=vectordb_client,
             firestore_client=firestore_client,
-            org_name=org_name,
+            org_slug=org_slug,
             model_client=model_client
         )
         # Shared deduplication set used across searches

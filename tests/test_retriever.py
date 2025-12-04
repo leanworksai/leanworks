@@ -20,7 +20,7 @@ logging.basicConfig(
 def main():
     try:
         # Initialize storage and secret clients
-        storage_client = CloudStorage("gcp_credential.json", org_name="leanworks.ai")
+        storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
         secret_client = GCPSecretLoader("gcp_credential.json")
         model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
         

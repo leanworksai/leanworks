@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
-    def __init__(self, model_client, firestore_client, org_name, user_id=None, session_id=None):
+    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None):
         self.model_client = model_client
         self.firestore_client = firestore_client
-        self.org_name = org_name
+        self.org_slug = org_slug
         self.user_id = user_id
         self.session_id = session_id
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
@@ -26,11 +26,11 @@ class ConversationManager:
         
     def load_conversation(self):
         """Load the most recent slim conversation from Firestore."""
-        if not self.firestore_client or not self.user_id or not self.org_name:
+        if not self.firestore_client or not self.user_id or not self.org_slug:
             return
         
         try:
-            file_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('files').document(self.conversation_path)
+            file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.conversation_path)
             doc = file_ref.get()
             
             if doc.exists:
@@ -57,7 +57,7 @@ class ConversationManager:
     def save_conversation(self):
         """Save conversation messages to Firestore in the same format as web frontend.
         
-        Messages are saved to orgs/{org_name}/messages collection with format:
+        Messages are saved to orgs/{org_slug}/messages collection with format:
         - chatId: session_id (e.g., 'ai-assistant-{user_id}')
         - role: 'user' or 'assistant'
         - content: message text content
@@ -66,17 +66,17 @@ class ConversationManager:
         - memberName: extracted from user info or 'AI Assistant' for assistant messages
         - memberAvatar: initials or 'AI' for assistant
         """
-        if not self.firestore_client or not self.user_id or not self.org_name or not self.session_id:
+        if not self.firestore_client or not self.user_id or not self.org_slug or not self.session_id:
             return
         
         try:
             from datetime import datetime
             
-            # Collection path matches web frontend: orgs/{org_name}/messages
-            messages_collection = self.firestore_client.collection('orgs').document(self.org_name).collection('messages')
+            # Collection path matches web frontend: orgs/{org_slug}/messages
+            messages_collection = self.firestore_client.collection('orgs').document(self.org_slug).collection('messages')
             
             # Extract user info for memberName and memberAvatar
-            user_doc_ref = self.firestore_client.collection('orgs').document(self.org_name).collection('users').document(self.user_id)
+            user_doc_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('users').document(self.user_id)
             user_doc = user_doc_ref.get()
             
             user_first_name = ""
@@ -339,9 +339,9 @@ class ConversationManager:
                         if tool_name == "query_postgres":
                             # For PostgreSQL tools, extract table names from SQL query
                             try:
-                                # Try to get org_name from the function's bound method
+                                # Try to get org_slug from the function's bound method
                                 postgres_tool = getattr(function_map[tool_name], '__self__', None)
-                                org_name = getattr(postgres_tool, 'org_name', 'leanworks.ai') if postgres_tool else 'leanworks.ai'
+                                org_slug = getattr(postgres_tool, 'org_slug', 'leanworks.ai') if postgres_tool else 'leanworks.ai'
                                 
                                 # Extract SQL query from tool_input
                                 sql_query = tool_input.get('sql', '') if isinstance(tool_input, dict) else ''
@@ -351,11 +351,11 @@ class ConversationManager:
                                     table_names = self._extract_table_names_from_sql(sql_query)
                                     if table_names:
                                         tables_str = ', '.join(table_names)
-                                        data_sources.append(f"PostgreSQL tables: {tables_str} (org: {org_name})")
+                                        data_sources.append(f"PostgreSQL tables: {tables_str} (org: {org_slug})")
                                     else:
-                                        data_sources.append(f"PostgreSQL database (org: {org_name})")
+                                        data_sources.append(f"PostgreSQL database (org: {org_slug})")
                                 else:
-                                    data_sources.append(f"PostgreSQL database (org: {org_name})")
+                                    data_sources.append(f"PostgreSQL database (org: {org_slug})")
                             except Exception as e:
                                 logger.warning(f"Failed to extract table names from SQL: {e}")
                                 data_sources.append("PostgreSQL database")

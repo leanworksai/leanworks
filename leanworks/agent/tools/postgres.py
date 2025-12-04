@@ -65,10 +65,10 @@ class PostgresTool:
         return sanitized
     
     @classmethod
-    def _get_database_name(cls, org_name: str) -> str:
-        """Get org database name from org_name (with org_ prefix)."""
+    def _get_database_name(cls, org_slug: str) -> str:
+        """Get org database name from org_slug (with org_ prefix)."""
         # Sanitize org name and add org_ prefix
-        sanitized = cls._sanitize_for_db_name(org_name)
+        sanitized = cls._sanitize_for_db_name(org_slug)
         return f'org_{sanitized}'
     
     @classmethod
@@ -202,22 +202,22 @@ class PostgresTool:
         Initialize PostgresTool with a PostgreSQL client wrapper.
         
         Args:
-            postgres_client_wrapper: An object with attributes `org_name` (organization name like 'leanworks.ai')
+            postgres_client_wrapper: An object with attributes `org_slug` (organization name like 'leanworks.ai')
                                     and optionally `client_name`.
         """
         self.postgres_client_wrapper = postgres_client_wrapper
         
-        # Get org_name from wrapper (use client_name as fallback)
-        self.org_name = getattr(self.postgres_client_wrapper, 'org_name', None)
-        if not self.org_name:
-            # Fallback: construct org_name from client_name if available
+        # Get org_slug from wrapper (use client_name as fallback)
+        self.org_slug = getattr(self.postgres_client_wrapper, 'org_slug', None)
+        if not self.org_slug:
+            # Fallback: construct org_slug from client_name if available
             client_name = getattr(self.postgres_client_wrapper, 'client_name', 'unknown')
-            # Try to construct a reasonable org_name (this is a fallback, should provide actual org_name)
-            self.org_name = f"{client_name}.ai" if client_name != 'unknown' else 'leanworks.ai'
-            logger.warning(f"org_name not provided in wrapper, using fallback: {self.org_name}")
+            # Try to construct a reasonable org_slug (this is a fallback, should provide actual org_slug)
+            self.org_slug = f"{client_name}.ai" if client_name != 'unknown' else 'leanworks.ai'
+            logger.warning(f"org_slug not provided in wrapper, using fallback: {self.org_slug}")
         
-        # Get database name from org_name
-        self.database_name = self._get_database_name(self.org_name)
+        # Get database name from org_slug
+        self.database_name = self._get_database_name(self.org_slug)
         
         # Get credential path
         credential_path = getattr(self.postgres_client_wrapper, 'credential_path', 'gcp_credential.json')
@@ -450,7 +450,7 @@ class PostgresTool:
     @property
     def query_postgres_property(self):
         description = f"""
-        Query PostgreSQL database for org `{self.org_name}` (database: {self.database_name}).
+        Query PostgreSQL database for org `{self.org_slug}` (database: {self.database_name}).
         
         This tool is strictly READ-ONLY. It executes SQL SELECT queries and returns results in document format.
         Only SELECT and WITH (CTE) queries are allowed. All write operations (INSERT, UPDATE, DELETE, etc.) are blocked.
@@ -556,7 +556,7 @@ class PostgresTool:
             return results
         
         except Exception as e:
-            logger.error(f"PostgreSQL tool failed: org_name={self.org_name}, database={self.database_name}, error={str(e)}")
+            logger.error(f"PostgreSQL tool failed: org_slug={self.org_slug}, database={self.database_name}, error={str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
 

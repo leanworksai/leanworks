@@ -8,12 +8,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, org_name=None, firestore_client=None, secret_manager_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
         Args:
-            org_name: Organization name (e.g., 'leanworks.ai') extracted from user_id. Used to determine database and client_name.
+            org_slug: Organization name (e.g., 'leanworks.ai') extracted from user_id. Used to determine database and client_name.
             firestore_client: Firestore client
             secret_manager_client: Secret Manager client
             read_document_ids: Set of document IDs already read for deduplication
@@ -22,13 +22,13 @@ class ToolUse:
             credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
         """
         # Store initialization parameters for lazy loading
-        self.org_name = org_name
-        # Create postgres_client_wrapper internally if org_name is provided
-        if org_name:
+        self.org_slug = org_slug
+        # Create postgres_client_wrapper internally if org_slug is provided
+        if org_slug:
             class PostgresClientWrapper:
-                def __init__(self, org_name):
-                    self.org_name = org_name
-            self.postgres_client_wrapper = PostgresClientWrapper(org_name)
+                def __init__(self, org_slug):
+                    self.org_slug = org_slug
+            self.postgres_client_wrapper = PostgresClientWrapper(org_slug)
         else:
             self.postgres_client_wrapper = None
         self.firestore_client = firestore_client
@@ -102,19 +102,19 @@ class ToolUse:
         if 'search_tool' not in self._tool_cache:
             if 'search' in self.requested_tools and self.firestore_client and self.secret_manager_client and self.project_id:
                 try:
-                    # Get client_name from org_name
+                    # Get client_name from org_slug
                     client_name = None
-                    if self.org_name:
-                        # Extract client_name from org_name by removing non-alphanumeric characters
+                    if self.org_slug:
+                        # Extract client_name from org_slug by removing non-alphanumeric characters
                         import re
-                        client_name = re.sub(r'[^a-zA-Z0-9]', '', self.org_name)
+                        client_name = re.sub(r'[^a-zA-Z0-9]', '', self.org_slug)
                     
                     if not client_name:
-                        raise ValueError("Cannot determine client_name from org_name")
+                        raise ValueError("Cannot determine client_name from org_slug")
                     
                     self._tool_cache['search_tool'] = SearchTool(
                         self.firestore_client,
-                        self.org_name,
+                        self.org_slug,
                         self.secret_manager_client,
                         client_name,
                         read_document_ids=self.read_document_ids,
