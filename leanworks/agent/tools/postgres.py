@@ -469,19 +469,19 @@ class PostgresTool:
         - SELECT status, COUNT(*) as count FROM tasks GROUP BY status ORDER BY count DESC
         
         Table Selection Guide (choose the right table based on your query):
+        - "users": Use for queries about user profiles, names, emails, job titles, responsibilities, timezones
         - "tasks": Use for queries about tasks, action items, assignments, task status, due dates, priorities
         - "task_progress_updates": Use for queries about individual work updates, daily progress reports, what team members worked on
         - "project_progress_updates": Use for queries about daily aggregated project summaries, project-level progress overviews
-        - "users": Use for queries about user profiles, names, job titles, responsibilities, timezones
         - "projects": Use for queries about project information, project names, descriptions, collaborators, project metadata
         - "teams": Use for queries about teams, team members, team leads, team projects
         - "integrations": Use for queries about external integrations (GitLab, Jira, Atlassian, etc.) and their configurations
         
         Available tables in this database:
+        - users
         - tasks
         - task_progress_updates
         - project_progress_updates
-        - users
         - projects
         - teams
         - integrations
