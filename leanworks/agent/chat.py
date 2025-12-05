@@ -102,10 +102,10 @@ class ChatAgent:
             self.conversation.clear_conversation()
             # Also clear read document IDs when clearing conversation
             self.read_document_ids.clear()
-        else:
-            # When clear_conversation is False, clear memory (inverted logic)
+            # Also clear memory when starting fresh
             if self.memory_manager:
                 self.memory_manager.clear_memory()
+        # When clear_conversation=False, keep existing memory for context continuity
         
         # Get user info from Firestore
         user_info = self._get_user_info()
