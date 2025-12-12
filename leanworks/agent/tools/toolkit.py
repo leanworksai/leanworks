@@ -2,7 +2,10 @@ from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
+from leanworks.agent.tools.firestore import FirestoreTool
+from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.helpers import AgentHelpers
+from google.cloud import storage
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,7 +43,7 @@ class ToolUse:
         self.session_id = session_id
         
         # Internal tools that are always available
-        internal_tools = ['search', 'postgres', 'duckdb']
+        internal_tools = ['search', 'postgres', 'duckdb', 'firestore']
         
         # Set default tools if not provided
         if tools is None:
@@ -168,6 +171,57 @@ class ToolUse:
             else:
                 self._tool_cache['outlook_tool'] = None
         return self._tool_cache['outlook_tool']
+    
+    @property
+    def firestore_tool(self):
+        """Lazy-load Firestore tool on first access."""
+        if 'firestore_tool' not in self._tool_cache:
+            if 'firestore' in self.requested_tools and self.firestore_client and self.org_slug:
+                try:
+                    self._tool_cache['firestore_tool'] = FirestoreTool(
+                        self.firestore_client,
+                        self.org_slug,
+                        user_id=self.user_id
+                    )
+                    if 'firestore' not in self.enabled_tools:
+                        self.enabled_tools.append('firestore')
+                    logger.info("FirestoreTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize FirestoreTool: {str(e)}")
+                    self._tool_cache['firestore_tool'] = None
+            elif 'firestore' in self.requested_tools:
+                logger.warning("FirestoreTool not initialized: missing firestore_client or org_slug")
+                self._tool_cache['firestore_tool'] = None
+            else:
+                self._tool_cache['firestore_tool'] = None
+        return self._tool_cache['firestore_tool']
+    
+    @property
+    def cloud_storage_tool(self):
+        """Lazy-load Cloud Storage tool on first access."""
+        if 'cloud_storage_tool' not in self._tool_cache:
+            if 'cloud_storage' in self.requested_tools and self.org_slug:
+                try:
+                    # Initialize Storage client
+                    storage_client = storage.Client.from_service_account_json(self.credential_path)
+                    
+                    self._tool_cache['cloud_storage_tool'] = CloudStorageTool(
+                        storage_client,
+                        self.org_slug,
+                        credential_path=self.credential_path
+                    )
+                    if 'cloud_storage' not in self.enabled_tools:
+                        self.enabled_tools.append('cloud_storage')
+                    logger.info("CloudStorageTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize CloudStorageTool: {str(e)}")
+                    self._tool_cache['cloud_storage_tool'] = None
+            elif 'cloud_storage' in self.requested_tools:
+                logger.warning("CloudStorageTool not initialized: missing org_slug")
+                self._tool_cache['cloud_storage_tool'] = None
+            else:
+                self._tool_cache['cloud_storage_tool'] = None
+        return self._tool_cache['cloud_storage_tool']
 
     @property
     def tools(self):
@@ -195,6 +249,19 @@ class ToolUse:
                     self.outlook_tool.find_available_slots_property
                 ])
                 logger.info("Outlook tools added to tools list (lazy)")
+
+            # Add Firestore tools if available
+            if self.firestore_tool:
+                self._tools_cache.append(self.firestore_tool.query_messages_property)
+                logger.info("Firestore tools added to tools list (lazy)")
+
+            # Add Cloud Storage tools if available
+            if self.cloud_storage_tool:
+                self._tools_cache.extend([
+                    self.cloud_storage_tool.get_image_url_property,
+                    self.cloud_storage_tool.list_chat_images_property
+                ])
+                logger.info("Cloud Storage tools added to tools list (lazy)")
 
             # Add DuckDB tools (response-scoped tools only)
             if 'duckdb' in self.requested_tools:
@@ -235,6 +302,19 @@ class ToolUse:
                     "find_available_slots": self.outlook_tool.find_available_slots
                 })
                 logger.info("Outlook functions added to function_map (lazy)")
+
+            # Add Firestore functions if available
+            if self.firestore_tool:
+                self._function_map_cache["query_messages"] = self.firestore_tool.query_messages
+                logger.info("Firestore functions added to function_map (lazy)")
+
+            # Add Cloud Storage functions if available
+            if self.cloud_storage_tool:
+                self._function_map_cache.update({
+                    "get_image_url": self.cloud_storage_tool.get_image_url,
+                    "list_chat_images": self.cloud_storage_tool.list_chat_images
+                })
+                logger.info("Cloud Storage functions added to function_map (lazy)")
 
             # Add DuckDB function mapping (response-scoped functions only)
             if 'duckdb' in self.requested_tools:
