@@ -55,6 +55,21 @@ class PostgresTool:
     # Shared database name (for users, organizations, org_members)
     SHARED_DB_NAME = 'shared'
     
+    # Tables that we need to fetch schemas for (only these tables are used in queries)
+    REQUIRED_TABLES = [
+        'users',
+        'tasks',
+        'task_progress_updates',
+        'project_progress_updates',
+        'projects',
+        'teams',
+        'integrations',
+        'docs',
+        'project_comments',
+        'project_members',
+        'task_comments',
+    ]
+    
     @classmethod
     def _get_database_name(cls, org_slug: str) -> str:
         """Get org database name from org_slug (with org_ prefix).
@@ -227,6 +242,7 @@ class PostgresTool:
     def _fetch_schemas_from_db(self) -> str:
         """
         Fetch table schemas directly from PostgreSQL database using information_schema.
+        Only fetches schemas for tables that are actually needed (REQUIRED_TABLES).
         
         Returns:
             Formatted string with table schemas
@@ -235,14 +251,21 @@ class PostgresTool:
         try:
             conn = self.pool.getconn()
             with conn.cursor() as cursor:
-                # Get all tables in the public schema (excluding system tables)
-                cursor.execute("""
+                # Only get the tables we actually need (not all tables in the database)
+                # Use a parameterized query to filter by table names
+                if not self.REQUIRED_TABLES:
+                    return ""
+                
+                # Build parameterized query for specific tables
+                placeholders = ','.join(['%s'] * len(self.REQUIRED_TABLES))
+                cursor.execute(f"""
                     SELECT table_name
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
                       AND table_type = 'BASE TABLE'
+                      AND table_name IN ({placeholders})
                     ORDER BY table_name
-                """)
+                """, tuple(self.REQUIRED_TABLES))
                 tables = cursor.fetchall()
                 
                 schema_parts = []
@@ -476,6 +499,10 @@ class PostgresTool:
         - "projects": Use for queries about project information, project names, descriptions, collaborators, project metadata
         - "teams": Use for queries about teams, team members, team leads, team projects
         - "integrations": Use for queries about external integrations (GitLab, Jira, Atlassian, etc.) and their configurations
+        - "docs": Use for queries about documents, notes, documentation, rich text content, pinned docs
+        - "project_comments": Use for queries about comments on projects, project discussions, project feedback
+        - "project_members": Use for queries about project membership, who is assigned to projects, project collaborators
+        - "task_comments": Use for queries about comments on tasks, task discussions, task feedback
         
         Available tables in this database:
         - users
@@ -485,6 +512,10 @@ class PostgresTool:
         - projects
         - teams
         - integrations
+        - docs
+        - project_comments
+        - project_members
+        - task_comments
         
         Important Notes:
         - ALWAYS check the table schemas below to understand the exact column names and data types before writing SQL
