@@ -105,21 +105,13 @@ class ToolUse:
         if 'search_tool' not in self._tool_cache:
             if 'search' in self.requested_tools and self.firestore_client and self.secret_manager_client and self.project_id:
                 try:
-                    # Get client_name from org_slug
-                    client_name = None
-                    if self.org_slug:
-                        # Extract client_name from org_slug by removing non-alphanumeric characters
-                        import re
-                        client_name = re.sub(r'[^a-zA-Z0-9]', '', self.org_slug)
-                    
-                    if not client_name:
-                        raise ValueError("Cannot determine client_name from org_slug")
+                    if not self.org_slug:
+                        raise ValueError("org_slug is required for SearchTool initialization")
                     
                     self._tool_cache['search_tool'] = SearchTool(
                         self.firestore_client,
                         self.org_slug,
                         self.secret_manager_client,
-                        client_name,
                         read_document_ids=self.read_document_ids,
                         credential_path=self.credential_path
                     )

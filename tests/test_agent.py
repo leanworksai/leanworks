@@ -186,7 +186,7 @@ async def main_async():
     """Async version of main function with async client initialization"""
     # user_id = "bharathkumar.l@sbnasoftware.com"
     user_id = "yanfu@leanworks.ai"
-    org_slug = "leanworksai"
+    org_slug = "leanworksai_mj6bu7m8"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING")

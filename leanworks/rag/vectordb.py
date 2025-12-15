@@ -15,6 +15,33 @@ DEFAULT_VOCAB_SIZE = 30000
 UPSERT_BATCH_SIZE = 100
 SERVERLESS_SPEC = ServerlessSpec(cloud="gcp", region="us-central1")
 
+def sanitize_pinecone_index_name(name: str) -> str:
+    """
+    Sanitize a name to be valid for Pinecone index names.
+    Pinecone requires: lowercase alphanumeric characters and hyphens only.
+    
+    Args:
+        name: The original name (e.g., org_slug)
+    
+    Returns:
+        Sanitized name with underscores replaced by hyphens and invalid characters removed
+    """
+    if not name:
+        return ""
+    # Replace underscores with hyphens
+    sanitized = name.replace('_', '-')
+    # Remove any characters that aren't lowercase alphanumeric or hyphens
+    sanitized = re.sub(r'[^a-z0-9-]', '', sanitized.lower())
+    # Remove consecutive hyphens
+    sanitized = re.sub(r'-+', '-', sanitized)
+    # Remove leading/trailing hyphens
+    sanitized = sanitized.strip('-')
+    # Ensure it's not empty
+    if not sanitized:
+        # Fallback: use hash if name becomes empty after sanitization
+        sanitized = f"index-{abs(hash(name)) % 1000000}"
+    return sanitized
+
 class PineconeHybridIndex:
     def __init__(self, pinecone_key: str, embedding_model_client: GoogleEmbedding, 
                  chunk_size: int = 512, chunk_overlap: int = 128):

@@ -45,6 +45,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         self.vectordb_client = vectordb_client
         
         self.model_client = model_client
+        # Store org_slug for namespace usage in Pinecone queries
+        self.org_slug = org_slug
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
         if self.memory_enabled:
@@ -177,12 +179,16 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Perform hybrid search for each query
         try:
+            # Use org_slug directly as namespace (can contain underscores)
+            namespace = self.org_slug if self.org_slug else ""
+            
             for q in queries:
                 # Use hybrid search from PineconeHybridIndex
                 hybrid_results = self.vectordb_client.hybrid_search(
                     query=q,
                     top_k=top_k,
                     alpha=alpha,
+                    namespace=namespace,
                     filter=filters
                 )
                 

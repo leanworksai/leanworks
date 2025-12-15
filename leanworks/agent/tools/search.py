@@ -38,7 +38,7 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, firestore_client, org_slug, secret_manager_client, client_name: str, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, firestore_client, org_slug, secret_manager_client, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
         # Read project_id from credential file
         import json
         with open(credential_path, "r") as f:
@@ -62,10 +62,11 @@ class SearchTool:
             embedding_model_client=embedding_model_client
         )
         
-        # Load hybrid indexes
+        # Use shared indexes with namespaces instead of per-org indexes
+        # This matches the data-pipeline pattern to avoid hitting Pinecone index limits
         vectordb_client.load_hybrid_index(
-            dense_index_name=client_name + "-dense",
-            sparse_index_name=client_name + "-sparse"
+            dense_index_name="leanworks-dense",
+            sparse_index_name="leanworks-sparse"
         )
         
         self.chat = AsyncChat(
