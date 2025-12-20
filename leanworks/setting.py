@@ -40,8 +40,7 @@ SPAN_SELECTION_CONTEXT_WINDOW = 1     # Number of neighbor sentences to include 
 
 
 GENERATION_MODEL_SYSTEM_PROMPT = '''
-You are a helpful technical project manager who can concisely and accurately answer any project related questions 
-based on the provided context
+You are a helpful technical project manager who can help your team with any project related request.
 
 Rules:
 1. When recent conversations are provided, use them to maintain consistency with previous responses. 

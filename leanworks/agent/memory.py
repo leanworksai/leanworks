@@ -67,6 +67,7 @@ class MemoryManager:
         self.conversation_turns = []  # List of message turns (user + assistant pairs)
         self.system_prompt = ""
         self.user_profile = ""
+        self._last_profile_update_turn_count = 0  # Track when we last updated user profile
         
         # Storage paths: separate user-level profile from session-level memory
         # Session-level memory (conversation history, summaries)
@@ -301,11 +302,45 @@ class MemoryManager:
                 
                 if doc.exists:
                     data = doc.to_dict()
-                    state = data.get('content', {})
+                    if not data:
+                        logger.warning("Document exists but has no data, starting fresh")
+                        return
                     
-                    self.running_summary = state.get("running_summary", "")
-                    self.conversation_turns = state.get("conversation_turns", [])
-                    self.system_prompt = state.get("system_prompt", "")
+                    # Handle different data structures
+                    state = data.get('content', {})
+                    if not isinstance(state, dict):
+                        # If content is not a dict, try to use data directly
+                        logger.warning(f"Content is not a dict (type: {type(state)}), trying to use data directly")
+                        state = data
+                    
+                    # Load running_summary with validation
+                    running_summary = state.get("running_summary", "")
+                    if not isinstance(running_summary, str):
+                        running_summary = str(running_summary) if running_summary else ""
+                    self.running_summary = running_summary
+                    
+                    # Load conversation_turns with validation - ensure it's always a list
+                    conversation_turns = state.get("conversation_turns", [])
+                    if not isinstance(conversation_turns, list):
+                        logger.warning(f"conversation_turns is not a list (type: {type(conversation_turns)}), converting to list")
+                        conversation_turns = []
+                    self.conversation_turns = conversation_turns
+                    
+                    # Load system_prompt with validation
+                    system_prompt = state.get("system_prompt", "")
+                    if not isinstance(system_prompt, str):
+                        system_prompt = str(system_prompt) if system_prompt else ""
+                    self.system_prompt = system_prompt
+                    
+                    # Load last_profile_update_turn_count with validation
+                    last_update_count = state.get("last_profile_update_turn_count", 0)
+                    if not isinstance(last_update_count, int):
+                        try:
+                            last_update_count = int(last_update_count) if last_update_count else 0
+                        except (ValueError, TypeError):
+                            last_update_count = 0
+                    self._last_profile_update_turn_count = last_update_count
+                    
                     logger.info(f"Loaded session memory with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
                 else:
                     logger.info("No existing session memory found, starting fresh")
@@ -317,24 +352,31 @@ class MemoryManager:
                 
                 if profile_doc.exists:
                     profile_data = profile_doc.to_dict()
-                    profile_content = profile_data.get('content', {})
-                    
-                    # Handle both old format (string) and new format (dict)
-                    if isinstance(profile_content, dict):
-                        self.user_profile = profile_content.get("user_profile", "")
+                    if profile_data:
+                        profile_content = profile_data.get('content', {})
+                        
+                        # Handle both old format (string) and new format (dict)
+                        if isinstance(profile_content, dict):
+                            self.user_profile = profile_content.get("user_profile", "")
+                        else:
+                            self.user_profile = profile_content if profile_content else ""
+                        
+                        if self.user_profile:
+                            logger.info(f"Loaded user profile from user-level storage")
                     else:
-                        self.user_profile = profile_content if profile_content else ""
-                    
-                    if self.user_profile:
-                        logger.info(f"Loaded user profile from user-level storage")
+                        logger.info("Profile document exists but has no data")
                 else:
                     logger.info("No existing user profile found, starting fresh")
                     
         except Exception as e:
-            logger.error(f"Error loading memory state: {str(e)}")
-            # Start with empty state on error
-            self.running_summary = ""
-            self.conversation_turns = []
+            logger.error(f"Error loading memory state: {str(e)}", exc_info=True)
+            # Start with empty state on error, but preserve any already loaded data
+            if not hasattr(self, 'running_summary') or self.running_summary == "":
+                self.running_summary = ""
+            if not hasattr(self, 'conversation_turns') or not isinstance(self.conversation_turns, list):
+                self.conversation_turns = []
+            if not hasattr(self, '_last_profile_update_turn_count'):
+                self._last_profile_update_turn_count = 0
             # Don't clear user_profile on error - keep it if it was loaded
     
     def save_memory_state(self):
@@ -349,10 +391,24 @@ class MemoryManager:
         try:
             # Save session-level memory (conversation history, summaries)
             if self.session_id:
+                # Ensure conversation_turns is always a list
+                if not isinstance(self.conversation_turns, list):
+                    logger.warning(f"conversation_turns is not a list (type: {type(self.conversation_turns)}), converting to empty list")
+                    self.conversation_turns = []
+                
+                # Ensure running_summary is a string
+                if not isinstance(self.running_summary, str):
+                    self.running_summary = str(self.running_summary) if self.running_summary else ""
+                
+                # Ensure system_prompt is a string
+                if not isinstance(self.system_prompt, str):
+                    self.system_prompt = str(self.system_prompt) if self.system_prompt else ""
+                
                 session_state = {
                     "running_summary": self.running_summary,
                     "conversation_turns": self.conversation_turns,
                     "system_prompt": self.system_prompt,
+                    "last_profile_update_turn_count": self._last_profile_update_turn_count,
                     "last_updated": datetime.now().isoformat()
                 }
                 
@@ -361,16 +417,21 @@ class MemoryManager:
                     'content': session_state,  # Save directly as dict
                     'updated_at': firestore.SERVER_TIMESTAMP
                 })
-                logger.info("Saved session memory state")
+                logger.info(f"Saved session memory state: {len(self.conversation_turns)} turns, summary length: {len(self.running_summary)}")
                 
         except Exception as e:
-            logger.error(f"Error saving memory state: {str(e)}")
+            logger.error(f"Error saving memory state: {str(e)}", exc_info=True)
     
     def add_turn(self, user_message: Dict[str, Any], assistant_message: Dict[str, Any] = None):
         """
         Add a conversation turn (user message + optional assistant response).
         Triggers background token calculation and non-blocking summarization if needed.
         """
+        # Ensure conversation_turns is a list before appending
+        if not isinstance(self.conversation_turns, list):
+            logger.warning(f"conversation_turns is not a list (type: {type(self.conversation_turns)}), initializing as empty list")
+            self.conversation_turns = []
+        
         turn = {
             "user_message": user_message,
             "assistant_message": assistant_message,
@@ -378,6 +439,7 @@ class MemoryManager:
         }
         
         self.conversation_turns.append(turn)
+        logger.debug(f"Added turn to conversation_turns. Total turns: {len(self.conversation_turns)}")
         
         # Invalidate token cache since we added content
         with self._token_count_lock:
@@ -409,6 +471,9 @@ class MemoryManager:
             if self._should_trigger_summarization():
                 logger.info("Token threshold exceeded after assistant response, triggering background summarization")
                 self._perform_summarization_background()
+            
+            # Save memory state after updating assistant response to persist conversation turns
+            self.save_memory_state()
     
     def _should_trigger_summarization(self) -> bool:
         """Check if summarization should be triggered based on token count."""
@@ -789,6 +854,7 @@ Please provide an updated running summary that incorporates both the existing su
         self.running_summary = ""
         self.conversation_turns = []
         self.system_prompt = ""
+        self._last_profile_update_turn_count = 0  # Reset counter when clearing memory
         # Do NOT clear user_profile - it's user-level, not session-level
         
         # Clear background processing state

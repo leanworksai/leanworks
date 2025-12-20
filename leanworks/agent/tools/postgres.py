@@ -70,6 +70,67 @@ class PostgresTool:
         'task_comments',
     ]
     
+    # Comprehensive table descriptions to help the agent understand when to use each table
+    TABLE_DESCRIPTIONS = {
+        'users': (
+            'Stores organization-specific user profiles and contact information. '
+            'Contains user details like names, emails, job titles, responsibilities, and timezones. '
+            'The email field is the primary key and is used as user_id throughout the system. '
+            'Note: This contains org-specific profile data; global user accounts are in the shared database.'
+        ),
+        'tasks': (
+            'Stores all tasks and action items within projects. '
+            'Contains task details including status, priority, assignments, due dates, and progress tracking. '
+            'Tasks are linked to projects via project_id and to users via assignee_id (email). '
+            'This is the primary table for task management queries.'
+        ),
+        'task_progress_updates': (
+            'Stores individual work updates and daily progress reports from team members. '
+            'Contains detailed work descriptions, associated tasks, and timestamps. '
+            'Use this for individual team member updates. '
+            'This is different from project_progress_updates which contains aggregated summaries.'
+        ),
+        'project_progress_updates': (
+            'Stores AI-generated daily aggregated summaries of all updates for each project. '
+            'Contains one summary per project per day, combining all individual updates. '
+            'Use this for high-level project status queries rather than detailed individual work reports.'
+        ),
+        'projects': (
+            'Stores project information and metadata. '
+            'Contains project details like name, description, status, priority, owner, and dates. '
+            'Projects are the top-level organizational unit; tasks belong to projects. '
+            'The id field is the primary key, but projects are often referenced by name in queries.'
+        ),
+        'teams': (
+            'Stores team information and organizational structure. '
+            'Contains team details like name, description, and owner. '
+            'Teams can have associated projects and members. '
+            'Note: Team membership details may be in related tables like project_members or team_members.'
+        ),
+        'integrations': (
+            'Stores configuration and connection status for third-party integrations. '
+            'Tracks which external tools (GitLab, Jira, Atlassian, etc.) are connected and their settings.'
+        ),
+        'docs': (
+            'Stores documents, notes, and rich text content within the organization. '
+            'Contains document content (HTML), metadata, and associations with projects or teams. '
+            'Documents can be associated with projects or teams via project_id/team_id.'
+        ),
+        'project_comments': (
+            'Stores comments and discussions on projects. '
+            'Each comment is linked to a project via project_id and includes comment text, author info, and date.'
+        ),
+        'project_members': (
+            'Stores project membership records linking users to projects. '
+            'This is a junction table connecting projects (project_id) to users (user_email). '
+            'Use this to find project teams and membership relationships.'
+        ),
+        'task_comments': (
+            'Stores comments and discussions on individual tasks. '
+            'Each comment is linked to a task via task_id and includes comment text, author info, and date.'
+        ),
+    }
+    
     @classmethod
     def _get_database_name(cls, org_slug: str) -> str:
         """Get org database name from org_slug (with org_ prefix).
@@ -307,19 +368,16 @@ class PostgresTool:
                     pk_result = cursor.fetchall()
                     primary_keys = [row.get('column_name') for row in pk_result]
                     
-                    # Get table comment/description if available
-                    cursor.execute("""
-                        SELECT obj_description(%s::regclass, 'pg_class') as table_comment
-                    """, (table_name,))
-                    comment_result = cursor.fetchone()
-                    table_comment = comment_result.get('table_comment') if comment_result else None
+                    # Use our custom comprehensive table descriptions
+                    # These are specifically written to help the agent understand when and how to use each table
+                    table_description = PostgresTool.TABLE_DESCRIPTIONS.get(
+                        table_name, 
+                        f'Table: {table_name} (no description available)'
+                    )
                     
-                    # Format table schema
+                    # Format table schema with prominent description
                     schema_parts.append(f"**Table: {table_name}**")
-                    
-                    # Add table description if available
-                    if table_comment:
-                        schema_parts.append(f"  Description: {table_comment}")
+                    schema_parts.append(f"  Description: {table_description}")
                     
                     # Add primary key info
                     if primary_keys:
@@ -491,33 +549,25 @@ class PostgresTool:
         - SELECT project_id, COUNT(*) as total_tasks, AVG(estimated_hours) as avg_hours FROM tasks GROUP BY project_id
         - SELECT status, COUNT(*) as count FROM tasks GROUP BY status ORDER BY count DESC
         
-        Table Selection Guide (choose the right table based on your query):
-        - "users": Use for queries about user profiles, names, emails, job titles, responsibilities, timezones
-        - "tasks": Use for queries about tasks, action items, assignments, task status, due dates, priorities
-        - "task_progress_updates": Use for queries about individual work updates, daily progress reports, what team members worked on
-        - "project_progress_updates": Use for queries about daily aggregated project summaries, project-level progress overviews
-        - "projects": Use for queries about project information, project names, descriptions, collaborators, project metadata
-        - "teams": Use for queries about teams, team members, team leads, team projects
-        - "integrations": Use for queries about external integrations (GitLab, Jira, Atlassian, etc.) and their configurations
-        - "docs": Use for queries about documents, notes, documentation, rich text content, pinned docs
-        - "project_comments": Use for queries about comments on projects, project discussions, project feedback
-        - "project_members": Use for queries about project membership, who is assigned to projects, project collaborators
-        - "task_comments": Use for queries about comments on tasks, task discussions, task feedback
+        Table Selection Guide:
+        Each table in the schema below includes a Description that explains when to use it. 
+        ALWAYS read the table Description before writing SQL to ensure you're querying the correct table.
         
-        Available tables in this database:
-        - users
-        - tasks
-        - task_progress_updates
-        - project_progress_updates
-        - projects
-        - teams
-        - integrations
-        - docs
-        - project_comments
-        - project_members
-        - task_comments
+        Quick reference (see detailed descriptions in schemas below):
+        - "users": User profiles, names, emails, job titles, responsibilities, timezones
+        - "tasks": Tasks, action items, assignments, task status, due dates, priorities
+        - "task_progress_updates": Individual work updates, daily progress reports, what team members worked on
+        - "project_progress_updates": Daily aggregated project summaries, project-level progress overviews
+        - "projects": Project information, project names, descriptions, collaborators, project metadata
+        - "teams": Teams, team members, team leads, team projects
+        - "integrations": External integrations (GitLab, Jira, Atlassian, etc.) and their configurations
+        - "docs": Documents, notes, documentation, rich text content, pinned docs
+        - "project_comments": Comments on projects, project discussions, project feedback
+        - "project_members": Project membership, who is assigned to projects, project collaborators
+        - "task_comments": Comments on tasks, task discussions, task feedback
         
         Important Notes:
+        - ALWAYS read the table Description in the schemas below to understand when to use each table
         - ALWAYS check the table schemas below to understand the exact column names and data types before writing SQL
         - Field names in PostgreSQL are typically snake_case (e.g., created_at, updated_at, project_id)
         - Timestamps are stored as BIGINT (milliseconds since epoch)

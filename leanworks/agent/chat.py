@@ -6,7 +6,7 @@ from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 from google.cloud import firestore, secretmanager
-from typing import Dict, Any
+from typing import Dict, Any, List
 import traceback
 import logging
 import pytz
@@ -625,37 +625,141 @@ class ChatAgent:
 
         return "\n\n---\n\n".join(source_content_with_attribution) if source_content_with_attribution else "No source content available."
 
+    def _get_historical_messages(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Retrieve historical conversation messages from Firestore across all sessions for this user.
+        
+        Args:
+            limit: Maximum number of messages to retrieve (default: 50)
+            
+        Returns:
+            List of message dictionaries in format: [{"role": "user/assistant", "content": "text"}, ...]
+        """
+        if not self.firestore_client or not self.user_id or not self.org_slug:
+            return []
+        
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            
+            # Query messages collection for this user across all sessions
+            messages_collection = self.firestore_client.collection('orgs').document(self.org_slug).collection('messages')
+            
+            # Query all messages for this user, ordered by timestamp descending (most recent first)
+            query = messages_collection.where(
+                filter=FieldFilter('userId', '==', self.user_id.lower())
+            )
+            
+            # Try to order by timestamp, but handle index errors gracefully
+            try:
+                query = query.order_by('timestamp', direction=firestore.Query.DESCENDING)
+            except Exception as e:
+                # If index doesn't exist, we'll sort in memory
+                if 'index' in str(e).lower() or (hasattr(e, 'code') and e.code == 9):
+                    logger.debug(f"Index not found for timestamp ordering, will sort in memory: {e}")
+                else:
+                    raise
+            
+            query = query.limit(limit)
+            messages = query.get()
+            
+            # Convert Firestore documents to message format with timestamp
+            historical_messages_with_timestamp = []
+            for doc in messages:
+                data = doc.to_dict()
+                role = data.get('role', '')
+                content = data.get('content', '')
+                timestamp = data.get('timestamp')
+                
+                if role and content:
+                    historical_messages_with_timestamp.append({
+                        "role": role,
+                        "content": [{"type": "text", "text": content}],
+                        "_timestamp": timestamp  # Keep timestamp for sorting
+                    })
+            
+            # Sort by timestamp if we have timestamps (in case index wasn't available)
+            if historical_messages_with_timestamp and historical_messages_with_timestamp[0].get("_timestamp"):
+                try:
+                    from datetime import datetime as dt
+                    historical_messages_with_timestamp.sort(
+                        key=lambda x: x.get("_timestamp") or dt.min,
+                        reverse=True  # Most recent first
+                    )
+                except Exception as e:
+                    logger.debug(f"Error sorting by timestamp: {e}")
+            
+            # Remove timestamp and reverse to get chronological order (oldest first)
+            historical_messages = [
+                {k: v for k, v in msg.items() if k != "_timestamp"}
+                for msg in historical_messages_with_timestamp
+            ]
+            historical_messages.reverse()
+            
+            logger.info(f"Retrieved {len(historical_messages)} historical messages for user profile analysis")
+            return historical_messages
+            
+        except Exception as e:
+            logger.warning(f"Error retrieving historical messages: {str(e)}")
+            return []
+    
     def _update_user_profile_from_conversation(self):
         """
-        Analyze recent conversation to update user profile (responsibilities and work_style).
+        Analyze conversation history (current session + historical) to update user profile (responsibilities and work_style).
         This runs periodically after responses to keep the profile up-to-date.
+        Uses historical conversation data across all sessions, not just the current session.
+        Only runs after every 3 new turns to prevent duplicate updates.
         """
         if not self.memory_manager:
             return
         
         try:
-            # Only update if we have enough conversation turns (at least 3)
-            if len(self.memory_manager.conversation_turns) < 3:
+            # Get current session conversation turns
+            current_turn_count = len(self.memory_manager.conversation_turns)
+            last_update_turn_count = getattr(self.memory_manager, '_last_profile_update_turn_count', 0)
+            
+            # Only update if we have at least 3 new turns since last update
+            turns_since_last_update = current_turn_count - last_update_turn_count
+            if turns_since_last_update < 3:
+                logger.debug(f"Skipping profile update: only {turns_since_last_update} turns since last update (need 3, current: {current_turn_count}, last: {last_update_turn_count})")
                 return
             
-            # Get recent conversation turns (last 10 turns for analysis)
-            recent_turns = self.memory_manager.conversation_turns[-10:]
+            current_turns = self.memory_manager.conversation_turns
             
-            # Convert to text for analysis
-            conversation_text = ""
-            for turn in recent_turns:
+            # Get historical messages from Firestore (across all sessions)
+            historical_messages = self._get_historical_messages(limit=50)
+            
+            # Combine current session turns with historical messages
+            all_messages = []
+            
+            # Add historical messages first (they're already in chronological order)
+            all_messages.extend(historical_messages)
+            
+            # Add current session turns (convert to message format)
+            for turn in current_turns:
                 user_msg = turn.get("user_message", {})
                 assistant_msg = turn.get("assistant_message", {})
                 
-                # Extract text from messages
-                user_text = self._extract_message_text(user_msg)
-                assistant_text = self._extract_message_text(assistant_msg) if assistant_msg else ""
+                if user_msg:
+                    all_messages.append(user_msg)
+                if assistant_msg:
+                    all_messages.append(assistant_msg)
+            
+            # Only update if we have enough conversation data (at least 3 messages total)
+            if len(all_messages) < 3:
+                logger.debug(f"Insufficient conversation data for profile update: {len(all_messages)} messages")
+                return
+            
+            # Use recent messages for analysis (last 20 messages to get good context)
+            recent_messages = all_messages[-20:] if len(all_messages) > 20 else all_messages
+            
+            # Convert to text for analysis
+            conversation_text = ""
+            for msg in recent_messages:
+                role = msg.get("role", "")
+                text = self._extract_message_text(msg)
                 
-                if user_text:
-                    conversation_text += f"User: {user_text}\n"
-                if assistant_text:
-                    conversation_text += f"Assistant: {assistant_text}\n"
-                conversation_text += "\n"
+                if text:
+                    conversation_text += f"{role.capitalize()}: {text}\n\n"
             
             if not conversation_text.strip():
                 return
@@ -726,9 +830,16 @@ If there's not enough information to make meaningful updates, return the current
                                 responsibilities=new_responsibilities if new_responsibilities != current_responsibilities else None,
                                 work_style=new_work_style if new_work_style != current_work_style else None
                             )
-                            logger.info(f"Updated user profile from conversation analysis")
+                            # Update the counter to track when we last updated the profile
+                            self.memory_manager._last_profile_update_turn_count = current_turn_count
+                            # Save memory state to persist the counter
+                            self.memory_manager.save_memory_state()
+                            logger.info(f"Updated user profile from conversation analysis (after {current_turn_count} turns, {turns_since_last_update} new turns since last update)")
                         else:
-                            logger.debug("User profile analysis found no significant updates")
+                            # Even if no changes, update the counter to prevent re-analyzing the same data
+                            self.memory_manager._last_profile_update_turn_count = current_turn_count
+                            self.memory_manager.save_memory_state()
+                            logger.debug(f"User profile analysis found no significant updates (counter updated to {current_turn_count})")
                     else:
                         logger.warning("Could not extract JSON from profile analysis response")
                 except json.JSONDecodeError as e:

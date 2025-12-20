@@ -186,7 +186,7 @@ async def main_async():
     """Async version of main function with async client initialization"""
     # user_id = "bharathkumar.l@sbnasoftware.com"
     user_id = "yanfu@leanworks.ai"
-    org_slug = "leanworksai_mj6bu7m8"
+    org_slug = "yanfus_personal_workspace_mj6bu8a7"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING")
@@ -218,8 +218,8 @@ async def main_async():
             model_client=model_client,
             user_id=user_id,
             org_slug=org_slug,
-            session_id="hf38r89r",
-            clear_conversation=True,
+            session_id="hdep29gf9e",
+            clear_conversation=False,  # Set to False to test loading previous conversations
             tools=tools
         )
         
@@ -234,7 +234,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-        what's the latest progress of web development?
+        what is our go to market strategy?
 '''
         
         print("💬 Processing user message:")
@@ -243,10 +243,18 @@ async def main_async():
         print(f"   Streaming mode: True (shows tools and streams response)")
         print()
         
+        # Print memories before processing
+        print("🔍 MEMORIES BEFORE PROCESSING:")
+        print_all_memories(agent)
+        
         # Time the response processing
         response_start = time.time()
         
         response = agent.process_message(user_message, thinking=False, streaming=True)
+        
+        # Print memories after processing
+        print("🔍 MEMORIES AFTER PROCESSING:")
+        print_all_memories(agent)
         
         response_time = time.time() - response_start
         total_time = time.time() - setup_start
@@ -297,6 +305,97 @@ def print_full_tool_result(tool_name: str, result: any):
         print(str(result))
     
     print(f"\n{'='*80}\n")
+
+def print_all_memories(agent):
+    """Print all memories being used by the agent"""
+    if not agent.memory_manager:
+        print("\n" + "=" * 80)
+        print("🧠 MEMORY STATUS: Memory manager not enabled")
+        print("=" * 80 + "\n")
+        return
+    
+    print("\n" + "=" * 80)
+    print("🧠 MEMORY INFORMATION")
+    print("=" * 80)
+    
+    # Get memory context and recent messages
+    memory_context, recent_messages = agent.memory_manager.get_context_for_inference()
+    
+    # Print memory statistics
+    stats = agent.memory_manager.get_memory_stats()
+    print("\n📊 MEMORY STATISTICS:")
+    print(f"   Total Tokens:           {stats.get('total_tokens', 0):,}")
+    print(f"   Summary Tokens:         {stats.get('summary_tokens', 0):,}")
+    print(f"   Conversation Turns:     {stats.get('conversation_turns', 0)}")
+    print(f"   Summary Length:         {stats.get('summary_length', 0):,} characters")
+    print(f"   Trigger Threshold:      {stats.get('trigger_threshold', 0):,} tokens")
+    print(f"   Max Context Tokens:     {stats.get('max_context_tokens', 0):,} tokens")
+    print(f"   Tokens Until Trigger:   {stats.get('tokens_until_trigger', 0):,} tokens")
+    print(f"   Last Summarization:     {stats.get('last_summarization', 'Never')}")
+    
+    # Print memory context (system prompt + user profile + running summary)
+    print("\n📝 MEMORY CONTEXT (System Prompt + User Profile + Running Summary):")
+    print("-" * 80)
+    if memory_context:
+        # Truncate if too long for readability
+        context_preview = memory_context[:2000] + "..." if len(memory_context) > 2000 else memory_context
+        print(context_preview)
+        if len(memory_context) > 2000:
+            print(f"\n... (truncated, full length: {len(memory_context):,} characters)")
+    else:
+        print("(No memory context available)")
+    
+    # Print recent messages
+    print(f"\n💬 RECENT MESSAGES ({len(recent_messages)} messages):")
+    print("-" * 80)
+    if recent_messages:
+        for i, msg in enumerate(recent_messages, 1):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", [])
+            
+            # Extract text from content
+            text_parts = []
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            tool_name = block.get("name", "unknown_tool")
+                            text_parts.append(f"[Used tool: {tool_name}]")
+                        elif block.get("type") == "tool_result":
+                            result_preview = str(block.get("content", ""))[:100]
+                            text_parts.append(f"[Tool result: {result_preview}...]")
+            
+            message_text = " ".join(text_parts)
+            # Truncate long messages
+            if len(message_text) > 500:
+                message_text = message_text[:500] + "..."
+            
+            print(f"\n   Message {i} ({role.upper()}):")
+            print(f"   {message_text}")
+    else:
+        print("(No recent messages)")
+    
+    # Print running summary separately if it exists
+    if agent.memory_manager.running_summary:
+        print(f"\n📚 RUNNING SUMMARY ({len(agent.memory_manager.running_summary):,} characters):")
+        print("-" * 80)
+        summary_preview = agent.memory_manager.running_summary[:1000] + "..." if len(agent.memory_manager.running_summary) > 1000 else agent.memory_manager.running_summary
+        print(summary_preview)
+        if len(agent.memory_manager.running_summary) > 1000:
+            print(f"\n... (truncated, full length: {len(agent.memory_manager.running_summary):,} characters)")
+    
+    # Print user profile if it exists
+    user_profile = agent.memory_manager.get_user_profile_dict()
+    if user_profile:
+        print(f"\n👤 USER PROFILE:")
+        print("-" * 80)
+        print(json.dumps(user_profile, indent=2, ensure_ascii=False))
+    
+    print("\n" + "=" * 80 + "\n")
 
 
 def main():
