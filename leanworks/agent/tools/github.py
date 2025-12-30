@@ -1260,8 +1260,8 @@ class GitHubTool:
                     'status': file.get('status'),
                     'additions': file.get('additions', 0),
                     'deletions': file.get('deletions', 0),
-                    'changes': file.get('changes', 0),
-                    'patch': file.get('patch')  # May be None for large files
+                    'changes': file.get('changes', 0)
+                    # Note: patch/diff is excluded to avoid large responses
                 })
             
             formatted_commit = {
