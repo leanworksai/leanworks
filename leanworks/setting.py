@@ -124,10 +124,14 @@ AGENT_SYSTEM_PROMPT = """
     PostgreSQL tools: query_postgres
     Search tools: search_documents
     Outlook tools: list_upcoming_meetings,find_available_slots
+    Jira tools: search_issues,get_issue,create_issue,update_issue,add_comment
+    GitHub tools: github_list_repositories,github_get_repository,github_search_issues,github_get_issue,github_create_issue,github_update_issue,github_add_issue_comment,github_list_pull_requests,github_get_pull_request,github_create_pull_request,github_list_commits,github_get_commit,github_get_pull_request_commits
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
     - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as jira, those data are synchronized to the internal database. So, PostgreSQL tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
+    - Jira tools are used to interact directly with Jira for searching issues, getting issue details, creating issues, updating issues, and adding comments. Use these tools when you need to perform real-time operations on Jira or when PostgreSQL data may not be up-to-date. Note that Jira data may also be synchronized to the internal database, so PostgreSQL tools can be used as a primary source, but Jira tools provide direct access for write operations and real-time data.
+    - GitHub tools are used to interact directly with GitHub for managing repositories, issues, pull requests, and commits. Use these tools when you need to perform real-time operations on GitHub repositories, create or update issues, manage pull requests, view commit history, or when PostgreSQL data may not be up-to-date. Note that GitHub data may also be synchronized to the internal database, so PostgreSQL tools can be used as a primary source, but GitHub tools provide direct access for write operations and real-time data.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.

@@ -4,9 +4,12 @@ from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
 from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
+from leanworks.agent.tools.jira import JiraTool
+from leanworks.agent.tools.github import GitHubTool
 from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +217,89 @@ class ToolUse:
             else:
                 self._tool_cache['cloud_storage_tool'] = None
         return self._tool_cache['cloud_storage_tool']
+    
+    @property
+    def jira_tool(self):
+        """Lazy-load Jira tool on first access."""
+        if 'jira_tool' not in self._tool_cache:
+            if 'jira' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-atlassian"
+                    
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    jira_credentials = json.loads(secret_json)
+                    
+                    self._tool_cache['jira_tool'] = JiraTool(
+                        email=jira_credentials.get('email'),
+                        domain=jira_credentials.get('domain'),
+                        api_token=jira_credentials.get('apiToken')
+                    )
+                    if 'jira' not in self.enabled_tools:
+                        self.enabled_tools.append('jira')
+                    logger.info("JiraTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize JiraTool: {str(e)}")
+                    self._tool_cache['jira_tool'] = None
+            elif 'jira' in self.requested_tools:
+                logger.warning("JiraTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['jira_tool'] = None
+            else:
+                self._tool_cache['jira_tool'] = None
+        return self._tool_cache['jira_tool']
+    
+    @property
+    def github_tool(self):
+        """Lazy-load GitHub tool on first access."""
+        if 'github_tool' not in self._tool_cache:
+            if 'github' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-github"
+                    
+                    # Retrieve and parse JSON secret for installation data
+                    secret_json = get_secret(secret_name)
+                    github_installation = json.loads(secret_json)
+                    installation_id = github_installation.get('installationId')
+                    
+                    # Retrieve GitHub App credentials (global secrets, not per-org)
+                    app_id = get_secret('github-app-id')
+                    private_key = get_secret('github-app-private-key')
+                    
+                    self._tool_cache['github_tool'] = GitHubTool(
+                        installation_id=int(installation_id) if installation_id else None,
+                        app_id=app_id,
+                        private_key=private_key
+                    )
+                    if 'github' not in self.enabled_tools:
+                        self.enabled_tools.append('github')
+                    logger.info("GitHubTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize GitHubTool: {str(e)}")
+                    self._tool_cache['github_tool'] = None
+            elif 'github' in self.requested_tools:
+                logger.warning("GitHubTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['github_tool'] = None
+            else:
+                self._tool_cache['github_tool'] = None
+        return self._tool_cache['github_tool']
 
     @property
     def tools(self):
@@ -254,6 +340,36 @@ class ToolUse:
                     self.cloud_storage_tool.list_chat_images_property
                 ])
                 logger.info("Cloud Storage tools added to tools list (lazy)")
+
+            # Add Jira tools if available
+            if self.jira_tool:
+                self._tools_cache.extend([
+                    self.jira_tool.search_issues_property,
+                    self.jira_tool.get_issue_property,
+                    self.jira_tool.create_issue_property,
+                    self.jira_tool.update_issue_property,
+                    self.jira_tool.add_comment_property
+                ])
+                logger.info("Jira tools added to tools list (lazy)")
+
+            # Add GitHub tools if available
+            if self.github_tool:
+                self._tools_cache.extend([
+                    self.github_tool.list_repositories_property,
+                    self.github_tool.get_repository_property,
+                    self.github_tool.search_issues_property,
+                    self.github_tool.get_issue_property,
+                    self.github_tool.create_issue_property,
+                    self.github_tool.update_issue_property,
+                    self.github_tool.add_issue_comment_property,
+                    self.github_tool.list_pull_requests_property,
+                    self.github_tool.get_pull_request_property,
+                    self.github_tool.create_pull_request_property,
+                    self.github_tool.list_commits_property,
+                    self.github_tool.get_commit_property,
+                    self.github_tool.get_pull_request_commits_property
+                ])
+                logger.info("GitHub tools added to tools list (lazy)")
 
             # Add DuckDB tools (response-scoped tools only)
             if 'duckdb' in self.requested_tools:
@@ -307,6 +423,36 @@ class ToolUse:
                     "list_chat_images": self.cloud_storage_tool.list_chat_images
                 })
                 logger.info("Cloud Storage functions added to function_map (lazy)")
+
+            # Add Jira functions if available
+            if self.jira_tool:
+                self._function_map_cache.update({
+                    "search_issues": self.jira_tool.search_issues,
+                    "get_issue": self.jira_tool.get_issue,
+                    "create_issue": self.jira_tool.create_issue,
+                    "update_issue": self.jira_tool.update_issue,
+                    "add_comment": self.jira_tool.add_comment
+                })
+                logger.info("Jira functions added to function_map (lazy)")
+
+            # Add GitHub functions if available
+            if self.github_tool:
+                self._function_map_cache.update({
+                    "github_list_repositories": self.github_tool.list_repositories,
+                    "github_get_repository": self.github_tool.get_repository,
+                    "github_search_issues": self.github_tool.search_issues,
+                    "github_get_issue": self.github_tool.get_issue,
+                    "github_create_issue": self.github_tool.create_issue,
+                    "github_update_issue": self.github_tool.update_issue,
+                    "github_add_issue_comment": self.github_tool.add_issue_comment,
+                    "github_list_pull_requests": self.github_tool.list_pull_requests,
+                    "github_get_pull_request": self.github_tool.get_pull_request,
+                    "github_create_pull_request": self.github_tool.create_pull_request,
+                    "github_list_commits": self.github_tool.list_commits,
+                    "github_get_commit": self.github_tool.get_commit,
+                    "github_get_pull_request_commits": self.github_tool.get_pull_request_commits
+                })
+                logger.info("GitHub functions added to function_map (lazy)")
 
             # Add DuckDB function mapping (response-scoped functions only)
             if 'duckdb' in self.requested_tools:
