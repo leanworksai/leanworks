@@ -53,7 +53,7 @@ class ConversationManager:
         # Initialize the current conversation as empty
         self.conversation = self.slim_conversation.copy()
     
-    def load_conversation_from_messages(self, chat_id: str, limit: int = 30, exclude_last: bool = True):
+    def load_conversation_from_messages(self, chat_id: str, limit: int = 5, exclude_last: bool = True):
         """
         Load conversation from Firestore messages collection by chatId.
         
@@ -62,7 +62,7 @@ class ConversationManager:
         
         Args:
             chat_id: Chat ID to query messages for
-            limit: Maximum number of messages to load (default: 30)
+            limit: Maximum number of messages to load (default: 5)
             exclude_last: If True, exclude the last message (current message being processed)
         """
         if not self.firestore_client or not self.org_slug:
