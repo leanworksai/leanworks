@@ -170,18 +170,100 @@ class ChatAgent:
         }
 
 
+    def _extract_user_message_from_conversation_history(self, user_message: str) -> str:
+        """
+        Extract the actual user message from embedded conversation history.
+        
+        The frontend embeds the last 5 messages (most recent) in the user message.
+        This method extracts the actual current user message, which should be the last
+        user message in the conversation history array.
+        
+        Args:
+            user_message (str): The user message that may contain embedded conversation history
+            
+        Returns:
+            str: The extracted actual user message (the most recent user message in the history)
+        """
+        # Check if the message contains conversation history markers
+        if "## Conversation History" in user_message or '"role": "user"' in user_message:
+            try:
+                import json
+                import re
+                
+                # Try to find and parse the conversation history JSON array
+                # Look for JSON array pattern: [ {...}, {...} ]
+                json_match = re.search(r'\[[\s\S]*?\]', user_message)
+                if json_match:
+                    conversation_json = json_match.group(0)
+                    messages = json.loads(conversation_json)
+                    
+                    # Find the last user message in the conversation history
+                    # Messages are typically ordered chronologically, so the last user message is the current one
+                    for msg in reversed(messages):
+                        if msg.get("role") == "user" and msg.get("content"):
+                            content = msg.get("content")
+                            # Handle both string and dict content formats
+                            if isinstance(content, str):
+                                actual_message = content
+                            elif isinstance(content, list) and len(content) > 0:
+                                # Handle Anthropic message format with content blocks
+                                text_block = next((item.get("text", "") for item in content if item.get("type") == "text"), "")
+                                if text_block:
+                                    actual_message = text_block
+                                else:
+                                    actual_message = str(content[0]) if content else ""
+                            else:
+                                actual_message = str(content)
+                            
+                            # Remove any conversation history preamble from the message
+                            # Remove any leading conversation history text
+                            if actual_message.startswith("You are participating"):
+                                # Extract just the actual question/statement
+                                lines = actual_message.split("\n")
+                                # Find the line after "Write your response message now"
+                                for i, line in enumerate(lines):
+                                    if "Write your response message now" in line or "CRITICAL INSTRUCTIONS" in line:
+                                        # Take everything after this line as the actual message
+                                        actual_message = "\n".join(lines[i+1:]).strip()
+                                        break
+                            
+                            logger.info(f"Extracted actual user message from conversation history: {actual_message[:100]}...")
+                            return actual_message
+                    
+                    # If no user message found, log warning and return original
+                    logger.warning("Found conversation history but no user message in it, using original message")
+                    return user_message
+                    
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Failed to parse conversation history from user message: {e}")
+                # Fallback: try to extract the last meaningful line
+                lines = user_message.split("\n")
+                # Look for the actual question (usually after "Write your response message now" or similar)
+                for i, line in enumerate(lines):
+                    if "Write your response message now" in line or "CRITICAL INSTRUCTIONS" in line:
+                        remaining = "\n".join(lines[i+1:]).strip()
+                        if remaining:
+                            logger.info(f"Extracted user message from text pattern: {remaining[:100]}...")
+                            return remaining
+        
+        # No conversation history detected, return as-is
+        return user_message
+
     def process_message(self, user_message, cited_context=None, thinking=False, streaming=False):
         """
         Process a user message and handle the conversation flow.
         
         Args:
-            user_message (str): The user's message content
+            user_message (str): The user's message content (may contain embedded conversation history)
             cited_context (str): The cited context for the user message
             thinking (bool): When True, enable evaluation-and-critique loop. When False, skip evaluation and return the first direct response.
             streaming (bool): When True, show tools being used and print response in a streaming way.
         Returns:
             dict: Dictionary with 'content' (response text) and 'data_sources' (list of sources)
         """
+        # Extract the actual user message from embedded conversation history (if present)
+        actual_user_message = self._extract_user_message_from_conversation_history(user_message)
+        
         # Reset data sources for new message
         self.data_sources = []
         
@@ -189,13 +271,14 @@ class ChatAgent:
         clear_session_response_ids()
         
         # Store the original user query for evaluation (before adding cited context)
-        self.original_user_query = user_message
-        logger.info(f"Stored original user query for evaluation: {self.original_user_query}")
+        self.original_user_query = actual_user_message
+        logger.info(f"Stored original user query for evaluation: {self.original_user_query[:200]}...")
         
         # Log current state of document deduplication
         logger.info(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
         
-        # Prepare user message
+        # Prepare user message (use the extracted actual message)
+        user_message = actual_user_message
         if cited_context:
             user_message = f"<cited_context>{cited_context}</cited_context>\n{user_message}"
         

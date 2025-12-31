@@ -218,7 +218,7 @@ async def main_async():
             model_client=model_client,
             user_id=user_id,
             org_slug=org_slug,
-            session_id="xegq8fed8t",
+            session_id="fej2fh8g",
             clear_conversation=False,  # Set to False to test loading previous conversations
             tools=tools
         )
@@ -234,7 +234,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-       plz use yanfuzhu94 to search
+       how many tickets are there in jira?
 '''
         
         print("💬 Processing user message:")
