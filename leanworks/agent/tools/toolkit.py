@@ -226,7 +226,7 @@ class ToolUse:
     def atlassian_tool(self):
         """Lazy-load Atlassian tool on first access."""
         if 'atlassian_tool' not in self._tool_cache:
-            if 'jira' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+            if ('jira' in self.requested_tools or 'atlassian' in self.requested_tools) and self.secret_manager_client and self.project_id and self.org_slug:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
@@ -254,7 +254,7 @@ class ToolUse:
                 except Exception as e:
                     logger.error(f"Failed to initialize AtlassianTool: {str(e)}")
                     self._tool_cache['atlassian_tool'] = None
-            elif 'jira' in self.requested_tools:
+            elif 'jira' in self.requested_tools or 'atlassian' in self.requested_tools:
                 logger.warning("AtlassianTool not initialized: missing secret_client, project_id, or org_slug")
                 self._tool_cache['atlassian_tool'] = None
             else:

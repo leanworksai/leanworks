@@ -53,7 +53,7 @@ class ConversationManager:
         # Initialize the current conversation as empty
         self.conversation = self.slim_conversation.copy()
     
-    def load_conversation_from_messages(self, chat_id: str, limit: int = 5, exclude_last: bool = True):
+    def load_conversation_from_messages(self, chat_id: str, limit: int = 5, exclude_last: bool = True, current_message: str = None):
         """
         Load conversation from Firestore messages collection by chatId.
         
@@ -63,7 +63,8 @@ class ConversationManager:
         Args:
             chat_id: Chat ID to query messages for
             limit: Maximum number of messages to load (default: 5)
-            exclude_last: If True, exclude the last message (current message being processed)
+            exclude_last: If True, exclude messages matching the current message being processed
+            current_message: The current user message being processed (used for content matching)
         """
         if not self.firestore_client or not self.org_slug:
             logger.warning("Cannot load conversation from messages: missing firestore_client or org_slug")
@@ -124,9 +125,21 @@ class ConversationManager:
             if len(conversation_messages) > 0:
                 conversation_messages.reverse()
             
-            # Exclude the last message if it's the current one being processed
+            # Exclude the last message if it matches the current message being processed
             if exclude_last and len(conversation_messages) > 0:
-                conversation_messages = conversation_messages[:-1]
+                if current_message:
+                    # Check only the last message: remove if it's a user message with matching content
+                    last_msg = conversation_messages[-1]
+                    last_msg_content = last_msg.get('content', [{}])[0].get('text', '').strip()
+                    last_msg_role = last_msg.get('role', '')
+                    current_message_stripped = current_message.strip()
+                    
+                    # Exclude if the last message is a user message with matching content
+                    if last_msg_role == 'user' and last_msg_content == current_message_stripped:
+                        conversation_messages = conversation_messages[:-1]
+                else:
+                    # Fallback: just exclude last message if current_message not provided
+                    conversation_messages = conversation_messages[:-1]
             
             # Set conversation (excluding the last message which is the current one being processed)
             if len(conversation_messages) > 0:
