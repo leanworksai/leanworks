@@ -4,7 +4,7 @@ from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
-from leanworks.agent.tools.jira import JiraTool
+from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
 from leanworks.agent.tools.duckdb import (
     DuckDBTool,
@@ -22,7 +22,7 @@ __all__ = [
     'OutlookTool',
     'FirestoreTool',
     'CloudStorageTool',
-    'JiraTool',
+    'AtlassianTool',
     'GitHubTool',
     'DuckDBTool',
     'save_data',

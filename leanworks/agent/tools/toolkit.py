@@ -4,7 +4,7 @@ from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
 from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
-from leanworks.agent.tools.jira import JiraTool
+from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
 from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
@@ -219,9 +219,9 @@ class ToolUse:
         return self._tool_cache['cloud_storage_tool']
     
     @property
-    def jira_tool(self):
-        """Lazy-load Jira tool on first access."""
-        if 'jira_tool' not in self._tool_cache:
+    def atlassian_tool(self):
+        """Lazy-load Atlassian tool on first access."""
+        if 'atlassian_tool' not in self._tool_cache:
             if 'jira' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
                 try:
                     # Helper function to get secret
@@ -237,25 +237,25 @@ class ToolUse:
                     
                     # Retrieve and parse JSON secret
                     secret_json = get_secret(secret_name)
-                    jira_credentials = json.loads(secret_json)
+                    atlassian_credentials = json.loads(secret_json)
                     
-                    self._tool_cache['jira_tool'] = JiraTool(
-                        email=jira_credentials.get('email'),
-                        domain=jira_credentials.get('domain'),
-                        api_token=jira_credentials.get('apiToken')
+                    self._tool_cache['atlassian_tool'] = AtlassianTool(
+                        email=atlassian_credentials.get('email'),
+                        domain=atlassian_credentials.get('domain'),
+                        api_token=atlassian_credentials.get('apiToken')
                     )
                     if 'jira' not in self.enabled_tools:
                         self.enabled_tools.append('jira')
-                    logger.info("JiraTool initialized successfully (lazy)")
+                    logger.info("AtlassianTool initialized successfully (lazy)")
                 except Exception as e:
-                    logger.error(f"Failed to initialize JiraTool: {str(e)}")
-                    self._tool_cache['jira_tool'] = None
+                    logger.error(f"Failed to initialize AtlassianTool: {str(e)}")
+                    self._tool_cache['atlassian_tool'] = None
             elif 'jira' in self.requested_tools:
-                logger.warning("JiraTool not initialized: missing secret_client, project_id, or org_slug")
-                self._tool_cache['jira_tool'] = None
+                logger.warning("AtlassianTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['atlassian_tool'] = None
             else:
-                self._tool_cache['jira_tool'] = None
-        return self._tool_cache['jira_tool']
+                self._tool_cache['atlassian_tool'] = None
+        return self._tool_cache['atlassian_tool']
     
     @property
     def github_tool(self):
@@ -341,17 +341,17 @@ class ToolUse:
                 ])
                 logger.info("Cloud Storage tools added to tools list (lazy)")
 
-            # Add Jira tools if available
-            if self.jira_tool:
+            # Add Atlassian tools if available
+            if self.atlassian_tool:
                 self._tools_cache.extend([
-                    self.jira_tool.search_issues_property,
-                    self.jira_tool.get_issue_property,
-                    self.jira_tool.create_issue_property,
-                    self.jira_tool.update_issue_property,
-                    self.jira_tool.add_comment_property,
-                    self.jira_tool.search_users_property
+                    self.atlassian_tool.search_issues_property,
+                    self.atlassian_tool.get_issue_property,
+                    self.atlassian_tool.create_issue_property,
+                    self.atlassian_tool.update_issue_property,
+                    self.atlassian_tool.add_comment_property,
+                    self.atlassian_tool.search_users_property
                 ])
-                logger.info("Jira tools added to tools list (lazy)")
+                logger.info("Atlassian tools added to tools list (lazy)")
 
             # Add GitHub tools if available
             if self.github_tool:
@@ -426,17 +426,17 @@ class ToolUse:
                 })
                 logger.info("Cloud Storage functions added to function_map (lazy)")
 
-            # Add Jira functions if available
-            if self.jira_tool:
+            # Add Atlassian functions if available
+            if self.atlassian_tool:
                 self._function_map_cache.update({
-                    "search_issues": self.jira_tool.search_issues,
-                    "get_issue": self.jira_tool.get_issue,
-                    "create_issue": self.jira_tool.create_issue,
-                    "update_issue": self.jira_tool.update_issue,
-                    "add_comment": self.jira_tool.add_comment,
-                    "jira_search_users": self.jira_tool.search_users
+                    "search_issues": self.atlassian_tool.search_issues,
+                    "get_issue": self.atlassian_tool.get_issue,
+                    "create_issue": self.atlassian_tool.create_issue,
+                    "update_issue": self.atlassian_tool.update_issue,
+                    "add_comment": self.atlassian_tool.add_comment,
+                    "jira_search_users": self.atlassian_tool.search_users
                 })
-                logger.info("Jira functions added to function_map (lazy)")
+                logger.info("Atlassian functions added to function_map (lazy)")
 
             # Add GitHub functions if available
             if self.github_tool:

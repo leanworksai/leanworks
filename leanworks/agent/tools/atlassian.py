@@ -7,15 +7,15 @@ from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
-class JiraTool:
+class AtlassianTool:
     def __init__(self, email: str = None, domain: str = None, api_token: str = None):
         """
-        Initialize JiraTool with Jira API credentials.
+        Initialize AtlassianTool with Atlassian API credentials.
         
         Args:
-            email: Jira account email address
-            domain: Jira domain (e.g., "your-domain.atlassian.net")
-            api_token: Jira API token
+            email: Atlassian account email address
+            domain: Atlassian domain (e.g., "your-domain.atlassian.net")
+            api_token: Atlassian API token
         """
         self.email = email
         self.domain = domain
@@ -25,7 +25,7 @@ class JiraTool:
         
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict:
         """
-        Make an HTTP request to the Jira API.
+        Make an HTTP request to the Atlassian API.
         
         Args:
             method: HTTP method (GET, POST, PUT, etc.)
@@ -36,7 +36,7 @@ class JiraTool:
             Response data as dictionary or error dictionary
         """
         if not self.auth or not self.base_url:
-            return {"error": "Jira credentials not configured"}
+            return {"error": "Atlassian credentials not configured"}
         
         try:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
@@ -53,7 +53,7 @@ class JiraTool:
             )
             
             if response.status_code >= 400:
-                error_msg = f"Jira API error: {response.status_code}"
+                error_msg = f"Atlassian API error: {response.status_code}"
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('errorMessages', [error_msg])[0]
@@ -67,7 +67,7 @@ class JiraTool:
             return {}
             
         except Exception as e:
-            logger.error(f"Error making Jira API request: {str(e)}")
+            logger.error(f"Error making Atlassian API request: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
     

@@ -218,7 +218,7 @@ async def main_async():
             model_client=model_client,
             user_id=user_id,
             org_slug=org_slug,
-            session_id="fhr3p9gf7g",
+            session_id="xegq8fed8t",
             clear_conversation=False,  # Set to False to test loading previous conversations
             tools=tools
         )
