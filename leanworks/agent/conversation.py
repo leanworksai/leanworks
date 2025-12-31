@@ -89,9 +89,9 @@ class ConversationManager:
                 if self.user_id:
                     query = query.where(filter=FieldFilter('userId', '==', self.user_id.lower()))
             
-            # Order by timestamp ascending (oldest first)
+            # Order by timestamp descending (most recent first) to get the latest messages
             try:
-                query = query.order_by('timestamp', direction=firestore.Query.ASCENDING)
+                query = query.order_by('timestamp', direction=firestore.Query.DESCENDING)
             except Exception as e:
                 # If index doesn't exist, we'll sort in memory
                 if 'index' in str(e).lower() or (hasattr(e, 'code') and e.code == 9):
@@ -99,43 +99,30 @@ class ConversationManager:
                 else:
                     raise
             
-            # Limit results
+            # Limit results to get the most recent N messages
             query = query.limit(limit)
             
             # Execute query
             logger.info(f"Loading conversation from messages collection: chatId={chat_id}, limit={limit}")
             messages = query.get()
             
-            # Convert Firestore documents to conversation format with timestamps
-            message_pairs = []
+            # Convert Firestore documents to conversation format
+            conversation_messages = []
             for doc in messages:
                 data = doc.to_dict()
                 role = data.get('role', '')
                 content = data.get('content', '')
-                timestamp = data.get('timestamp')
                 
                 if role and content:
-                    # Convert timestamp to comparable format
-                    timestamp_value = None
-                    if timestamp:
-                        if hasattr(timestamp, 'to_date'):
-                            timestamp_value = timestamp.to_date()
-                        else:
-                            timestamp_value = timestamp
-                    
                     # Convert to conversation format: {"role": "...", "content": [{"type": "text", "text": "..."}]}
-                    message_pairs.append((
-                        timestamp_value or 0,  # Use 0 as fallback for sorting
-                        {
-                            "role": role,
-                            "content": [{"type": "text", "text": content}]
-                        }
-                    ))
+                    conversation_messages.append({
+                        "role": role,
+                        "content": [{"type": "text", "text": content}]
+                    })
             
-            # Sort by timestamp (oldest first) - handles both cases: ordered by query or needs in-memory sort
-            if len(message_pairs) > 0:
-                message_pairs.sort(key=lambda x: x[0] if x[0] else 0)
-                conversation_messages = [msg for _, msg in message_pairs]
+            # Query returns messages in DESCENDING order (newest first), so reverse to get chronological order (oldest first)
+            if len(conversation_messages) > 0:
+                conversation_messages.reverse()
             
             # Exclude the last message if it's the current one being processed
             if exclude_last and len(conversation_messages) > 0:
