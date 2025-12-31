@@ -136,7 +136,7 @@ class ToolUse:
     def outlook_tool(self):
         """Lazy-load Outlook tool on first access."""
         if 'outlook_tool' not in self._tool_cache:
-            if 'outlook' in self.requested_tools and self.secret_manager_client and self.project_id:
+            if 'outlook' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
@@ -144,15 +144,19 @@ class ToolUse:
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
-                    outlook_auth = {
-                        'azure_client_id': get_secret('AD_CLIENT_ID'),
-                        'azure_client_secret': get_secret('AD_CLIENT_SECRET'),
-                        'azure_tenant_id': get_secret('AD_TENANT_ID')
-                    }
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-outlook"
+                    
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    outlook_credentials = json.loads(secret_json)
+                    
                     self._tool_cache['outlook_tool'] = OutlookTool(
-                        client_id=outlook_auth.get('azure_client_id'),
-                        client_secret=outlook_auth.get('azure_client_secret'),
-                        tenant_id=outlook_auth.get('azure_tenant_id')
+                        client_id=outlook_credentials.get('clientId'),
+                        client_secret=outlook_credentials.get('clientSecret'),
+                        tenant_id=outlook_credentials.get('tenantId')
                     )
                     if 'outlook' not in self.enabled_tools:
                         self.enabled_tools.append('outlook')
@@ -161,7 +165,7 @@ class ToolUse:
                     logger.error(f"Failed to initialize OutlookTool: {str(e)}")
                     self._tool_cache['outlook_tool'] = None
             elif 'outlook' in self.requested_tools:
-                logger.warning("OutlookTool not initialized: missing secret_client")
+                logger.warning("OutlookTool not initialized: missing secret_client, project_id, or org_slug")
                 self._tool_cache['outlook_tool'] = None
             else:
                 self._tool_cache['outlook_tool'] = None
