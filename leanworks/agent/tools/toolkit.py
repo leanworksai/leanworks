@@ -348,7 +348,8 @@ class ToolUse:
                     self.jira_tool.get_issue_property,
                     self.jira_tool.create_issue_property,
                     self.jira_tool.update_issue_property,
-                    self.jira_tool.add_comment_property
+                    self.jira_tool.add_comment_property,
+                    self.jira_tool.search_users_property
                 ])
                 logger.info("Jira tools added to tools list (lazy)")
 
@@ -367,7 +368,8 @@ class ToolUse:
                     self.github_tool.create_pull_request_property,
                     self.github_tool.list_commits_property,
                     self.github_tool.get_commit_property,
-                    self.github_tool.get_pull_request_commits_property
+                    self.github_tool.get_pull_request_commits_property,
+                    self.github_tool.search_users_property
                 ])
                 logger.info("GitHub tools added to tools list (lazy)")
 
@@ -431,7 +433,8 @@ class ToolUse:
                     "get_issue": self.jira_tool.get_issue,
                     "create_issue": self.jira_tool.create_issue,
                     "update_issue": self.jira_tool.update_issue,
-                    "add_comment": self.jira_tool.add_comment
+                    "add_comment": self.jira_tool.add_comment,
+                    "jira_search_users": self.jira_tool.search_users
                 })
                 logger.info("Jira functions added to function_map (lazy)")
 
@@ -450,7 +453,8 @@ class ToolUse:
                     "github_create_pull_request": self.github_tool.create_pull_request,
                     "github_list_commits": self.github_tool.list_commits,
                     "github_get_commit": self.github_tool.get_commit,
-                    "github_get_pull_request_commits": self.github_tool.get_pull_request_commits
+                    "github_get_pull_request_commits": self.github_tool.get_pull_request_commits,
+                    "github_search_users": self.github_tool.search_users
                 })
                 logger.info("GitHub functions added to function_map (lazy)")
 

@@ -4,7 +4,6 @@ import copy
 import logging
 from typing import List
 from google.cloud import firestore
-from google.cloud.firestore_v1.base_query import FieldFilter
 
 logger = logging.getLogger(__name__)
 class ConversationManager:
@@ -55,98 +54,22 @@ class ConversationManager:
         self.conversation = self.slim_conversation.copy()
     
     def save_conversation(self):
-        """Save conversation messages to Firestore in the same format as web frontend.
+        """Save conversation messages to Firestore files collection for agent's own loading.
         
-        Messages are saved to orgs/{org_slug}/messages collection with format:
-        - chatId: session_id (e.g., 'ai-assistant-{user_id}')
-        - role: 'user' or 'assistant'
-        - content: message text content
-        - timestamp: Firestore Timestamp
-        - userId: user_id (email)
-        - memberName: extracted from user info or 'AI Assistant' for assistant messages
-        - memberAvatar: initials or 'AI' for assistant
+        The agent only saves to files collection. The web app handles saving to messages collection.
+        This ensures the agent can reload its own conversation history when initialized with the same session_id.
         """
         if not self.firestore_client or not self.user_id or not self.org_slug or not self.session_id:
             return
         
         try:
-            from datetime import datetime
-            
-            # Collection path matches web frontend: orgs/{org_slug}/messages
-            messages_collection = self.firestore_client.collection('orgs').document(self.org_slug).collection('messages')
-            
-            # Extract user info for memberName and memberAvatar
-            user_doc_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('users').document(self.user_id)
-            user_doc = user_doc_ref.get()
-            
-            user_first_name = ""
-            user_last_name = ""
-            if user_doc.exists:
-                user_data = user_doc.to_dict()
-                user_first_name = user_data.get('firstName', '')
-                user_last_name = user_data.get('lastName', '')
-            
-            user_member_name = f"{user_first_name} {user_last_name}".strip() or self.user_id
-            user_member_avatar = f"{user_first_name[0] if user_first_name else ''}{user_last_name[0] if user_last_name else ''}".upper() or self.user_id[0].upper()
-            
-            # Process slim_conversation to save individual messages
-            # Only save new messages (check what's already saved)
-            chat_id = self.session_id  # Use session_id as chatId
-            
-            # Get existing messages for this chatId to avoid duplicates
-            existing_messages_query = messages_collection.where(filter=FieldFilter('chatId', '==', chat_id)).where(filter=FieldFilter('userId', '==', self.user_id.lower()))
-            existing_docs = existing_messages_query.get()
-            existing_contents = {doc.get('content') for doc in existing_docs}
-            
-            # Save each message in the slim_conversation
-            for message in self.slim_conversation:
-                role = message.get('role', '')
-                content_blocks = message.get('content', [])
-                
-                # Extract text content from content blocks
-                text_content = ""
-                if isinstance(content_blocks, list):
-                    for block in content_blocks:
-                        if isinstance(block, dict) and block.get('type') == 'text':
-                            text_content = block.get('text', '')
-                            break
-                        elif isinstance(block, str):
-                            text_content = block
-                            break
-                elif isinstance(content_blocks, str):
-                    text_content = content_blocks
-                
-                # Skip if content is empty or already exists
-                if not text_content or text_content in existing_contents:
-                    continue
-                
-                # Determine memberName and memberAvatar based on role
-                if role == 'user':
-                    member_name = user_member_name
-                    member_avatar = user_member_avatar
-                else:  # assistant
-                    member_name = 'AI Assistant'
-                    member_avatar = 'AI'
-                
-                # Create message document matching web frontend format
-                # Use Firestore Timestamp (same as web frontend uses new Date())
-                message_data = {
-                    'chatId': chat_id,
-                    'role': role,
-                    'content': text_content,
-                    'timestamp': firestore.SERVER_TIMESTAMP,  # Firestore Timestamp (matches web frontend's new Date())
-                    'userId': self.user_id.lower(),
-                    'memberName': member_name,
-                    'memberAvatar': member_avatar,
-                    'projectId': None,
-                    'teamId': None
-                }
-                
-                # Save to Firestore
-                messages_collection.add(message_data)
-                logger.info(f"Saved {role} message to Firestore for chatId: {chat_id}")
-            
-            logger.info(f"Saved conversation messages to Firestore for user {self.user_id}, session {self.session_id}")
+            # Save to files collection for agent's own loading (load_conversation reads from files)
+            file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.conversation_path)
+            file_ref.set({
+                'content': self.slim_conversation,  # Save as list of messages
+                'updated_at': firestore.SERVER_TIMESTAMP
+            }, merge=False)  # Use set (not merge) to replace entire conversation
+            logger.info(f"Saved conversation to files collection for user {self.user_id}, session {self.session_id}")
         except Exception as e:
             logger.error(f"Error saving conversation to Firestore: {e}")
             import traceback

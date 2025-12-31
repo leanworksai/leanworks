@@ -186,7 +186,7 @@ async def main_async():
     """Async version of main function with async client initialization"""
     # user_id = "bharathkumar.l@sbnasoftware.com"
     user_id = "yanfu@leanworks.ai"
-    org_slug = "yanfus_personal_workspace_mj6bu8a7"
+    org_slug = "leanworksai_mj6bu7m8"
     
     print("=" * 80)
     print("🚀 AGENT PERFORMANCE TESTING")
@@ -204,7 +204,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_slug)
+        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_slug, ["jira", "github"])
         
         client_init_time = time.time() - client_init_start
         
@@ -218,7 +218,7 @@ async def main_async():
             model_client=model_client,
             user_id=user_id,
             org_slug=org_slug,
-            session_id="hdep29gf9e",
+            session_id="fhr3p9gf7g",
             clear_conversation=False,  # Set to False to test loading previous conversations
             tools=tools
         )
@@ -234,7 +234,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-        what is our go to market strategy?
+       plz use yanfuzhu94 to search
 '''
         
         print("💬 Processing user message:")

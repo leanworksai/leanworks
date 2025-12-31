@@ -1,10 +1,12 @@
 import logging
 import time
-from typing import List, Dict, Optional
+import re
+from typing import List, Dict, Optional, Tuple
 import requests
 import json
 import jwt
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -1087,6 +1089,9 @@ class GitHubTool:
     def list_commits_property(self):
         description = """
         List commits for a repository. Returns a list of commits with key information. Can filter by branch, path, author, or date range.
+        
+        IMPORTANT: If this tool returns zero results when filtering by author, it may mean the GitHub username is incorrect. 
+        Always suggest the user confirm the correct GitHub username/handle and consider using github_search_users to find the correct username.
         """
         return {
             "type": "custom",
@@ -1133,7 +1138,7 @@ class GitHubTool:
         }
     
     def list_commits(self, owner: str, repo: str, sha: str = None, path: str = None, author: str = None,
-                    since: str = None, until: str = None, per_page: int = 30) -> List[Dict]:
+                    since: str = None, until: str = None, per_page: int = 30, try_approximate_match: bool = True) -> List[Dict]:
         """
         List commits for a repository.
         
@@ -1146,11 +1151,12 @@ class GitHubTool:
             since: Only show commits after this date (ISO 8601, optional)
             until: Only show commits before this date (ISO 8601, optional)
             per_page: Results per page (default: 30, max: 100)
+            try_approximate_match: If True, try to find matching username if exact match fails (default: True)
             
         Returns:
-            List of commit dictionaries
+            List of commit dictionaries, or error dictionary with matching suggestions
         """
-        logger.info(f"Executing list_commits for {owner}/{repo}")
+        logger.info(f"Executing list_commits for {owner}/{repo}, author: {author}")
         try:
             params = {
                 'per_page': min(per_page, 100)
@@ -1168,6 +1174,43 @@ class GitHubTool:
                 params['until'] = until
             
             result = self._make_request('GET', f'/repos/{owner}/{repo}/commits', params=params)
+            
+            # If error and we have an author, try approximate matching
+            if 'error' in result and author and try_approximate_match:
+                logger.info(f"Exact author match failed for '{author}', trying approximate matching...")
+                match_result = self.find_matching_username(author, owner, repo, max_variations=3)
+                
+                if match_result['match'] and match_result['confidence'] >= 0.9:
+                    # High confidence match - proceed automatically
+                    logger.info(f"Found high-confidence match: '{author}' -> '{match_result['match']}' (confidence: {match_result['confidence']:.2f})")
+                    params['author'] = match_result['match']
+                    result = self._make_request('GET', f'/repos/{owner}/{repo}/commits', params=params)
+                    if 'error' not in result:
+                        # Success - add metadata about the match
+                        if isinstance(result, list):
+                            return result
+                elif match_result['match'] and match_result['confidence'] >= 0.7:
+                    # Medium confidence - return error with suggestion
+                    alternatives = [match_result['match']] + match_result['alternatives'][:2]
+                    return {
+                        "error": f"Could not find commits for author '{author}'. Found possible match: {match_result['match']}",
+                        "suggestion": f"Did you mean: {', '.join(alternatives)}?",
+                        "match_result": match_result
+                    }
+                elif match_result['match']:
+                    # Low confidence - return error with all options
+                    alternatives = [match_result['match']] + match_result['alternatives']
+                    return {
+                        "error": f"Could not find commits for author '{author}'. Found possible matches: {', '.join(alternatives)}",
+                        "suggestion": "Please provide the exact GitHub username, or use github_search_users to find the correct username.",
+                        "match_result": match_result
+                    }
+                else:
+                    # No match found
+                    return {
+                        "error": f"Could not find commits for author '{author}'. No matching GitHub username found.",
+                        "suggestion": "Please provide the exact GitHub username, or use github_search_users to find the correct username."
+                    }
             
             if 'error' in result:
                 return result
@@ -1363,4 +1406,407 @@ class GitHubTool:
             logger.error(f"Error getting pull request commits: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
+    
+    def _normalize_username(self, username: str) -> str:
+        """Normalize username for comparison (lowercase, remove special chars)."""
+        if not username:
+            return ""
+        normalized = username.lower().strip()
+        # Remove common special characters for comparison
+        normalized = normalized.replace('.', '').replace('-', '').replace('_', '')
+        return normalized
+    
+    def _calculate_similarity(self, str1: str, str2: str) -> float:
+        """Calculate similarity score between two strings (0.0 to 1.0)."""
+        if not str1 or not str2:
+            return 0.0
+        return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+    
+    def _generate_username_variations(self, username: str, max_variations: int = 3) -> List[str]:
+        """Generate username variations for approximate matching."""
+        if not username:
+            return []
+        
+        variations = []
+        seen = set()
+        
+        # Add normalized version
+        normalized = self._normalize_username(username)
+        if normalized and normalized not in seen:
+            variations.append(normalized)
+            seen.add(normalized)
+        
+        # Add lowercase version
+        lower = username.lower().strip()
+        if lower != username and lower not in seen and len(variations) < max_variations:
+            variations.append(lower)
+            seen.add(lower)
+        
+        # Remove dots
+        no_dots = username.replace('.', '')
+        if no_dots != username and no_dots not in seen and len(variations) < max_variations:
+            variations.append(no_dots)
+            seen.add(no_dots)
+        
+        # Remove hyphens
+        no_hyphens = username.replace('-', '')
+        if no_hyphens != username and no_hyphens not in seen and len(variations) < max_variations:
+            variations.append(no_hyphens)
+            seen.add(no_hyphens)
+        
+        # First part before dot/hyphen
+        if '.' in username:
+            first_part = username.split('.')[0]
+            if first_part not in seen and len(variations) < max_variations:
+                variations.append(first_part)
+                seen.add(first_part)
+        
+        if '-' in username:
+            first_part = username.split('-')[0]
+            if first_part not in seen and len(variations) < max_variations:
+                variations.append(first_part)
+                seen.add(first_part)
+        
+        return variations[:max_variations]
+    
+    @property
+    def search_users_property(self):
+        description = """
+        Search GitHub users by username, name, or email. Returns a list of matching users with their GitHub usernames.
+        This tool is useful for finding the correct GitHub username when you have a partial name, email, or slightly different username.
+        
+        IMPORTANT: If this tool returns zero results, always suggest the user confirm the correct GitHub username/handle. 
+        The user may need to provide the exact username or check their GitHub profile.
+        """
+        return {
+            "type": "custom",
+            "name": "github_search_users",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (username, name, or email). For email search, use format: 'email@example.com in:email'"
+                    },
+                    "per_page": {
+                        "type": "integer",
+                        "description": "Number of results per page. Defaults to 10 if not specified (max 100)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    
+    def search_users(self, query: str, per_page: int = 10) -> List[Dict]:
+        """
+        Search GitHub users by username, name, or email.
+        Uses GET /users/{username} for exact username matches, then GET /users to list and filter users.
+        
+        Args:
+            query: Search query (username, name, or email) - will try exact match first, then list and filter
+            per_page: Number of results per page (default: 10, max: 100)
+            
+        Returns:
+            List of user dictionaries with login, id, avatar_url, etc.
+        """
+        logger.info(f"Executing search_users with query: {query}")
+        try:
+            if not query:
+                return []
+            
+            # Clean the query - remove whitespace
+            query = query.strip()
+            query_lower = query.lower()
+            
+            # Check if query looks like an exact GitHub username (no spaces, no @, no special chars except hyphens and underscores)
+            # GitHub usernames can contain alphanumeric characters and hyphens, but cannot start/end with hyphen
+            is_likely_username = (
+                len(query) > 0 and 
+                len(query) <= 39 and  # GitHub username max length
+                not ' ' in query and 
+                not '@' in query and
+                re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-]))*[a-zA-Z0-9]$|^[a-zA-Z0-9]$', query)
+            )
+            
+            # First, try to get the user directly if it looks like an exact username
+            if is_likely_username:
+                logger.info(f"Query looks like exact username, trying GET /users/{query}")
+                user_result = self._make_request('GET', f'/users/{query}')
+                
+                if 'error' not in user_result and user_result.get('login'):
+                    # Successfully found user by exact username
+                    formatted_user = {
+                        'login': user_result.get('login'),
+                        'id': user_result.get('id'),
+                        'avatar_url': user_result.get('avatar_url'),
+                        'url': user_result.get('html_url'),
+                        'type': user_result.get('type')
+                    }
+                    logger.info(f"Found user by exact username: {formatted_user['login']}")
+                    return [formatted_user]
+                # If exact match failed, continue to list and filter
+            
+            # Use GET /users to list users and filter client-side
+            logger.info(f"Using GET /users to list and filter users for query: {query}")
+            all_matches = []
+            max_iterations = 10  # Limit to 10 iterations (up to 1000 users) for performance
+            per_page_param = 100  # Maximum per page for GET /users
+            since_id = None  # Track last user ID for pagination
+            
+            for iteration in range(max_iterations):
+                params = {
+                    'per_page': per_page_param
+                }
+                if since_id:
+                    params['since'] = since_id
+                
+                result = self._make_request('GET', '/users', params=params)
+                
+                if 'error' in result:
+                    # If we get an error and we haven't found any matches yet, return the error
+                    if iteration == 0 and len(all_matches) == 0:
+                        return result
+                    # Otherwise, break and return what we have
+                    break
+                
+                users = result if isinstance(result, list) else []
+                
+                if not users:
+                    # No more users to process
+                    break
+                
+                # Track the last user ID for next iteration
+                if users:
+                    since_id = users[-1].get('id')
+                
+                # Score and filter users based on query
+                for user in users:
+                    login = user.get('login', '')
+                    name = user.get('name', '')
+                    email = user.get('email', '')
+                    
+                    if not login:
+                        continue
+                    
+                    # Calculate match score
+                    score = 0
+                    login_lower = login.lower()
+                    name_lower = name.lower() if name else ''
+                    
+                    # Exact match gets highest score
+                    if login_lower == query_lower:
+                        score = 1000
+                    # Starts with query
+                    elif login_lower.startswith(query_lower):
+                        score = 500 - len(login)  # Shorter usernames rank higher
+                    # Contains query
+                    elif query_lower in login_lower:
+                        score = 200 - len(login)
+                    # Name matches
+                    elif name and query_lower in name_lower:
+                        score = 100
+                    # Email matches (if available)
+                    elif email and query_lower in email.lower():
+                        score = 50
+                    else:
+                        continue  # Skip users that don't match at all
+                    
+                    formatted_user = {
+                        'login': login,
+                        'id': user.get('id'),
+                        'avatar_url': user.get('avatar_url'),
+                        'url': user.get('html_url'),
+                        'type': user.get('type'),
+                        '_score': score  # Store score for sorting
+                    }
+                    all_matches.append(formatted_user)
+                
+                # If we have enough high-quality matches, we can stop early
+                if len(all_matches) >= per_page * 2:
+                    # Check if we have enough high-scoring matches
+                    high_score_matches = [m for m in all_matches if m.get('_score', 0) >= 200]
+                    if len(high_score_matches) >= per_page:
+                        break
+            
+            # Sort by score (descending) and remove score from output
+            all_matches.sort(key=lambda x: x.get('_score', 0), reverse=True)
+            formatted_users = []
+            for user in all_matches[:per_page]:
+                user.pop('_score', None)  # Remove internal score field
+                formatted_users.append(user)
+            
+            # If no users found, return a clear message
+            if len(formatted_users) == 0:
+                return {
+                    "error": f"No GitHub users found matching '{query}'",
+                    "message": f"No GitHub users found whose username contains '{query}'. Please check the spelling or try a different search term.",
+                    "users": []
+                }
+            
+            return formatted_users
+            
+        except Exception as e:
+            logger.error(f"Error searching users: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+    
+    def find_matching_username(self, given_identifier: str, owner: str = None, repo: str = None, max_variations: int = 3) -> Dict:
+        """
+        Find matching GitHub username by searching for usernames that contain the given identifier.
+        
+        Args:
+            given_identifier: The name/username/email provided by the user
+            owner: Repository owner (optional, for testing username validity)
+            repo: Repository name (optional, for testing username validity)
+            max_variations: Maximum number of variations to try (default: 3, not used in simplified version)
+            
+        Returns:
+            Dictionary with 'match', 'confidence', 'action', and 'alternatives' keys
+            - match: The matched username (or None)
+            - confidence: Confidence score 0.0 to 1.0
+            - action: 'proceed', 'confirm', or 'ask_user'
+            - alternatives: List of alternative matches (for confirmation)
+        """
+        if not given_identifier:
+            return {
+                "match": None,
+                "confidence": 0.0,
+                "action": "ask_user",
+                "alternatives": []
+            }
+        
+        # Step 1: Try exact match (if we have repo context to test)
+        # IMPORTANT: Disable approximate matching to prevent infinite recursion
+        if owner and repo:
+            test_result = self.list_commits(owner, repo, author=given_identifier, per_page=1, try_approximate_match=False)
+            if isinstance(test_result, list) and len(test_result) > 0:
+                return {
+                    "match": given_identifier,
+                    "confidence": 1.0,
+                    "action": "proceed",
+                    "alternatives": []
+                }
+        
+        # Step 2: Search for usernames containing the identifier
+        search_results = self.search_users(given_identifier, per_page=10)
+        
+        # Check if search returned an error (e.g., no users found)
+        if isinstance(search_results, dict) and 'error' in search_results:
+            return {
+                "match": None,
+                "confidence": 0.0,
+                "action": "ask_user",
+                "alternatives": [],
+                "message": search_results.get("message", search_results.get("error", "No users found"))
+            }
+        
+        if isinstance(search_results, list) and len(search_results) > 0:
+            # Filter and score results
+            scored_results = []
+            given_lower = given_identifier.lower()
+            
+            for user in search_results:
+                login = user.get('login', '')
+                if not login:
+                    continue
+                
+                login_lower = login.lower()
+                
+                # Calculate confidence based on how well it matches
+                if login_lower == given_lower:
+                    # Exact match
+                    confidence = 1.0
+                elif login_lower.startswith(given_lower) or login_lower.endswith(given_lower):
+                    # Starts or ends with query - high confidence
+                    confidence = 0.9
+                elif given_lower in login_lower:
+                    # Contains query - medium-high confidence
+                    confidence = 0.8
+                else:
+                    # Shouldn't happen since search_users filters, but just in case
+                    confidence = 0.5
+                
+                scored_results.append({
+                    "login": login,
+                    "confidence": confidence,
+                    "user": user
+                })
+            
+            if scored_results:
+                # Sort by confidence (highest first)
+                scored_results.sort(key=lambda x: x['confidence'], reverse=True)
+                
+                # Verify users exist before proceeding
+                verified_results = []
+                for result in scored_results:
+                    login = result["login"]
+                    
+                    # Verify user exists by trying to get user info or test with repo if available
+                    verified = False
+                    if owner and repo:
+                        # Test if we can list commits with this author (verifies user exists)
+                        test_result = self.list_commits(owner, repo, author=login, per_page=1, try_approximate_match=False)
+                        # If we get a list (even empty) or no error, user exists
+                        if isinstance(test_result, list):
+                            verified = True
+                        elif isinstance(test_result, dict) and 'error' not in test_result:
+                            verified = True
+                    else:
+                        # If no repo context, try to get user info directly
+                        try:
+                            user_result = self._make_request('GET', f'/users/{login}')
+                            if 'error' not in user_result:
+                                verified = True
+                        except:
+                            pass
+                    
+                    result["verified"] = verified
+                    verified_results.append(result)
+                
+                # Prefer verified results, but include unverified if no verified ones found
+                verified_matches = [r for r in verified_results if r.get("verified", False)]
+                if verified_matches:
+                    best_match = verified_matches[0]
+                elif verified_results:
+                    best_match = verified_results[0]
+                else:
+                    best_match = scored_results[0]
+                
+                # Determine action based on confidence and verification
+                if best_match['confidence'] >= 0.9 and best_match.get("verified", False):
+                    action = "proceed"
+                elif best_match['confidence'] >= 0.9:
+                    # High confidence but not verified - still proceed but log warning
+                    action = "proceed"
+                    logger.warning(f"High confidence match '{best_match['login']}' not verified")
+                elif best_match['confidence'] >= 0.7:
+                    action = "confirm"
+                else:
+                    action = "ask_user"
+                
+                # Get top alternatives for confirmation (prefer verified ones)
+                alternatives = []
+                for r in verified_results[:4]:  # Get more to filter
+                    if r["login"] != best_match["login"]:
+                        alternatives.append(r["login"])
+                        if len(alternatives) >= 3:
+                            break
+                
+                return {
+                    "match": best_match["login"],
+                    "confidence": best_match['confidence'],
+                    "action": action,
+                    "alternatives": alternatives,
+                    "verified": best_match.get("verified", False)
+                }
+        
+        # Step 3: No match found
+        return {
+            "match": None,
+            "confidence": 0.0,
+            "action": "ask_user",
+            "alternatives": [],
+            "message": f"No GitHub users found matching '{given_identifier}'. Please check the spelling or try a different identifier."
+        }
 
