@@ -204,7 +204,7 @@ async def main_async():
         client_init_start = time.time()
         
         # Use async client initialization (no BigQuery setup needed)
-        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_slug, ["jira", "github"])
+        firestore_client, secret_manager_client, model_client, tools = await initialize_clients_async(user_id, org_slug, ["atlassian", "github"])
         
         client_init_time = time.time() - client_init_start
         
@@ -219,7 +219,7 @@ async def main_async():
             user_id=user_id,
             org_slug=org_slug,
             session_id="fej2fh8g",
-            clear_conversation=False,  # Set to False to test loading previous conversations
+            clear_conversation=True,  # Set to False to test loading previous conversations
             tools=tools
         )
         

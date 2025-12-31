@@ -75,7 +75,7 @@ class AtlassianTool:
     def search_issues_property(self):
         description = """
         Search Jira issues using JQL (Jira Query Language). Returns a list of issues matching the query.
-        This tool should be called when you need to find issues based on various criteria like project, status, assignee, etc.
+        This jira tool should be called when you need to find issues based on various criteria like project, status, assignee, etc.
         
         IMPORTANT: If this tool returns zero results when filtering by assignee or reporter, it may mean the Jira user identifier is incorrect. 
         Always suggest the user confirm the correct Jira username/account ID and consider using jira_search_users to find the correct user identifier.
@@ -172,7 +172,7 @@ class AtlassianTool:
     def get_issue_property(self):
         description = """
         Get detailed information about a specific Jira issue by its key (e.g., PROJ-123).
-        Returns complete issue details including description, status, assignee, comments, and other fields.
+        This jira tool returns complete issue details including description, status, assignee, comments, and other fields.
         """
         return {
             "type": "custom",
@@ -250,7 +250,7 @@ class AtlassianTool:
     @property
     def create_issue_property(self):
         description = """
-        Create a new Jira issue. Returns the created issue key and details.
+        Create a new Jira issue. This jira tool returns the created issue key and details.
         """
         return {
             "type": "custom",
@@ -406,7 +406,7 @@ class AtlassianTool:
     @property
     def update_issue_property(self):
         description = """
-        Update an existing Jira issue. You can update summary, description, assignee, priority, or status.
+        Update an existing Jira issue. This jira tool allows you to update summary, description, assignee, priority, or status.
         """
         return {
             "type": "custom",
@@ -578,7 +578,7 @@ class AtlassianTool:
     @property
     def add_comment_property(self):
         description = """
-        Add a comment to a Jira issue.
+        Add a comment to a Jira issue. This jira tool allows you to add comments to existing issues.
         """
         return {
             "type": "custom",
@@ -710,8 +710,8 @@ class AtlassianTool:
     @property
     def search_users_property(self):
         description = """
-        Search Jira users by name, email, or username. Returns a list of matching users with their account IDs and display names.
-        This tool is useful for finding the correct Jira user identifier when you have a partial name, email, or slightly different identifier.
+        Search Jira users by name, email, or username. This jira tool returns a list of matching users with their account IDs and display names.
+        This jira tool is useful for finding the correct Jira user identifier when you have a partial name, email, or slightly different identifier.
         
         IMPORTANT: If this tool returns zero results, always suggest the user confirm the correct Jira username/account ID. 
         The user may need to provide the exact username, email, or account ID, or check their Jira profile.
