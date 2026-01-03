@@ -6,6 +6,9 @@ from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
+from leanworks.agent.tools.notion import NotionTool
+from leanworks.agent.tools.clickup import ClickUpTool
+from leanworks.agent.tools.linear import LinearTool
 from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
 import logging
@@ -304,6 +307,117 @@ class ToolUse:
             else:
                 self._tool_cache['github_tool'] = None
         return self._tool_cache['github_tool']
+    
+    @property
+    def notion_tool(self):
+        """Lazy-load Notion tool on first access."""
+        if 'notion_tool' not in self._tool_cache:
+            if 'notion' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-notion"
+                    
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    notion_credentials = json.loads(secret_json)
+                    
+                    self._tool_cache['notion_tool'] = NotionTool(
+                        integration_token=notion_credentials.get('integrationToken')
+                    )
+                    if 'notion' not in self.enabled_tools:
+                        self.enabled_tools.append('notion')
+                    logger.info("NotionTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize NotionTool: {str(e)}")
+                    self._tool_cache['notion_tool'] = None
+            elif 'notion' in self.requested_tools:
+                logger.warning("NotionTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['notion_tool'] = None
+            else:
+                self._tool_cache['notion_tool'] = None
+        return self._tool_cache['notion_tool']
+    
+    @property
+    def clickup_tool(self):
+        """Lazy-load ClickUp tool on first access."""
+        if 'clickup_tool' not in self._tool_cache:
+            if 'clickup' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-clickup"
+                    
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    clickup_credentials = json.loads(secret_json)
+                    
+                    self._tool_cache['clickup_tool'] = ClickUpTool(
+                        api_token=clickup_credentials.get('apiToken')
+                    )
+                    if 'clickup' not in self.enabled_tools:
+                        self.enabled_tools.append('clickup')
+                    logger.info("ClickUpTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize ClickUpTool: {str(e)}")
+                    self._tool_cache['clickup_tool'] = None
+            elif 'clickup' in self.requested_tools:
+                logger.warning("ClickUpTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['clickup_tool'] = None
+            else:
+                self._tool_cache['clickup_tool'] = None
+        return self._tool_cache['clickup_tool']
+    
+    @property
+    def linear_tool(self):
+        """Lazy-load Linear tool on first access."""
+        if 'linear_tool' not in self._tool_cache:
+            if 'linear' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+                    
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-linear"
+                    
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    linear_credentials = json.loads(secret_json)
+                    
+                    self._tool_cache['linear_tool'] = LinearTool(
+                        api_key=linear_credentials.get('apiKey')
+                    )
+                    if 'linear' not in self.enabled_tools:
+                        self.enabled_tools.append('linear')
+                    logger.info("LinearTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize LinearTool: {str(e)}")
+                    self._tool_cache['linear_tool'] = None
+            elif 'linear' in self.requested_tools:
+                logger.warning("LinearTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['linear_tool'] = None
+            else:
+                self._tool_cache['linear_tool'] = None
+        return self._tool_cache['linear_tool']
 
     @property
     def tools(self):
@@ -376,6 +490,49 @@ class ToolUse:
                     self.github_tool.search_users_property
                 ])
                 logger.info("GitHub tools added to tools list (lazy)")
+
+            # Add Notion tools if available
+            if self.notion_tool:
+                self._tools_cache.extend([
+                    self.notion_tool.search_pages_property,
+                    self.notion_tool.get_page_property,
+                    self.notion_tool.create_page_property,
+                    self.notion_tool.update_page_property,
+                    self.notion_tool.archive_page_property,
+                    self.notion_tool.query_database_property,
+                    self.notion_tool.get_database_property,
+                    self.notion_tool.create_database_entry_property,
+                    self.notion_tool.update_database_entry_property
+                ])
+                logger.info("Notion tools added to tools list (lazy)")
+
+            # Add ClickUp tools if available
+            if self.clickup_tool:
+                self._tools_cache.extend([
+                    self.clickup_tool.search_tasks_property,
+                    self.clickup_tool.get_task_property,
+                    self.clickup_tool.create_task_property,
+                    self.clickup_tool.update_task_property,
+                    self.clickup_tool.add_comment_property,
+                    self.clickup_tool.list_spaces_property,
+                    self.clickup_tool.list_lists_property
+                ])
+                logger.info("ClickUp tools added to tools list (lazy)")
+
+            # Add Linear tools if available
+            if self.linear_tool:
+                self._tools_cache.extend([
+                    self.linear_tool.list_issues_property,
+                    self.linear_tool.get_issue_property,
+                    self.linear_tool.create_issue_property,
+                    self.linear_tool.update_issue_property,
+                    self.linear_tool.search_issues_property,
+                    self.linear_tool.list_projects_property,
+                    self.linear_tool.get_project_property,
+                    self.linear_tool.list_teams_property,
+                    self.linear_tool.search_users_property
+                ])
+                logger.info("Linear tools added to tools list (lazy)")
 
             # Add DuckDB tools (response-scoped tools only)
             if 'duckdb' in self.requested_tools:
@@ -461,6 +618,49 @@ class ToolUse:
                     "github_search_users": self.github_tool.search_users
                 })
                 logger.info("GitHub functions added to function_map (lazy)")
+
+            # Add Notion functions if available
+            if self.notion_tool:
+                self._function_map_cache.update({
+                    "notion_search_pages": self.notion_tool.search_pages,
+                    "notion_get_page": self.notion_tool.get_page,
+                    "notion_create_page": self.notion_tool.create_page,
+                    "notion_update_page": self.notion_tool.update_page,
+                    "notion_archive_page": self.notion_tool.archive_page,
+                    "notion_query_database": self.notion_tool.query_database,
+                    "notion_get_database": self.notion_tool.get_database,
+                    "notion_create_database_entry": self.notion_tool.create_database_entry,
+                    "notion_update_database_entry": self.notion_tool.update_database_entry
+                })
+                logger.info("Notion functions added to function_map (lazy)")
+
+            # Add ClickUp functions if available
+            if self.clickup_tool:
+                self._function_map_cache.update({
+                    "clickup_search_tasks": self.clickup_tool.search_tasks,
+                    "clickup_get_task": self.clickup_tool.get_task,
+                    "clickup_create_task": self.clickup_tool.create_task,
+                    "clickup_update_task": self.clickup_tool.update_task,
+                    "clickup_add_comment": self.clickup_tool.add_comment,
+                    "clickup_list_spaces": self.clickup_tool.list_spaces,
+                    "clickup_list_lists": self.clickup_tool.list_lists
+                })
+                logger.info("ClickUp functions added to function_map (lazy)")
+
+            # Add Linear functions if available
+            if self.linear_tool:
+                self._function_map_cache.update({
+                    "linear_list_issues": self.linear_tool.list_issues,
+                    "linear_get_issue": self.linear_tool.get_issue,
+                    "linear_create_issue": self.linear_tool.create_issue,
+                    "linear_update_issue": self.linear_tool.update_issue,
+                    "linear_search_issues": self.linear_tool.search_issues,
+                    "linear_list_projects": self.linear_tool.list_projects,
+                    "linear_get_project": self.linear_tool.get_project,
+                    "linear_list_teams": self.linear_tool.list_teams,
+                    "linear_search_users": self.linear_tool.search_users
+                })
+                logger.info("Linear functions added to function_map (lazy)")
 
             # Add DuckDB function mapping (response-scoped functions only)
             if 'duckdb' in self.requested_tools:

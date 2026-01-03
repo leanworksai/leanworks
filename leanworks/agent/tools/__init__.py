@@ -6,6 +6,7 @@ from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
+from leanworks.agent.tools.linear import LinearTool
 from leanworks.agent.tools.duckdb import (
     DuckDBTool,
     save_data,
@@ -24,6 +25,7 @@ __all__ = [
     'CloudStorageTool',
     'AtlassianTool',
     'GitHubTool',
+    'LinearTool',
     'DuckDBTool',
     'save_data',
     'query_response_duckdb',

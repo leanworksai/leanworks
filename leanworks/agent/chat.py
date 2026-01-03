@@ -98,6 +98,7 @@ class ChatAgent:
             self.user_id, 
             self.session_id
         )
+        
         if clear_conversation:
             self.conversation.clear_conversation()
             # Also clear read document IDs when clearing conversation
@@ -106,6 +107,21 @@ class ChatAgent:
             if self.memory_manager:
                 self.memory_manager.clear_memory()
         # When clear_conversation=False, keep existing memory for context continuity
+        
+        # Load conversation from messages collection for non-AI channels
+        # AI assistant chats already load from files collection via ConversationManager.__init__
+        # For project/team/other channels, we need to load from messages collection (web app source of truth)
+        # Do this after clear_conversation check so we don't clear what we just loaded
+        if self.session_id and not clear_conversation:
+            # Skip AI assistant chats - they already loaded from files collection
+            if not self.session_id.startswith('ai-assistant-'):
+                # For all other channel types (project, team, etc.), load from messages collection
+                logger.info(f"Loading conversation history from messages collection for channel: {self.session_id}")
+                self.conversation.load_conversation_from_messages(
+                    chat_id=self.session_id,
+                    limit=10,
+                    exclude_last=False  # Don't exclude last message during initialization
+                )
         
         # Get user info from Firestore
         user_info = self._get_user_info()
@@ -263,6 +279,18 @@ class ChatAgent:
         """
         # Extract the actual user message from embedded conversation history (if present)
         actual_user_message = self._extract_user_message_from_conversation_history(user_message)
+        
+        # For non-AI channels, load conversation history from messages collection
+        # AI assistant chats already have their conversation loaded from files collection
+        # This ensures we have the latest context from the channel before processing the new message
+        if self.session_id and not self.session_id.startswith('ai-assistant-'):
+            logger.info(f"Loading conversation history from messages collection before processing message: {self.session_id}")
+            self.conversation.load_conversation_from_messages(
+                chat_id=self.session_id,
+                limit=10,
+                exclude_last=True,  # Exclude the current message being processed
+                current_message=actual_user_message
+            )
         
         # Reset data sources for new message
         self.data_sources = []

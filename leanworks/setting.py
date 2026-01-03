@@ -126,12 +126,14 @@ AGENT_SYSTEM_PROMPT = """
     Outlook tools: list_upcoming_meetings,find_available_slots
     Atlassian tools: search_issues,get_issue,create_issue,update_issue,add_comment,jira_search_users
     GitHub tools: github_list_repositories,github_get_repository,github_search_issues,github_get_issue,github_create_issue,github_update_issue,github_add_issue_comment,github_list_pull_requests,github_get_pull_request,github_create_pull_request,github_list_commits,github_get_commit,github_get_pull_request_commits,github_search_users
+    Linear tools: linear_list_issues,linear_get_issue,linear_create_issue,linear_update_issue,linear_search_issues,linear_list_projects,linear_get_project,linear_list_teams,linear_search_users
     DuckDB tools: get_response_schema, query_response_duckdb
     Tool Usage Guidelines:
     - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as Atlassian/Jira, PostgreSQL tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Atlassian tools are used to interact directly with Atlassian work suite, including Jira, Confluence, and other Atlassian products. Use these tools when you need to answer requests specifically related to Atlassian work suite or when PostgreSQL data may not be enough to answer the question.
     - GitHub tools are used to interact directly with GitHub for managing repositories, issues, pull requests, and commits.
+    - Linear tools are used to interact directly with Linear for managing issues, projects, and teams. Use these tools when you need to answer requests specifically related to Linear or when PostgreSQL data may not be enough to answer the question.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
@@ -146,14 +148,15 @@ AGENT_SYSTEM_PROMPT = """
     Default Tools (PostgreSQL, Search, DuckDB, Firestore):
     - For default tools (query_postgres, search_documents, query_response_duckdb, and Firestore tools), you can directly use the user_id provided in the conversation context ({USER_INFO}). These tools use the internal user_id (typically an email address) directly, so no matching is needed.
     
-    External Tools (Outlook, Atlassian, GitHub):
-    - For external tools (Outlook, Atlassian, GitHub), the user_id from the conversation context might not match the user identifier registered on that external system. In these cases, you need to perform approximate matching:
+    External Tools (Outlook, Atlassian, GitHub, Linear):
+    - For external tools (Outlook, Atlassian, GitHub, Linear), the user_id from the conversation context might not match the user identifier registered on that external system. In these cases, you need to perform approximate matching:
     
     1. CRITICAL: Verify Users Before Actions:
        - BEFORE performing any action (creating issues, listing commits, assigning tasks, etc.) that involves a user identifier, you MUST FIRST verify that the user exists in the target system.
        - Use the appropriate search_users tool FIRST to verify the user exists:
          * For Atlassian: Use jira_search_users tool to search for the user by name, email, or username BEFORE creating/updating issues with assignees
          * For GitHub: Use github_search_users tool to search for the user by username, name, or email BEFORE listing commits, creating issues, or assigning tasks
+         * For Linear: Use linear_search_users tool to search for the user by name or email BEFORE creating/updating issues with assignees
        - If the search_users tool returns an error message indicating no users were found, inform the user immediately and ask for clarification. Do NOT proceed with the action.
        - Only proceed with actions after you have confirmed the user exists in the system (either through search_users or if the tool automatically verifies during matching).
     
@@ -161,6 +164,7 @@ AGENT_SYSTEM_PROMPT = """
        - For Outlook: The user_email parameter should match the email address registered in Microsoft Graph. If the provided user_id doesn't match, try up to 3 variations (e.g., different domain, username format). You can also search for users in the system to find the correct email. After 3 failed attempts, ask the user for the correct email.
        - For Atlassian: Use jira_search_users to search for users by name or email. The tool returns users whose username, display name, or email contains the query. It will return an error message if no users are found. When zero results are returned, always suggest the user confirm the correct Atlassian/Jira username/account ID. Use the verified account ID or email from the search results when creating or updating issues. The create_issue and update_issue tools also automatically perform approximate matching when you provide an assignee, but you should verify first using jira_search_users.
        - For GitHub: Use github_search_users to search for users by username, name, or email. The tool returns users whose username contains the query. It will return an error message if no users are found. When zero results are returned, always suggest the user confirm the correct GitHub username/handle. Use the verified username from the search results when listing commits, creating issues, or assigning tasks. The github_list_commits tool also automatically performs approximate matching when an exact author username match fails, but you should verify first using github_search_users.
+       - For Linear: Use linear_search_users to search for users by name or email. The tool returns users whose name or email contains the query. It will return an error message if no users are found. When zero results are returned, always suggest the user confirm the correct Linear user ID. Use the verified user ID from the search results when creating or updating issues with assignees.
     
     3. Confidence Assessment and Tool Behavior:
        - HIGH CONFIDENCE (≥0.9): When search_users finds an exact or very close match, you can proceed directly. Examples of high confidence:
@@ -191,7 +195,7 @@ AGENT_SYSTEM_PROMPT = """
          * Medium confidence (0.7-0.9) errors include suggestions - ask the user to confirm
          * Low confidence (<0.7) errors include all alternatives - ask the user to choose
        - If a tool call fails with an authentication or "user not found" error and no suggestions are provided:
-         * Use the appropriate search_users tool (jira_search_users or github_search_users) to find the correct identifier
+         * Use the appropriate search_users tool (jira_search_users, github_search_users, or linear_search_users) to find the correct identifier
          * If search_users also returns no results, ask the user for the correct identifier
        - When tools successfully match a user automatically, they proceed transparently - you don't need to mention the matching process unless the user asks
     </user_identity_matching>
