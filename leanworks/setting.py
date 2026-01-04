@@ -128,6 +128,8 @@ AGENT_SYSTEM_PROMPT = """
     GitHub tools: github_list_repositories,github_get_repository,github_search_issues,github_get_issue,github_create_issue,github_update_issue,github_add_issue_comment,github_list_pull_requests,github_get_pull_request,github_create_pull_request,github_list_commits,github_get_commit,github_get_pull_request_commits,github_search_users
     Linear tools: linear_list_issues,linear_get_issue,linear_create_issue,linear_update_issue,linear_search_issues,linear_list_projects,linear_get_project,linear_list_teams,linear_search_users
     DuckDB tools: get_response_schema, query_response_duckdb
+    Client execution tools: bash, str_replace_editor (text editor)
+    Server tools: web_search
     Tool Usage Guidelines:
     - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as Atlassian/Jira, PostgreSQL tools should be your primary tools to answer questions.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
@@ -136,8 +138,18 @@ AGENT_SYSTEM_PROMPT = """
     - Linear tools are used to interact directly with Linear for managing issues, projects, and teams. Use these tools when you need to answer requests specifically related to Linear or when PostgreSQL data may not be enough to answer the question.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
+    - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. Commands are executed securely in a containerized environment with network isolation, memory limits (256MB), and CPU limits.
+    - execute_code tool runs code (currently Python) in a sandboxed environment. Use this for computations, data processing, or running code snippets. Code execution has resource limits and timeouts for security.
+    - str_replace_editor (text editor) tool allows reading, writing, and editing text files in a safe directory. Use this to manipulate files, read configuration, or create/edit documents. File operations are restricted to safe directories.
+    - web_search tool searches the web for current information, news, or data from the internet. Use this when you need up-to-date information not available in the knowledge base. When the user asks about a website URL (like https://leanworks.ai) or requests information from the internet, you MUST immediately call the web_search tool with a search query. Do NOT just say you will search - you MUST actually call the tool.
+    - CRITICAL: When you say you will search or look up information, you MUST actually call the appropriate tool (web_search, search_documents, etc.) in the SAME response. Do not just state your intention - execute the tool call immediately. If you mention searching, you must include a tool_use block in your response.
+    - For questions about websites, URLs, or internet content, ALWAYS use web_search tool first before responding. Extract a search query from the user's question and call web_search immediately.
     - ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
-    - Sometimes the tool will return a high level statistics of the result that might not give you a direct answer. In this case, you should try to infer the answer from the statistics first using simple math (sum, count, average, etc.). If you can't infer the answer from the statistics, then it's time to use DuckDB tool,
+    - Sometimes the tool will return a high level statistics of the result that might not give you a direct answer. In this case, you should try to infer the answer from the statistics first using simple math (sum, count, average, etc.). If you can't infer the answer from the statistics, then it's time to use DuckDB tool.
+    - Large Tool Response Handling: When tool responses are very large, they are automatically stored to keep conversations efficient:
+      * Structured data (lists, tables, dicts) → Stored in DuckDB response databases. You'll receive a summary with a response_id. Use get_response_schema and query_response_duckdb tools to explore and query the full data.
+      * Unstructured data (long text, documents) → Stored in RAG vector database. You'll receive a summary with a document_id. Use search_documents tool to retrieve relevant parts using semantic search.
+      * The summaries include storage IDs and instructions for retrieval. Always use the appropriate tool (DuckDB for structured, search_documents for unstructured) when you need to access the full stored data.
     - The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.
     - NEVER refer to tool names when speaking to the USER. For example, instead of saying 'I need to use the list_projects tool to list all projects', just say 'I will list all projects'.    
     DON'T put search quality reflection or score in your response after you call the search_documents tool for any purpose.
@@ -203,6 +215,22 @@ AGENT_SYSTEM_PROMPT = """
     
     {ADDITIONAL_CONTEXT}
 """
+
+# Configuration for large tool response handling
+LARGE_RESPONSE_CONFIG = {
+    "max_direct_tokens": 2000,
+    "max_direct_items": 50,
+    "max_direct_chars": 8000,
+    "min_unstructured_chars": 1000,
+    "auto_store_enabled": True,
+    "use_rag_for_unstructured": True,
+    "use_duckdb_for_structured": True,
+    "rag_namespace_suffix": "_tool_responses",
+    "rag_chunk_size": 512,
+    "rag_chunk_overlap": 128,
+    "summary_preview_length": 500,
+    "summary_sample_size": 3
+}
 
 # Query for using search_documents as a fallback
 SEARCH_KNOWLEDGE_QUERY = """

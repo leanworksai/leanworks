@@ -2,7 +2,7 @@ import json
 import re
 import copy
 import logging
-from typing import List
+from typing import List, Dict, Any, Optional
 from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
@@ -330,11 +330,17 @@ class ConversationManager:
         
         return tool_results
 
-    def parse_and_format_tool_results_with_sources(self, response, function_map, data_sources):
+    def parse_and_format_tool_results_with_sources(self, response, function_map, data_sources, rag_storage=None):
         """
         Parse tool use blocks from Claude's response and execute the corresponding functions.
         Returns properly formatted tool_result content blocks following Anthropic's API format.
         Also tracks data sources used by each tool.
+        
+        Args:
+            response: Claude API response object
+            function_map: Dictionary mapping tool names to functions
+            data_sources: List to append data source information
+            rag_storage: Optional RAGStorageTool for storing unstructured large responses
         """
         tool_results = []
         
@@ -353,6 +359,23 @@ class ConversationManager:
                     tool_name = block.tool_use.name  # For Claude API 3.5
                     tool_input = block.tool_use.input
                 
+                # Check if this is a server tool (executed by Anthropic's servers)
+                # Server tools don't need client-side execution - Anthropic handles them automatically
+                from leanworks.agent.tool_registry import ToolRegistry
+                is_server_tool = ToolRegistry.is_server_tool(tool_name)
+                
+                if is_server_tool:
+                    # Server tools are executed by Anthropic's servers automatically
+                    # Results are already included in the response - we don't need to process them
+                    # Just track the data source and skip adding tool_result
+                    logger.info(f"Server tool {tool_name} called - results already in response from Anthropic")
+                    # Track data source for web_search
+                    if tool_name == "web_search":
+                        data_sources.append("Web search results")
+                    # Don't add tool_result - results are already in the response
+                    # The calling code in chat.py will handle continuing the conversation
+                    continue
+                
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
@@ -362,6 +385,64 @@ class ConversationManager:
                         # Log tool call result preview
                         result_preview = self._get_result_preview(result)
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        
+                        # Check if response is large and needs special handling
+                        from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
+                        from leanworks.setting import LARGE_RESPONSE_CONFIG
+                        
+                        # Configure handler with settings
+                        LargeResponseHandler.configure(LARGE_RESPONSE_CONFIG)
+                        
+                        # Classify response
+                        response_type, is_large = LargeResponseHandler.classify_response(result)
+                        
+                        if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
+                            logger.info(f"Large response detected for {tool_name}: type={response_type.value}, size={LargeResponseHandler.estimate_tokens(result)} tokens")
+                            
+                            # Handle based on response type
+                            if response_type == ResponseType.STRUCTURED:
+                                # Store in DuckDB
+                                formatted_result = self._handle_large_structured_response(
+                                    result, tool_name, tool_input, tool_use_id, data_sources
+                                )
+                                tool_results.append(formatted_result)
+                                continue
+                            
+                            elif response_type == ResponseType.UNSTRUCTURED:
+                                # Store in RAG
+                                formatted_result = self._handle_large_unstructured_response(
+                                    result, tool_name, tool_input, tool_use_id, data_sources, rag_storage
+                                )
+                                tool_results.append(formatted_result)
+                                continue
+                            
+                            elif response_type == ResponseType.MIXED:
+                                # Split and handle both
+                                structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
+                                
+                                # Handle structured part
+                                if structured_part:
+                                    formatted_result = self._handle_large_structured_response(
+                                        structured_part, tool_name, tool_input, tool_use_id, data_sources
+                                    )
+                                    tool_results.append(formatted_result)
+                                
+                                # Handle unstructured part
+                                if unstructured_part and rag_storage:
+                                    formatted_result = self._handle_large_unstructured_response(
+                                        unstructured_part, tool_name, tool_input, tool_use_id, data_sources, rag_storage
+                                    )
+                                    tool_results.append(formatted_result)
+                                elif unstructured_part:
+                                    # Fallback to truncation if RAG not available
+                                    logger.warning(f"RAG storage not available, truncating unstructured part")
+                                    formatted_result = {
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_use_id,
+                                        "content": f"[Large unstructured response truncated. First 2000 chars: {unstructured_part[:2000]}...]"
+                                    }
+                                    tool_results.append(formatted_result)
+                                continue
                         
                         # Track data sources based on tool type
                         if tool_name == "query_postgres":
@@ -485,6 +566,308 @@ class ConversationManager:
                     })
         
         return tool_results
+    
+    def _handle_large_structured_response(
+        self,
+        result: Any,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str]
+    ) -> Dict[str, Any]:
+        """Store large structured response in DuckDB and return summary"""
+        from leanworks.agent.tools.duckdb import save_data
+        import uuid
+        
+        try:
+            # Generate response_id
+            response_id = str(uuid.uuid4())
+            
+            # Determine table name
+            table_name = self._get_table_name_for_tool(tool_name, tool_input)
+            
+            # Save to DuckDB
+            save_data(
+                data=result,
+                table_name=table_name,
+                response_id=response_id,
+                if_exists="replace"
+            )
+            
+            # Generate summary
+            summary = self._generate_response_summary(result, tool_name)
+            
+            # Format summary with storage info
+            formatted_result = self._format_large_structured_summary(
+                summary=summary,
+                response_id=response_id,
+                table_name=table_name,
+                tool_name=tool_name
+            )
+            
+            # Track data source
+            data_sources.append(f"DuckDB response database: {response_id}")
+            
+            logger.info(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
+            
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": formatted_result
+            }
+        except Exception as e:
+            logger.error(f"Failed to store large structured response in DuckDB: {e}")
+            # Fallback to truncation
+            return self._truncate_response(result, tool_use_id)
+    
+    def _handle_large_unstructured_response(
+        self,
+        content: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str],
+        rag_storage
+    ) -> Dict[str, Any]:
+        """Store large unstructured response in RAG and return summary"""
+        
+        if not rag_storage:
+            # Fallback to truncation if RAG not available
+            logger.warning(f"RAG storage not available for {tool_name}, truncating response")
+            return self._truncate_response(content, tool_use_id)
+        
+        try:
+            # Store in RAG
+            document_id = rag_storage.store_tool_response(
+                content=content,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                metadata={
+                    "session_id": self.session_id,
+                    "user_id": self.user_id
+                }
+            )
+            
+            # Generate summary
+            summary = self._generate_text_summary(content)
+            
+            # Format summary
+            formatted_result = self._format_large_unstructured_summary(
+                summary=summary,
+                document_id=document_id,
+                tool_name=tool_name,
+                content=content
+            )
+            
+            # Track data source
+            data_sources.append(f"RAG vector database: {document_id}")
+            
+            logger.info(f"Stored large unstructured response in RAG: {document_id}")
+            
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": formatted_result
+            }
+        except Exception as e:
+            logger.error(f"Failed to store large unstructured response in RAG: {e}")
+            # Fallback to truncation
+            return self._truncate_response(content, tool_use_id)
+    
+    def _get_table_name_for_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Generate appropriate table name based on tool and query"""
+        import re
+        
+        # PostgreSQL queries
+        if tool_name == "query_postgres":
+            sql = tool_input.get("sql", "").upper() if isinstance(tool_input, dict) else ""
+            if sql and "FROM" in sql:
+                # Try to extract table name from SQL
+                match = re.search(r'FROM\s+["\']?(\w+)["\']?', sql, re.IGNORECASE)
+                if match:
+                    return match.group(1).lower()
+            return "query_results"
+        
+        # Search results
+        if tool_name == "search_documents":
+            return "search_results"
+        
+        # GitHub/Jira issues
+        if tool_name in ["github_search_issues", "search_issues"]:
+            return "issues"
+        
+        # Default: use tool name
+        return tool_name.replace("_", "_") + "_results"
+    
+    def _generate_response_summary(self, result: Any, tool_name: str) -> Dict[str, Any]:
+        """Generate summary statistics for large responses"""
+        summary = {}
+        
+        if isinstance(result, list):
+            summary = {
+                "type": "list",
+                "count": len(result),
+                "total_items": len(result)
+            }
+            
+            # If list of dicts, add column info
+            if result and isinstance(result[0], dict):
+                summary["columns"] = list(result[0].keys())
+                summary["sample_keys"] = list(result[0].keys())[:10]
+                # Sample items
+                from leanworks.setting import LARGE_RESPONSE_CONFIG
+                sample_size = LARGE_RESPONSE_CONFIG.get("summary_sample_size", 3)
+                summary["sample_items"] = result[:sample_size] if len(result) > sample_size else result
+        
+        elif isinstance(result, dict):
+            summary = {
+                "type": "dict",
+                "keys": list(result.keys()),
+                "key_count": len(result.keys())
+            }
+            
+            # If dict contains lists, summarize those too
+            for key, value in result.items():
+                if isinstance(value, list):
+                    summary[f"{key}_count"] = len(value)
+        
+        elif isinstance(result, str):
+            summary = {
+                "type": "string",
+                "length": len(result)
+            }
+        
+        return summary
+    
+    def _generate_text_summary(self, text: str) -> str:
+        """Generate summary of long text"""
+        lines = text.split('\n')
+        first_paragraph = lines[0][:200] if lines else text[:200]
+        
+        word_count = len(text.split())
+        char_count = len(text)
+        paragraph_count = len([l for l in lines if l.strip()])
+        
+        return f"""- Length: {char_count:,} characters, {word_count:,} words
+- Paragraphs: {paragraph_count}
+- Preview: {first_paragraph}..."""
+    
+    def _format_large_structured_summary(
+        self,
+        summary: Dict[str, Any],
+        response_id: str,
+        table_name: str,
+        tool_name: str
+    ) -> str:
+        """Format summary with DuckDB storage information"""
+        
+        if summary.get("type") == "list":
+            count = summary.get("count", 0)
+            columns = summary.get("columns", [])
+            sample_items = summary.get("sample_items", [])
+            
+            columns_str = ', '.join(columns[:10]) if columns else "N/A"
+            if len(columns) > 10:
+                columns_str += "..."
+            
+            sample_str = ""
+            if sample_items:
+                import json
+                sample_str = "\n\nSample items:\n" + "\n".join(
+                    json.dumps(item, default=str) for item in sample_items[:3]
+                )
+            
+            return f"""Large response stored in DuckDB database.
+
+Summary:
+- Total items: {count}
+- Columns: {columns_str}{sample_str}
+
+The full data has been saved to DuckDB response database '{response_id}' in table '{table_name}'.
+
+To query this data:
+1. Use get_response_schema tool with response_id='{response_id}' to see the schema
+2. Use query_response_duckdb tool with response_id='{response_id}' and your SQL query
+
+Example query:
+query_response_duckdb(response_id='{response_id}', sql='SELECT * FROM {table_name} LIMIT 10')
+"""
+        
+        elif summary.get("type") == "dict":
+            keys = summary.get("keys", [])
+            keys_str = ', '.join(keys[:10])
+            if len(keys) > 10:
+                keys_str += f"... ({len(keys)} total keys)"
+            
+            return f"""Large response stored in DuckDB database.
+
+Summary:
+- Type: Dictionary
+- Keys: {keys_str}
+
+The full data has been saved to DuckDB response database '{response_id}' in table '{table_name}'.
+
+To query this data:
+1. Use get_response_schema tool with response_id='{response_id}' to see the schema
+2. Use query_response_duckdb tool with response_id='{response_id}' and your SQL query
+"""
+        
+        else:
+            return f"""Large response stored in DuckDB database.
+
+Summary:
+- Type: {summary.get('type', 'unknown')}
+- Length: {summary.get('length', 'N/A')}
+
+The full data has been saved to DuckDB response database '{response_id}' in table '{table_name}'.
+
+To query this data:
+1. Use get_response_schema tool with response_id='{response_id}' to see the schema
+2. Use query_response_duckdb tool with response_id='{response_id}' and your SQL query
+"""
+    
+    def _format_large_unstructured_summary(
+        self,
+        summary: str,
+        document_id: str,
+        tool_name: str,
+        content: str
+    ) -> str:
+        """Format summary with RAG storage information"""
+        from leanworks.setting import LARGE_RESPONSE_CONFIG
+        preview_length = LARGE_RESPONSE_CONFIG.get("summary_preview_length", 500)
+        
+        return f"""Large text response stored in RAG vector database.
+
+Summary:
+{summary}
+
+The full content has been stored and can be retrieved using semantic search.
+Document ID: {document_id}
+
+To retrieve relevant information from this stored response:
+- Use search_documents tool with a query related to what you need
+- The stored content will be automatically included in search results
+- You can also ask follow-up questions and the system will retrieve relevant parts
+
+Preview (first {preview_length} chars):
+{content[:preview_length]}...
+"""
+    
+    def _truncate_response(self, result: Any, tool_use_id: str) -> Dict[str, Any]:
+        """Fallback: truncate response if storage fails"""
+        if isinstance(result, str):
+            truncated = result[:2000] + "..." if len(result) > 2000 else result
+        else:
+            import json
+            json_str = json.dumps(result, default=str)
+            truncated = json_str[:2000] + "..." if len(json_str) > 2000 else json_str
+        
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": f"[Response truncated due to size. First 2000 chars: {truncated}]"
+        }
 
     def _get_result_preview(self, result):
         """
@@ -643,10 +1026,11 @@ class ConversationManager:
             return {"content": text, "answered": "false"}
 
     def add_assistant_message_with_tool_uses(self, response):
-        """Add an assistant message including both text content and tool use blocks
+        """Add an assistant message including text content, tool use blocks, and tool result blocks
         
         This method is specifically for adding a Claude response that contains tool use blocks,
-        converting them to a JSON-serializable format.
+        converting them to a JSON-serializable format. For server tools, Anthropic may include
+        tool_result blocks in the response automatically.
         """
         # Create a serializable representation of the content
         serializable_content = []
@@ -672,6 +1056,27 @@ class ConversationManager:
                     "name": tool_name,
                     "input": tool_input
                 })
+            elif block.type == "tool_result":
+                # For server tools, Anthropic may include tool_result blocks in the response
+                # We should include these in the conversation so Claude can see the results
+                try:
+                    tool_use_id = block.id  # For newer versions of Claude API
+                    content = block.content  # Can be string or list
+                    is_error = getattr(block, 'is_error', False)
+                except AttributeError:
+                    tool_use_id = block.tool_result.id  # For Claude API 3.5
+                    content = block.tool_result.content
+                    is_error = getattr(block.tool_result, 'is_error', False)
+                
+                # Create a serializable representation of the tool_result block
+                tool_result_dict = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content
+                }
+                if is_error:
+                    tool_result_dict["is_error"] = True
+                serializable_content.append(tool_result_dict)
         
         # Add the assistant message with the serializable content
         self.conversation.append({

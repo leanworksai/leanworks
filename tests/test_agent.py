@@ -234,7 +234,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-       use search tool to find the latest news about leanworks.
+       show me the latest progress for web development
 '''
         
         print("💬 Processing user message:")
@@ -243,18 +243,18 @@ async def main_async():
         print(f"   Streaming mode: True (shows tools and streams response)")
         print()
         
-        # Print memories before processing
-        print("🔍 MEMORIES BEFORE PROCESSING:")
-        print_all_memories(agent)
+        # Print memories before processing (disabled)
+        # print("🔍 MEMORIES BEFORE PROCESSING:")
+        # print_all_memories(agent)
         
         # Time the response processing
         response_start = time.time()
         
         response = agent.process_message(user_message, thinking=False, streaming=True)
         
-        # Print memories after processing
-        print("🔍 MEMORIES AFTER PROCESSING:")
-        print_all_memories(agent)
+        # Print memories after processing (disabled)
+        # print("🔍 MEMORIES AFTER PROCESSING:")
+        # print_all_memories(agent)
         
         response_time = time.time() - response_start
         total_time = time.time() - setup_start

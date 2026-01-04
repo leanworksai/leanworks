@@ -4,6 +4,8 @@ from leanworks.agent.helpers import AgentHelpers
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
+from leanworks.agent.tool_registry import ToolRegistry
+from leanworks.agent.tool_response_handler import ToolResponseHandlerFactory
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 from google.cloud import firestore, secretmanager
 from typing import Dict, Any, List
@@ -156,15 +158,42 @@ class ChatAgent:
             # Pass user_info as dict so it can be updated later
             self.memory_manager.set_user_profile(user_info)
         
+        # Initialize tool response handler factory
+        self.tool_response_handler_factory = ToolResponseHandlerFactory()
+        
+        # Add server tools (execute on Anthropic's servers)
+        # These are schema-less Anthropic-defined tools
+        # Note: Only web_search_20250305 is currently supported as a server tool
+        # web_fetch, tool_search, and code_execution may not be available yet
+        server_tools = [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search"
+            }
+        ]
+        
+        # Combine client tools with server tools
+        all_tools = list(self.tool_use.tools) + server_tools
+        
+        # Log tools for debugging
+        logger.info(f"Total tools registered: {len(all_tools)}")
+        tool_names = [tool.get("name", "unknown") for tool in all_tools]
+        logger.info(f"Tool names: {tool_names}")
+        
         self.api_params = {
             "model": GENERATION_MODEL,
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
-            "tools": self.tool_use.tools,
+            "tools": all_tools,
             "max_tokens": 1024,
             "temperature": 0.1,
             "timeout": 60
         }
+        
+        # Note: The code_execution tool requires the beta header "code-execution-2025-08-25"
+        # This should be added to API requests when using the code_execution tool.
+        # The Anthropic SDK may handle this automatically, or it may need to be added
+        # to the HTTP headers when making requests.
 
     def _get_user_info(self):
         """
@@ -374,56 +403,62 @@ class ChatAgent:
                 )
                 
                 # Make API call with current parameters
-                response = self.model_client.messages.create(**current_params)
-                text_content = next((block.text for block in response.content if block.type == "text"), "")
-                has_tool_calls = any(block.type == "tool_use" for block in response.content)   
+                # Ensure tools are always included
+                if "tools" not in current_params or not current_params.get("tools"):
+                    current_params["tools"] = self.api_params.get("tools", [])
+                    logger.warning("Tools were missing from current_params, restored from api_params")
                 
-                if has_tool_calls:
-                    # Add the assistant message with tool_use blocks to the conversation
-                    self.conversation.add_assistant_message_with_tool_uses(response)
-                    
-                    # Show tool usage if streaming is enabled
-                    if streaming:
-                        for block in response.content:
-                            if block.type == "tool_use":
-                                tool_name = block.name
-                                tool_input = block.input
-                                print(f"🔧 Using tool: {tool_name}")
-                                if tool_input:
-                                    # Show key parameters for other tools
-                                    key_params = []
-                                    for key, value in tool_input.items():
-                                        if isinstance(value, str) and len(value) > 100:
-                                            key_params.append(f"{key}: {value[:50]}...")
-                                        else:
-                                            key_params.append(f"{key}: {value}")
-                                    print(f"   Parameters: {', '.join(key_params)}")
-                                print()
-                    
-                    # Process tool calls and add results to conversation with data source tracking
-                    tool_results = self.conversation.parse_and_format_tool_results_with_sources(
-                        response, 
-                        self.tool_use.function_map,
-                        self.data_sources
-                    )
-                    self.conversation.add_tool_results(tool_results)
-                    
-                    # Show tool results summary if streaming is enabled
-                    if streaming:
-                        for tool_result in tool_results:
-                            if tool_result.get("role") == "user" and isinstance(tool_result.get("content"), list):
-                                for content_block in tool_result["content"]:
-                                    if content_block.get("type") == "tool_result":
-                                        result_content = content_block.get("content", "")
-                                        if result_content and not result_content.startswith("Error"):
-                                            result_preview = result_content[:200] + "..." if len(result_content) > 200 else result_content
-                                            print(f"✅ Tool result: {result_preview}")
-                                        elif result_content.startswith("Error"):
-                                            print(f"❌ Tool error: {result_content}")
-                                        print()
-                else:
-                    # Assign the actual response text
-                    response_text = text_content
+                # Log tools being sent for debugging
+                tools_in_request = current_params.get("tools", [])
+                logger.info(f"Making API call with {len(tools_in_request)} tools")
+                if tools_in_request:
+                    tool_names = [tool.get("name", tool.get("type", "unknown")) for tool in tools_in_request[:5]]
+                    logger.info(f"Sample tools in request: {tool_names}")
+                
+                response = self.model_client.messages.create(**current_params)
+                
+                # Check stop_reason to understand why Claude stopped
+                stop_reason = getattr(response, 'stop_reason', None)
+                logger.info(f"Response stop_reason: {stop_reason}")
+                
+                # Handle different stop reasons
+                if stop_reason == "refusal":
+                    logger.warning("Claude refused to respond")
+                    response_text = "I'm unable to process this request. Please try rephrasing your question."
+                    self.conversation.add_assistant_message(response_text)
+                    break
+                elif stop_reason == "max_tokens":
+                    logger.warning("Response truncated due to max_tokens limit")
+                    # Extract what we have and continue if needed
+                    text_content = next((block.text for block in response.content if block.type == "text"), "")
+                    if text_content:
+                        response_text = text_content + "\n\n[Response truncated due to token limit]"
+                        self.conversation.add_assistant_message(response_text)
+                        break
+                elif stop_reason == "model_context_window_exceeded":
+                    logger.warning("Response reached model's context window limit")
+                    text_content = next((block.text for block in response.content if block.type == "text"), "")
+                    if text_content:
+                        response_text = text_content + "\n\n[Response truncated due to context window limit]"
+                        self.conversation.add_assistant_message(response_text)
+                        break
+                
+                # Use unified handler to process response
+                handler = self.tool_response_handler_factory.get_handler(response)
+                
+                context = {
+                    'conversation': self.conversation,
+                    'tool_use': self.tool_use,
+                    'data_sources': self.data_sources,
+                    'streaming': streaming,
+                    'memory_manager': self.memory_manager
+                }
+                
+                final_text = handler.handle(response, context)
+                
+                if final_text:
+                    # We have a final response (from server tools or text-only)
+                    response_text = final_text
                     
                     # If not thinking, skip evaluation and return response directly
                     if not thinking:
@@ -556,10 +591,16 @@ class ChatAgent:
                             self.conversation.conversation = self.conversation.conversation[:-2]
                             # Add the retry response with tool calls and continue the loop
                             self.conversation.add_assistant_message_with_tool_uses(retry_response)
+                            # Get RAG storage tool if available
+                            rag_storage = None
+                            if hasattr(self.tool_use, '_get_rag_storage_tool'):
+                                rag_storage = self.tool_use._get_rag_storage_tool()
+                            
                             tool_results = self.conversation.parse_and_format_tool_results_with_sources(
                                 retry_response, 
                                 self.tool_use.function_map,
-                                self.data_sources
+                                self.data_sources,
+                                rag_storage=rag_storage
                             )
                             self.conversation.add_tool_results(tool_results)
                             continue
@@ -601,10 +642,17 @@ class ChatAgent:
                     
                     # Process the forced tool call
                     self.conversation.add_assistant_message_with_tool_uses(response)
+                    
+                    # Get RAG storage tool if available
+                    rag_storage = None
+                    if hasattr(self.tool_use, '_get_rag_storage_tool'):
+                        rag_storage = self.tool_use._get_rag_storage_tool()
+                    
                     tool_results = self.conversation.parse_and_format_tool_results_with_sources(
                         response, 
                         self.tool_use.function_map,
-                        self.data_sources
+                        self.data_sources,
+                        rag_storage=rag_storage
                     )
                     self.conversation.add_tool_results(tool_results)
 
@@ -626,7 +674,11 @@ class ChatAgent:
         # Always add last response to slim_conversation
         self.conversation.add_assistant_message(response_text, include_in_slim=True)
         self.conversation.save_conversation()
-        logger.info(f"Final answer: {response_text}")
+        # Only log full response if not streaming (to avoid duplicate output)
+        if not streaming:
+            logger.info(f"Final answer: {response_text}")
+        else:
+            logger.info(f"Final answer: {len(response_text)} characters")
         logger.info(f"Data sources used: {unique_sources}")
         logger.info(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
         
@@ -657,9 +709,28 @@ class ChatAgent:
     def cleanup(self):
         """Clean up resources and shutdown background threads."""
         try:
+            # Cleanup DuckDB temporary files
+            try:
+                cleanup_responses()
+                logger.info("Cleaned up DuckDB response files")
+            except Exception as e:
+                logger.warning(f"Error cleaning up DuckDB files: {e}")
+            
+            # Cleanup RAG namespace data for this session
+            if hasattr(self, 'tool_use') and self.tool_use and self.session_id:
+                try:
+                    rag_storage = self.tool_use._get_rag_storage_tool()
+                    if rag_storage:
+                        rag_storage.cleanup_session_data(self.session_id)
+                        logger.info(f"Cleaned up RAG namespace data for session {self.session_id}")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up RAG namespace data: {e}")
+            
+            # Shutdown memory manager
             if hasattr(self, 'memory_manager') and self.memory_manager:
                 self.memory_manager.shutdown()
-                logger.info("ChatAgent cleanup completed")
+            
+            logger.info("ChatAgent cleanup completed")
         except Exception as e:
             logger.error(f"Error during ChatAgent cleanup: {e}")
     

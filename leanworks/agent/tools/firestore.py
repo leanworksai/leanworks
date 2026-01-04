@@ -6,6 +6,11 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# AI Agent identifier - all messages are sent as 'lean'
+AI_AGENT_ID = 'lean@leanworks.ai'
+AI_AGENT_NAME = 'Lean'
+AI_AGENT_AVATAR = 'L'
+
 
 class FirestoreTool:
     """
@@ -239,6 +244,155 @@ class FirestoreTool:
             
         except Exception as e:
             logger.error(f"Error querying Firestore messages: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+    
+    @property
+    def send_message_property(self):
+        description = f"""
+        Send a message to a chat channel in Firestore for org `{self.org_slug}`.
+        
+        This tool sends messages that are attributed to the AI agent 'lean'. All messages sent through this tool will have userId='lean@leanworks.ai', memberName='Lean', and memberAvatar='L'.
+        
+        Message Structure:
+        - chatId: The chat/conversation ID (required)
+          - Format: 'project-{{projectId}}' for project channels
+          - Format: 'ai-assistant-{{userId}}' for AI assistant conversations
+          - Format: 'dm-{{email1}}-{{email2}}' for direct messages
+        - content: Message text content (required)
+        - projectId: Project ID if sending to project channel (optional, extracted from chatId if chatId starts with 'project-')
+        - role: Message role ('user' or 'assistant', default: 'user')
+        - citedContext: Optional cited context information
+        - imageUrls: Optional array of image URLs
+        
+        Authorization:
+        - For project channels: User must be a project member or owner (verified by caller)
+        - For AI assistant: Already handled by existing security
+        - For DMs: Both users must be in same org (verified by caller)
+        
+        Returns:
+        - Success: Dictionary with message id and created message
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "send_message",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "chatId": {
+                        "type": "string",
+                        "description": "Chat ID (required) - format: 'project-{projectId}', 'ai-assistant-{userId}', or 'dm-{email1}-{email2}'"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Message text content (required)"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Project ID if sending to project channel (optional, extracted from chatId if chatId starts with 'project-')"
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["user", "assistant"],
+                        "description": "Message role (default: 'user')"
+                    },
+                    "citedContext": {
+                        "type": "object",
+                        "description": "Optional cited context information"
+                    },
+                    "imageUrls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional array of image URLs"
+                    }
+                },
+                "required": ["chatId", "content"]
+            }
+        }
+    
+    def send_message(
+        self,
+        chatId: str,
+        content: str,
+        projectId: Optional[str] = None,
+        role: str = "user",
+        citedContext: Optional[Dict[str, Any]] = None,
+        imageUrls: Optional[List[str]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Send a message to a chat channel.
+        
+        Args:
+            chatId: Chat ID (required)
+            content: Message text content (required)
+            projectId: Project ID if sending to project channel (optional, extracted from chatId if chatId starts with 'project-')
+            role: Message role (default: 'user')
+            citedContext: Optional cited context information
+            imageUrls: Optional array of image URLs
+            
+        Returns:
+            Dictionary with message id and created message, or error dictionary
+        """
+        try:
+            if not self.firestore_client or not self.org_slug:
+                return {"error": "Firestore client or org_slug not initialized"}
+            
+            if not chatId or not content:
+                return {"error": "chatId and content are required"}
+            
+            # Extract projectId from chatId if not provided
+            actual_project_id = projectId
+            
+            if chatId.startswith('project-'):
+                actual_project_id = chatId.replace('project-', '')
+            
+            # Note: Authorization checks for project membership should be done by the caller
+            # For now, we'll just send the message with AI agent identity
+            
+            # Build message data
+            message_data = {
+                'chatId': chatId,
+                'role': role,
+                'content': content,
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'userId': AI_AGENT_ID,  # Always use AI agent ID
+                'projectId': actual_project_id,
+                'memberName': AI_AGENT_NAME,  # Always use 'Lean'
+                'memberAvatar': AI_AGENT_AVATAR,  # Always use 'L'
+                'likes': [],  # Initialize likes as empty array
+            }
+            
+            # Add citedContext if provided
+            if citedContext:
+                message_data['citedContext'] = citedContext
+            
+            # Add imageUrls if provided
+            if imageUrls and isinstance(imageUrls, list) and len(imageUrls) > 0:
+                message_data['imageUrls'] = imageUrls
+            
+            # Write to Firestore
+            messages_path = f"orgs/{self.org_slug}/messages"
+            write_result, doc_ref = self.firestore_client.collection(messages_path).add(message_data)
+            
+            # Get the created document to return
+            message_doc = doc_ref.get()
+            message_dict = message_doc.to_dict()
+            message_dict['id'] = doc_ref.id
+            message_dict['timestamp'] = message_dict.get('timestamp').to_date().isoformat() if message_dict.get('timestamp') and hasattr(message_dict.get('timestamp'), 'to_date') else message_dict.get('timestamp')
+            message_dict['imageUrls'] = message_dict.get('imageUrls') or []
+            message_dict['likes'] = message_dict.get('likes') or []
+            
+            logger.info(f"Message sent: chatId={chatId}, messageId={doc_ref.id}, userId={AI_AGENT_ID}")
+            return {
+                "success": True,
+                "messageId": doc_ref.id,
+                "message": message_dict
+            }
+        except Exception as e:
+            logger.error(f"Error sending message: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
 

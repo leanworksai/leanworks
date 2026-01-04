@@ -13,6 +13,16 @@ from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
 import logging
 import json
+import subprocess
+import tempfile
+import os
+import shutil
+import resource
+import signal
+import queue
+import threading
+import time
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +75,9 @@ class ToolUse:
         # Tool instance cache - tools are initialized only when first accessed
         self._tool_cache = {}
         
+        # RAG storage tool cache (lazy initialization)
+        self._rag_storage = None
+        
         # Track which tools are actually enabled (successfully initialized)
         self.enabled_tools = []
         
@@ -91,7 +104,7 @@ class ToolUse:
                     # Set Secret Manager client for PostgresTool
                     if self.secret_manager_client:
                         PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
-                    self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper)
+                    self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper, user_id=self.user_id)
                     if 'postgres' not in self.enabled_tools:
                         self.enabled_tools.append('postgres')
                     logger.info("PostgresTool initialized successfully (lazy)")
@@ -418,6 +431,404 @@ class ToolUse:
             else:
                 self._tool_cache['linear_tool'] = None
         return self._tool_cache['linear_tool']
+    
+    def _create_bash_session(self):
+        """Create a persistent bash session using Docker."""
+        import uuid
+        
+        class DockerBashSession:
+            def __init__(self):
+                # Generate unique container name
+                self.container_name = f"bash-session-{uuid.uuid4().hex[:12]}"
+                self.container_id = None
+                
+                # Create and start Docker container
+                try:
+                    # Use a lightweight base image (alpine with bash)
+                    create_cmd = [
+                        'docker', 'run', '-d',
+                        '--name', self.container_name,
+                        '--rm',  # Auto-remove when stopped
+                        '--network', 'none',  # No network access for security
+                        '--memory', '256m',  # Limit memory to 256MB
+                        '--cpus', '1.0',  # Limit to 1 CPU
+                        '--pids-limit', '100',  # Limit number of processes
+                        '--read-only',  # Read-only root filesystem
+                        '--tmpfs', '/tmp:rw,noexec,nosuid,size=100m',  # Writable /tmp
+                        '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
+                        'alpine:latest',
+                        'sh', '-c', 'tail -f /dev/null'  # Keep container running
+                    ]
+                    
+                    result = subprocess.run(
+                        create_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    
+                    if result.returncode != 0:
+                        raise Exception(f"Failed to create Docker container: {result.stderr}")
+                    
+                    self.container_id = result.stdout.strip()
+                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]})")
+                    
+                except FileNotFoundError:
+                    raise Exception("Docker is not installed or not in PATH")
+                except subprocess.TimeoutExpired:
+                    raise Exception("Docker container creation timed out")
+                except Exception as e:
+                    logger.error(f"Error creating Docker container: {e}")
+                    raise
+        
+        return DockerBashSession()
+    
+    def _execute_bash_command_in_session(self, command: str, timeout: int = 30) -> dict:
+        """
+        Execute a bash command in the Docker container.
+        
+        Args:
+            command: The bash command to execute
+            timeout: Maximum execution time in seconds (default: 30)
+            
+        Returns:
+            dict with 'output', 'error', and 'return_code' keys
+        """
+        try:
+            # Validate command for dangerous patterns
+            dangerous_patterns = ['rm -rf /', 'format', ':(){:|:&};:']
+            for pattern in dangerous_patterns:
+                if pattern in command:
+                    return {
+                        "output": "",
+                        "error": f"Command contains dangerous pattern: {pattern}",
+                        "return_code": -1
+                    }
+            
+            session = self._bash_session
+            
+            # Check if container is still running
+            check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.container_name]
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
+            
+            if check_result.returncode != 0 or check_result.stdout.strip() != 'true':
+                # Container stopped, create a new one
+                logger.warning(f"Container {session.container_name} is not running, recreating...")
+                try:
+                    # Try to remove old container if it exists
+                    subprocess.run(['docker', 'rm', '-f', session.container_name], 
+                                 capture_output=True, timeout=5)
+                except:
+                    pass
+                self._bash_session = self._create_bash_session()
+                session = self._bash_session
+            
+            # Execute command in Docker container
+            # Use sh -c to execute the command (alpine uses sh, not bash)
+            exec_cmd = [
+                'docker', 'exec',
+                session.container_name,
+                'sh', '-c', command
+            ]
+            
+            try:
+                result = subprocess.run(
+                    exec_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+                
+                return {
+                    "output": result.stdout,
+                    "error": result.stderr,
+                    "return_code": result.returncode
+                }
+            except subprocess.TimeoutExpired:
+                # Kill the command if it times out
+                try:
+                    subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
+                                 capture_output=True, timeout=5)
+                except:
+                    pass
+                
+                return {
+                    "output": "",
+                    "error": f"Command timed out after {timeout} seconds",
+                    "return_code": -1
+                }
+                
+        except Exception as e:
+            logger.error(f"Error executing bash command in Docker: {e}")
+            return {
+                "output": "",
+                "error": f"Error executing command: {str(e)}",
+                "return_code": -1
+            }
+    
+    def _set_resource_limits(self):
+        """Set resource limits for sandboxed execution."""
+        try:
+            # Limit CPU time (30 seconds)
+            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+            # Limit memory (256 MB)
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+            # Limit file size (10 MB)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+        except Exception as e:
+            logger.warning(f"Could not set all resource limits: {e}")
+    
+    def _execute_code(self, code: str, language: str = "python", timeout: int = 30) -> dict:
+        """
+        Execute code in a sandboxed environment.
+        
+        Args:
+            code: The code to execute
+            language: Programming language (python, javascript, etc.)
+            timeout: Maximum execution time in seconds (default: 30)
+            
+        Returns:
+            dict with 'output' and 'error' keys
+        """
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                if language.lower() == "python":
+                    # Write code to temporary file
+                    code_file = os.path.join(temp_dir, "code.py")
+                    with open(code_file, 'w') as f:
+                        f.write(code)
+                    
+                    # Execute Python code
+                    process = subprocess.Popen(
+                        ["python3", code_file],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        cwd=temp_dir,
+                        preexec_fn=lambda: self._set_resource_limits()
+                    )
+                    
+                    try:
+                        stdout, stderr = process.communicate(timeout=timeout)
+                        return {
+                            "output": stdout.decode('utf-8', errors='replace'),
+                            "error": stderr.decode('utf-8', errors='replace'),
+                            "return_code": process.returncode
+                        }
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                        return {
+                            "output": "",
+                            "error": f"Code execution timed out after {timeout} seconds",
+                            "return_code": -1
+                        }
+                else:
+                    return {
+                        "output": "",
+                        "error": f"Unsupported language: {language}. Currently only 'python' is supported.",
+                        "return_code": -1
+                    }
+        except Exception as e:
+            logger.error(f"Error executing code: {e}")
+            return {
+                "output": "",
+                "error": f"Error executing code: {str(e)}",
+                "return_code": -1
+            }
+    
+    def _handle_text_editor(self, action: str, file_path: str = None, content: str = None, start_line: int = None, end_line: int = None) -> dict:
+        """
+        Handle text editor operations.
+        
+        Args:
+            action: Operation to perform (read, write, edit, list)
+            file_path: Path to the file (relative to safe directory)
+            content: Content to write or insert
+            start_line: Start line for edit operations
+            end_line: End line for edit operations
+            
+        Returns:
+            dict with operation result
+        """
+        try:
+            # Define safe directory (current working directory or temp)
+            safe_dir = os.getcwd()
+            if not os.path.exists(safe_dir):
+                safe_dir = tempfile.gettempdir()
+            
+            if action == "read":
+                if not file_path:
+                    return {"error": "file_path is required for read operation"}
+                
+                # Ensure path is within safe directory
+                full_path = os.path.join(safe_dir, file_path)
+                if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)):
+                    return {"error": "File path is outside safe directory"}
+                
+                if not os.path.exists(full_path):
+                    return {"error": f"File not found: {file_path}"}
+                
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                return {"content": content, "file_path": file_path}
+            
+            elif action == "write":
+                if not file_path or content is None:
+                    return {"error": "file_path and content are required for write operation"}
+                
+                full_path = os.path.join(safe_dir, file_path)
+                if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)):
+                    return {"error": "File path is outside safe directory"}
+                
+                # Create directory if needed
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                return {"success": True, "file_path": file_path, "message": f"File written successfully"}
+            
+            elif action == "edit":
+                if not file_path or content is None:
+                    return {"error": "file_path and content are required for edit operation"}
+                
+                full_path = os.path.join(safe_dir, file_path)
+                if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)):
+                    return {"error": "File path is outside safe directory"}
+                
+                if not os.path.exists(full_path):
+                    return {"error": f"File not found: {file_path}"}
+                
+                # Read existing content
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                # Edit lines if specified
+                if start_line is not None and end_line is not None:
+                    # Replace lines start_line to end_line (1-indexed)
+                    lines[start_line-1:end_line] = [content + '\n']
+                else:
+                    # Append content
+                    lines.append(content + '\n')
+                
+                # Write back
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+                
+                return {"success": True, "file_path": file_path, "message": "File edited successfully"}
+            
+            elif action == "list":
+                # List files in safe directory
+                files = []
+                for root, dirs, filenames in os.walk(safe_dir):
+                    # Limit depth to prevent excessive listing
+                    depth = root[len(safe_dir):].count(os.sep)
+                    if depth > 2:
+                        dirs[:] = []
+                        continue
+                    
+                    for filename in filenames:
+                        rel_path = os.path.relpath(os.path.join(root, filename), safe_dir)
+                        files.append(rel_path)
+                
+                return {"files": files[:100]}  # Limit to 100 files
+            
+            else:
+                return {"error": f"Unknown action: {action}. Supported actions: read, write, edit, list"}
+        
+        except Exception as e:
+            logger.error(f"Error in text editor operation: {e}")
+            return {"error": f"Error: {str(e)}"}
+    
+    @property
+    def bash_tool_property(self):
+        """Bash tool specification (Anthropic-defined schema-less tool)."""
+        return {
+            "type": "bash_20250124",
+            "name": "bash"
+        }
+    
+    def bash(self, command: str = None, restart: bool = False) -> str:
+        """Execute a bash command or restart the session."""
+        if restart:
+            # Restart the bash session (stop and remove Docker container)
+            if hasattr(self, '_bash_session') and self._bash_session is not None:
+                try:
+                    session = self._bash_session
+                    # Stop and remove the container
+                    subprocess.run(['docker', 'stop', session.container_name],
+                                 capture_output=True, timeout=10)
+                    subprocess.run(['docker', 'rm', '-f', session.container_name],
+                                 capture_output=True, timeout=10)
+                    logger.info(f"Stopped and removed Docker container {session.container_name}")
+                except Exception as e:
+                    logger.warning(f"Error stopping Docker container: {e}")
+            self._bash_session = None
+            return "Bash session restarted"
+        
+        if not command:
+            return "Error: command is required unless restart is true"
+        
+        # Use persistent session if available, otherwise create one
+        if not hasattr(self, '_bash_session') or self._bash_session is None:
+            try:
+                self._bash_session = self._create_bash_session()
+            except Exception as e:
+                return f"Error creating Docker container: {str(e)}. Make sure Docker is installed and running."
+        
+        result = self._execute_bash_command_in_session(command)
+        if result["return_code"] == 0:
+            return result["output"]
+        else:
+            error_msg = result['error'] if result['error'] else "No error message"
+            output_msg = result['output'] if result['output'] else "No output"
+            return f"Error (return code {result['return_code']}): {error_msg}\nOutput: {output_msg}"
+    
+    @property
+    def text_editor_tool_property(self):
+        """Text editor tool specification (Anthropic-defined schema-less tool)."""
+        # Use text_editor_20250728 which is supported by claude-haiku-4-5-20251001
+        # The name must be 'str_replace_based_edit_tool' for this version
+        return {
+            "type": "text_editor_20250728",
+            "name": "str_replace_based_edit_tool"
+        }
+    
+    def text_editor(self, **kwargs) -> str:
+        """
+        Handle text editor operations.
+        The text_editor tool is a client tool that requires implementation.
+        Parameters are provided by Claude based on the tool's built-in schema.
+        """
+        # Extract parameters from kwargs (Claude provides these based on tool schema)
+        # The text_editor tool has a built-in schema, so we handle the operations
+        result = self._handle_text_editor_from_kwargs(**kwargs)
+        if "error" in result:
+            return f"Error: {result['error']}"
+        elif "success" in result:
+            return result.get("message", "Operation completed successfully")
+        elif "content" in result:
+            return result["content"]
+        elif "files" in result:
+            return "\n".join(result["files"])
+        else:
+            return str(result)
+    
+    def _handle_text_editor_from_kwargs(self, **kwargs) -> dict:
+        """
+        Handle text editor operations from Claude's tool call parameters.
+        The exact parameter names depend on the tool's built-in schema.
+        """
+        # Map common text editor operations
+        # Note: The actual parameter names come from Anthropic's tool schema
+        action = kwargs.get("action") or kwargs.get("operation")
+        file_path = kwargs.get("file_path") or kwargs.get("path")
+        content = kwargs.get("content") or kwargs.get("text")
+        start_line = kwargs.get("start_line") or kwargs.get("start")
+        end_line = kwargs.get("end_line") or kwargs.get("end")
+        
+        return self._handle_text_editor(action, file_path, content, start_line, end_line)
 
     @property
     def tools(self):
@@ -429,6 +840,10 @@ class ToolUse:
             if self.postgres_tool:
                 self._tools_cache.extend([
                     self.postgres_tool.query_postgres_property,
+                    self.postgres_tool.create_task_property,
+                    self.postgres_tool.update_task_property,
+                    self.postgres_tool.create_doc_property,
+                    self.postgres_tool.update_doc_property,
                 ])
                 logger.info("PostgreSQL tools added to tools list (lazy)")
             
@@ -448,7 +863,10 @@ class ToolUse:
 
             # Add Firestore tools if available
             if self.firestore_tool:
-                self._tools_cache.append(self.firestore_tool.query_messages_property)
+                self._tools_cache.extend([
+                    self.firestore_tool.query_messages_property,
+                    self.firestore_tool.send_message_property,
+                ])
                 logger.info("Firestore tools added to tools list (lazy)")
 
             # Add Cloud Storage tools if available
@@ -543,6 +961,14 @@ class ToolUse:
                 ])
                 logger.info("DuckDB tools added to tools list (query_response, get_schema)")
             
+            # Add client tools (bash and text_editor - code_execution is a server tool)
+            # These are always available as they don't require external dependencies
+            self._tools_cache.extend([
+                self.bash_tool_property,
+                self.text_editor_tool_property
+            ])
+            logger.info("Client tools added to tools list (bash, text_editor)")
+            
             logger.info(f"Tools list built with {len(self._tools_cache)} tools")
         
         return self._tools_cache
@@ -557,6 +983,10 @@ class ToolUse:
             if self.postgres_tool:
                 self._function_map_cache.update({
                     "query_postgres": self.postgres_tool.query_postgres,
+                    "create_task": self.postgres_tool.create_task,
+                    "update_task": self.postgres_tool.update_task,
+                    "create_doc": self.postgres_tool.create_doc,
+                    "update_doc": self.postgres_tool.update_doc,
                 })
                 logger.info("PostgreSQL functions added to function_map (lazy)")
             
@@ -576,7 +1006,10 @@ class ToolUse:
 
             # Add Firestore functions if available
             if self.firestore_tool:
-                self._function_map_cache["query_messages"] = self.firestore_tool.query_messages
+                self._function_map_cache.update({
+                    "query_messages": self.firestore_tool.query_messages,
+                    "send_message": self.firestore_tool.send_message,
+                })
                 logger.info("Firestore functions added to function_map (lazy)")
 
             # Add Cloud Storage functions if available
@@ -670,6 +1103,15 @@ class ToolUse:
                     "get_response_schema": get_response_schema
                 })
 
+            # Add client tool function mappings (always available)
+            # Note: bash and text_editor are client tools, code_execution is a server tool
+            # text_editor tool uses name "str_replace_based_edit_tool" in the API for version 20250728
+            self._function_map_cache.update({
+                "bash": self.bash,
+                "str_replace_based_edit_tool": self.text_editor
+            })
+            logger.info("Client tool functions added to function_map (bash, str_replace_based_edit_tool)")
+
             logger.info(f"Function map built with {len(self._function_map_cache)} functions")
             logger.info(f"Available functions: {list(self._function_map_cache.keys())}")
         
@@ -684,4 +1126,66 @@ class ToolUse:
         # Re-register DuckDB tools immediately (stateless)
         if 'duckdb' in self.requested_tools:
             self.enabled_tools.append('duckdb')
+    
+    def _get_rag_storage_tool(self):
+        """
+        Lazy initialize RAG storage tool for storing unstructured large responses.
+        Reuses existing SearchTool's vector DB client if available.
+        
+        Returns:
+            RAGStorageTool instance or None if not available
+        """
+        if self._rag_storage is None:
+            # Check if search tool is available (which has vector DB client)
+            if 'search' in self.requested_tools and self.search_tool:
+                try:
+                    from leanworks.agent.tools.rag_storage import RAGStorageTool
+                    from leanworks.setting import LARGE_RESPONSE_CONFIG
+                    
+                    # Reuse search tool's vector DB and embedding clients
+                    vectordb_client = self.search_tool.chat.vectordb_client
+                    embedding_client = self.search_tool.chat.vectordb_client.embedding_model_client
+                    
+                    # Get chunk settings from config
+                    chunk_size = LARGE_RESPONSE_CONFIG.get("rag_chunk_size", 512)
+                    chunk_overlap = LARGE_RESPONSE_CONFIG.get("rag_chunk_overlap", 128)
+                    
+                    self._rag_storage = RAGStorageTool(
+                        vectordb_client=vectordb_client,
+                        embedding_client=embedding_client,
+                        org_slug=self.org_slug,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap
+                    )
+                    logger.info("RAGStorageTool initialized successfully (reusing SearchTool clients)")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize RAGStorageTool: {e}")
+                    self._rag_storage = False  # Mark as unavailable
+            else:
+                logger.debug("RAGStorageTool not available: search tool not enabled or not initialized")
+                self._rag_storage = False  # Mark as unavailable
+        
+        return self._rag_storage if self._rag_storage else None
         logger.info("Tool cache cleared - tools will be reinitialized on next access")
+    
+    def cleanup_bash_session(self):
+        """Clean up Docker container for bash session."""
+        if hasattr(self, '_bash_session') and self._bash_session is not None:
+            try:
+                session = self._bash_session
+                # Stop and remove the container
+                subprocess.run(['docker', 'stop', session.container_name],
+                             capture_output=True, timeout=10)
+                subprocess.run(['docker', 'rm', '-f', session.container_name],
+                             capture_output=True, timeout=10)
+                logger.info(f"Cleaned up Docker container {session.container_name}")
+                self._bash_session = None
+            except Exception as e:
+                logger.warning(f"Error cleaning up Docker container: {e}")
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        try:
+            self.cleanup_bash_session()
+        except:
+            pass  # Ignore errors during cleanup

@@ -7,10 +7,14 @@ import datetime
 import re
 import os
 import threading
+import secrets
 from google.cloud import secretmanager
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# AI Agent identifier - all creations/edits are attributed to 'lean'
+AI_AGENT_ID = 'lean@leanworks.ai'
 
 
 class PostgresTool:
@@ -265,15 +269,17 @@ class PostgresTool:
                 logger.error(f"Failed to create PostgreSQL connection pool for {database_name}: {e}")
                 raise
     
-    def __init__(self, postgres_client_wrapper):
+    def __init__(self, postgres_client_wrapper, user_id: Optional[str] = None):
         """
         Initialize PostgresTool with a PostgreSQL client wrapper.
         
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name like 'leanworks.ai')
                                     and optionally `client_name`.
+            user_id: Optional user ID for authorization checks (not used for attribution - all creations use AI_AGENT_ID)
         """
         self.postgres_client_wrapper = postgres_client_wrapper
+        self.user_id = user_id
         
         # Get org_slug from wrapper (use client_name as fallback)
         self.org_slug = getattr(self.postgres_client_wrapper, 'org_slug', None)
@@ -632,4 +638,1027 @@ class PostgresTool:
             logger.error(f"PostgreSQL tool failed: org_slug={self.org_slug}, database={self.database_name}, error={str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
+    
+    @property
+    def create_task_property(self):
+        description = f"""
+        Create a new task in the tasks table for org `{self.org_slug}`.
+        
+        This tool creates tasks that are attributed to the AI agent 'lean'. All tasks created through this tool will have created_by set to 'lean@leanworks.ai'.
+        
+        Parameters:
+        - title (required): Task title
+        - description (optional): Task description
+        - projectId (optional): Project ID (UUID)
+        - projectName (optional): Project name (fallback if projectId not provided)
+        - assigneeId (optional): Assignee email
+        - status (optional): Task status - one of 'todo', 'in-progress', 'review', 'completed', 'blocked' (default: 'todo')
+        - priority (optional): Task priority - one of 'low', 'medium', 'high', 'urgent' (default: 'medium')
+        - dueDate (optional): Due date in ISO format (YYYY-MM-DD) or DATE
+        - tags (optional): Array of tag strings
+        - estimatedHours (optional): Estimated hours (decimal number)
+        - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
+        - visibleToMembers (optional): Array of email addresses (required if visibility='specific_members')
+        
+        Returns:
+        - Success: Dictionary with task id and created fields
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "create_task",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Task title (required)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Task description"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Project ID (UUID)"
+                    },
+                    "projectName": {
+                        "type": "string",
+                        "description": "Project name (fallback if projectId not provided)"
+                    },
+                    "assigneeId": {
+                        "type": "string",
+                        "description": "Assignee email address"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["todo", "in-progress", "review", "completed", "blocked"],
+                        "description": "Task status (default: 'todo')"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"],
+                        "description": "Task priority (default: 'medium')"
+                    },
+                    "dueDate": {
+                        "type": "string",
+                        "description": "Due date in ISO format (YYYY-MM-DD)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of tag strings"
+                    },
+                    "estimatedHours": {
+                        "type": "number",
+                        "description": "Estimated hours (decimal number)"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["all_members", "specific_members"],
+                        "description": "Task visibility (default: 'all_members')"
+                    },
+                    "visibleToMembers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of email addresses (required if visibility='specific_members')"
+                    }
+                },
+                "required": ["title"]
+            }
+        }
+    
+    def create_task(
+        self,
+        title: str,
+        description: Optional[str] = None,
+        projectId: Optional[str] = None,
+        projectName: Optional[str] = None,
+        assigneeId: Optional[str] = None,
+        status: str = "todo",
+        priority: str = "medium",
+        dueDate: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        estimatedHours: Optional[float] = None,
+        visibility: str = "all_members",
+        visibleToMembers: Optional[List[str]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Create a new task in the tasks table.
+        
+        Args:
+            title: Task title (required)
+            description: Task description
+            projectId: Project ID
+            projectName: Project name
+            assigneeId: Assignee email
+            status: Task status (default: 'todo')
+            priority: Task priority (default: 'medium')
+            dueDate: Due date (ISO format)
+            tags: Array of tag strings
+            estimatedHours: Estimated hours
+            visibility: Task visibility (default: 'all_members')
+            visibleToMembers: Array of email addresses
+            
+        Returns:
+            Dictionary with task id and created fields, or error dictionary
+        """
+        conn = None
+        try:
+            if not title:
+                return {"error": "title is required"}
+            
+            # Validate visibility
+            valid_visibility = ['all_members', 'specific_members']
+            task_visibility = visibility if visibility in valid_visibility else 'all_members'
+            
+            # Validate visibleToMembers for specific_members visibility
+            visible_to_members_array = []
+            if task_visibility == 'specific_members':
+                if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
+                    return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
+                visible_to_members_array = [email.lower() for email in visibleToMembers]
+            
+            # Look up assignee name/avatar if assigneeId provided
+            final_assignee = None
+            final_assignee_avatar = None
+            if assigneeId:
+                assignee_name, assignee_avatar = self._lookup_user_info(assigneeId)
+                final_assignee = assignee_name or assigneeId
+                final_assignee_avatar = assignee_avatar or assigneeId[0].upper()
+            
+            # Look up project name if projectId provided but projectName not
+            final_project_name = projectName
+            if projectId and not final_project_name:
+                final_project_name = self._lookup_project_name(projectId)
+            
+            # Generate task ID
+            task_id = secrets.token_hex(16)
+            
+            # Get current timestamp in milliseconds
+            created_at = int(datetime.datetime.now().timestamp() * 1000)
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Insert task
+                cursor.execute("""
+                    INSERT INTO tasks (
+                        id, title, description, project_id, project_name, assignee_id, assignee_name, assignee_avatar, status, 
+                        priority, due_date, created_by, created_at, tags, estimated_hours, visibility, visible_to_members
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    task_id,
+                    title,
+                    description,
+                    projectId,
+                    final_project_name,
+                    assigneeId.lower() if assigneeId else None,
+                    final_assignee,
+                    final_assignee_avatar,
+                    status,
+                    priority,
+                    dueDate,
+                    AI_AGENT_ID,  # Always use AI agent ID
+                    created_at,
+                    json.dumps(tags) if tags else None,
+                    estimatedHours,
+                    task_visibility,
+                    json.dumps(visible_to_members_array)
+                ))
+                conn.commit()
+            
+            logger.info(f"Task created: id={task_id}, title={title}, created_by={AI_AGENT_ID}")
+            return {
+                "id": task_id,
+                "title": title,
+                "description": description,
+                "projectId": projectId,
+                "assigneeId": assigneeId,
+                "status": status,
+                "priority": priority,
+                "created_by": AI_AGENT_ID
+            }
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error creating task: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    @property
+    def update_task_property(self):
+        description = f"""
+        Update an existing task in the tasks table for org `{self.org_slug}`.
+        
+        This tool can only update tasks that were created by the AI agent 'lean' (created_by = 'lean@leanworks.ai').
+        
+        Parameters:
+        - taskId (required): Task ID to update
+        - title (optional): Update title
+        - description (optional): Update description
+        - status (optional): Update status - one of 'todo', 'in-progress', 'review', 'completed', 'blocked'
+        - priority (optional): Update priority - one of 'low', 'medium', 'high', 'urgent'
+        - assigneeId (optional): Update assignee email
+        - projectId (optional): Update project ID
+        - dueDate (optional): Update due date (ISO format YYYY-MM-DD)
+        - tags (optional): Update tags array
+        - estimatedHours (optional): Update estimated hours
+        - actualHours (optional): Update actual hours
+        - visibility (optional): Update visibility (only creator can change)
+        - visibleToMembers (optional): Update visible members list
+        
+        Returns:
+        - Success: Dictionary with success: true
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "update_task",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "Task ID to update (required)"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Update title"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Update description"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["todo", "in-progress", "review", "completed", "blocked"],
+                        "description": "Update status"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"],
+                        "description": "Update priority"
+                    },
+                    "assigneeId": {
+                        "type": "string",
+                        "description": "Update assignee email"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Update project ID"
+                    },
+                    "dueDate": {
+                        "type": "string",
+                        "description": "Update due date (ISO format YYYY-MM-DD)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Update tags array"
+                    },
+                    "estimatedHours": {
+                        "type": "number",
+                        "description": "Update estimated hours"
+                    },
+                    "actualHours": {
+                        "type": "number",
+                        "description": "Update actual hours"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["all_members", "specific_members"],
+                        "description": "Update visibility (only creator can change)"
+                    },
+                    "visibleToMembers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Update visible members list"
+                    }
+                },
+                "required": ["taskId"]
+            }
+        }
+    
+    def update_task(
+        self,
+        taskId: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        assigneeId: Optional[str] = None,
+        projectId: Optional[str] = None,
+        dueDate: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        estimatedHours: Optional[float] = None,
+        actualHours: Optional[float] = None,
+        visibility: Optional[str] = None,
+        visibleToMembers: Optional[List[str]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Update an existing task.
+        
+        Args:
+            taskId: Task ID to update (required)
+            title: Update title
+            description: Update description
+            status: Update status
+            priority: Update priority
+            assigneeId: Update assignee
+            projectId: Update project
+            dueDate: Update due date
+            tags: Update tags array
+            estimatedHours: Update estimated hours
+            actualHours: Update actual hours
+            visibility: Update visibility
+            visibleToMembers: Update visible members list
+            
+        Returns:
+            Dictionary with success status, or error dictionary
+        """
+        conn = None
+        try:
+            if not taskId:
+                return {"error": "taskId is required"}
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Check if task exists and was created by AI agent
+                cursor.execute(
+                    "SELECT created_by FROM tasks WHERE id = %s",
+                    (taskId,)
+                )
+                task_check = cursor.fetchone()
+                
+                if not task_check:
+                    return {"error": "Task not found"}
+                
+                task_creator = task_check.get('created_by', '').lower()
+                if task_creator != AI_AGENT_ID.lower():
+                    return {"error": f"Only tasks created by {AI_AGENT_ID} can be updated by this tool"}
+                
+                # Build dynamic UPDATE query
+                set_clauses = []
+                values = []
+                param_index = 1
+                
+                field_map = {
+                    'title': 'title',
+                    'description': 'description',
+                    'status': 'status',
+                    'priority': 'priority',
+                    'assigneeId': 'assignee_id',
+                    'projectId': 'project_id',
+                    'dueDate': 'due_date',
+                    'estimatedHours': 'estimated_hours',
+                    'actualHours': 'actual_hours',
+                }
+                
+                # Handle visibility separately
+                if visibility is not None:
+                    valid_visibility = ['all_members', 'specific_members']
+                    task_visibility = visibility if visibility in valid_visibility else 'all_members'
+                    set_clauses.append("visibility = %s")
+                    values.append(task_visibility)
+                    
+                    # Handle visibleToMembers
+                    if task_visibility == 'specific_members':
+                        if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
+                            return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
+                        visible_to_members_array = [email.lower() for email in visibleToMembers]
+                        set_clauses.append("visible_to_members = %s::jsonb")
+                        values.append(json.dumps(visible_to_members_array))
+                    else:
+                        set_clauses.append("visible_to_members = %s::jsonb")
+                        values.append(json.dumps([]))
+                
+                # Handle regular fields
+                updates_dict = {
+                    'title': title,
+                    'description': description,
+                    'status': status,
+                    'priority': priority,
+                    'assigneeId': assigneeId,
+                    'projectId': projectId,
+                    'dueDate': dueDate,
+                    'estimatedHours': estimatedHours,
+                    'actualHours': actualHours,
+                }
+                for key, db_field in field_map.items():
+                    value = updates_dict.get(key)
+                    if value is not None:
+                        if key == 'assigneeId':
+                            # Look up assignee name/avatar
+                            assignee_name, assignee_avatar = self._lookup_user_info(value)
+                            final_assignee = assignee_name or value
+                            final_assignee_avatar = assignee_avatar or value[0].upper()
+                            set_clauses.append("assignee_id = %s")
+                            values.append(value.lower())
+                            set_clauses.append("assignee_name = %s")
+                            values.append(final_assignee)
+                            set_clauses.append("assignee_avatar = %s")
+                            values.append(final_assignee_avatar)
+                        elif key == 'projectId':
+                            # Look up project name
+                            project_name = self._lookup_project_name(value)
+                            set_clauses.append("project_id = %s")
+                            values.append(value)
+                            if project_name:
+                                set_clauses.append("project_name = %s")
+                                values.append(project_name)
+                        else:
+                            set_clauses.append(f"{db_field} = %s")
+                            values.append(value)
+                
+                # Handle tags
+                if tags is not None:
+                    set_clauses.append("tags = %s::jsonb")
+                    values.append(json.dumps(tags))
+                
+                if len(set_clauses) == 0:
+                    return {"error": "No fields to update"}
+                
+                # Add updated_at
+                set_clauses.append("updated_at = NOW()")
+                
+                # Add taskId to values
+                values.append(taskId)
+                
+                # Execute UPDATE
+                query = f"UPDATE tasks SET {', '.join(set_clauses)} WHERE id = %s"
+                cursor.execute(query, values)
+                conn.commit()
+            
+            logger.info(f"Task updated: id={taskId}")
+            return {"success": True}
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error updating task: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    @property
+    def create_doc_property(self):
+        description = f"""
+        Create a new document in the docs table for org `{self.org_slug}`.
+        
+        This tool creates documents that are owned by the AI agent 'lean'. All documents created through this tool will have owner_email set to 'lean@leanworks.ai'.
+        
+        Parameters:
+        - title (required): Document title
+        - content (required): Document content (HTML/rich text)
+        - projectId (optional): Associated project ID
+        - teamId (optional): Associated team ID
+        - tags (optional): Array of tag strings
+        - isPinned (optional): Boolean (default: false)
+        - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
+        - visibleToMembers (optional): Array of email addresses
+        - metadata (optional): JSON object for additional metadata
+        
+        Returns:
+        - Success: Dictionary with doc id and created fields
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "create_doc",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Document title (required)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Document content (HTML/rich text) (required)"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Associated project ID"
+                    },
+                    "teamId": {
+                        "type": "string",
+                        "description": "Associated team ID"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of tag strings"
+                    },
+                    "isPinned": {
+                        "type": "boolean",
+                        "description": "Whether document is pinned (default: false)"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["all_members", "specific_members"],
+                        "description": "Document visibility (default: 'all_members')"
+                    },
+                    "visibleToMembers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of email addresses"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "JSON object for additional metadata"
+                    }
+                },
+                "required": ["title", "content"]
+            }
+        }
+    
+    def create_doc(
+        self,
+        title: str,
+        content: str,
+        projectId: Optional[str] = None,
+        teamId: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        isPinned: bool = False,
+        visibility: str = "all_members",
+        visibleToMembers: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Create a new document in the docs table.
+        
+        Args:
+            title: Document title (required)
+            content: Document content (required)
+            projectId: Associated project ID
+            teamId: Associated team ID
+            tags: Array of tag strings
+            isPinned: Whether document is pinned
+            visibility: Document visibility
+            visibleToMembers: Array of email addresses
+            metadata: JSON object for additional metadata
+            
+        Returns:
+            Dictionary with doc id and created fields, or error dictionary
+        """
+        conn = None
+        try:
+            if not title or not content:
+                return {"error": "title and content are required"}
+            
+            # Validate visibility
+            valid_visibility = ['all_members', 'specific_members']
+            doc_visibility = visibility if visibility in valid_visibility else 'all_members'
+            
+            # Validate visibleToMembers for specific_members visibility
+            visible_to_members_array = []
+            if doc_visibility == 'specific_members':
+                if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
+                    return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
+                visible_to_members_array = [email.lower() for email in visibleToMembers]
+            
+            # Generate doc ID
+            doc_id = secrets.token_hex(16)
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Try to insert with metadata column first
+                try:
+                    cursor.execute("""
+                        INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, is_pinned, visibility, visible_to_members, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (
+                        doc_id,
+                        title,
+                        content,
+                        AI_AGENT_ID,  # Always use AI agent ID
+                        projectId,
+                        teamId,
+                        json.dumps(tags) if tags else '[]',
+                        json.dumps(metadata) if metadata else '{}',
+                        isPinned,
+                        doc_visibility,
+                        json.dumps(visible_to_members_array)
+                    ))
+                except Exception as e:
+                    # If metadata column doesn't exist, insert without it
+                    if 'column "metadata" does not exist' in str(e).lower() or 'metadata' in str(e).lower():
+                        cursor.execute("""
+                            INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        """, (
+                            doc_id,
+                            title,
+                            content,
+                            AI_AGENT_ID,  # Always use AI agent ID
+                            projectId,
+                            teamId,
+                            json.dumps(tags) if tags else '[]',
+                            isPinned,
+                            doc_visibility,
+                            json.dumps(visible_to_members_array)
+                        ))
+                    else:
+                        raise
+                
+                conn.commit()
+            
+            logger.info(f"Document created: id={doc_id}, title={title}, owner_email={AI_AGENT_ID}")
+            return {
+                "id": doc_id,
+                "title": title,
+                "content": content,
+                "ownerEmail": AI_AGENT_ID,
+                "projectId": projectId,
+                "teamId": teamId,
+                "tags": tags or [],
+                "isPinned": isPinned,
+                "visibility": doc_visibility,
+                "visibleToMembers": visible_to_members_array
+            }
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error creating document: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    @property
+    def update_doc_property(self):
+        description = f"""
+        Update an existing document in the docs table for org `{self.org_slug}`.
+        
+        This tool can only update documents that are owned by the AI agent 'lean' (owner_email = 'lean@leanworks.ai').
+        
+        Parameters:
+        - docId (required): Document ID to update
+        - title (optional): Update title
+        - content (optional): Update content
+        - projectId (optional): Update project association
+        - teamId (optional): Update team association
+        - tags (optional): Update tags array
+        - isPinned (optional): Update pinned status
+        - visibility (optional): Update visibility
+        - visibleToMembers (optional): Update visible members
+        - metadata (optional): Update metadata
+        
+        Returns:
+        - Success: Dictionary with success: true
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "update_doc",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {
+                        "type": "string",
+                        "description": "Document ID to update (required)"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Update title"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Update content"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Update project association"
+                    },
+                    "teamId": {
+                        "type": "string",
+                        "description": "Update team association"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Update tags array"
+                    },
+                    "isPinned": {
+                        "type": "boolean",
+                        "description": "Update pinned status"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["all_members", "specific_members"],
+                        "description": "Update visibility"
+                    },
+                    "visibleToMembers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Update visible members"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Update metadata"
+                    }
+                },
+                "required": ["docId"]
+            }
+        }
+    
+    def update_doc(
+        self,
+        docId: str,
+        title: Optional[str] = None,
+        content: Optional[str] = None,
+        projectId: Optional[str] = None,
+        teamId: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        isPinned: Optional[bool] = None,
+        visibility: Optional[str] = None,
+        visibleToMembers: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Update an existing document.
+        
+        Args:
+            docId: Document ID to update (required)
+            title: Update title
+            content: Update content
+            projectId: Update project association
+            teamId: Update team association
+            tags: Update tags array
+            isPinned: Update pinned status
+            visibility: Update visibility
+            visibleToMembers: Update visible members
+            metadata: Update metadata
+            
+        Returns:
+            Dictionary with success status, or error dictionary
+        """
+        conn = None
+        try:
+            if not docId:
+                return {"error": "docId is required"}
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Check if doc exists and is owned by AI agent
+                cursor.execute(
+                    "SELECT id, owner_email FROM docs WHERE id = %s",
+                    (docId,)
+                )
+                doc_check = cursor.fetchone()
+                
+                if not doc_check:
+                    return {"error": "Document not found"}
+                
+                doc_owner = doc_check.get('owner_email', '').lower()
+                if doc_owner != AI_AGENT_ID.lower():
+                    return {"error": f"Only documents owned by {AI_AGENT_ID} can be updated by this tool"}
+                
+                # Build dynamic UPDATE query
+                set_clauses = []
+                values = []
+                
+                field_map = {
+                    'title': 'title',
+                    'content': 'content',
+                    'projectId': 'project_id',
+                    'teamId': 'team_id',
+                    'isPinned': 'is_pinned',
+                }
+                
+                # Handle visibility separately
+                if visibility is not None:
+                    valid_visibility = ['all_members', 'specific_members']
+                    doc_visibility = visibility if visibility in valid_visibility else 'all_members'
+                    set_clauses.append("visibility = %s")
+                    values.append(doc_visibility)
+                    
+                    # Handle visibleToMembers
+                    if doc_visibility == 'specific_members':
+                        if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
+                            return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
+                        visible_to_members_array = [email.lower() for email in visibleToMembers]
+                        set_clauses.append("visible_to_members = %s::jsonb")
+                        values.append(json.dumps(visible_to_members_array))
+                    else:
+                        set_clauses.append("visible_to_members = %s::jsonb")
+                        values.append(json.dumps([]))
+                
+                # Handle regular fields
+                updates_dict = {
+                    'title': title,
+                    'content': content,
+                    'projectId': projectId,
+                    'teamId': teamId,
+                    'isPinned': isPinned,
+                }
+                for key, db_field in field_map.items():
+                    value = updates_dict.get(key)
+                    if value is not None:
+                        set_clauses.append(f"{db_field} = %s")
+                        values.append(value)
+                
+                # Handle tags
+                if tags is not None:
+                    set_clauses.append("tags = %s::jsonb")
+                    values.append(json.dumps(tags))
+                
+                # Handle metadata
+                if metadata is not None:
+                    # Try to update metadata column, but handle if it doesn't exist
+                    try:
+                        set_clauses.append("metadata = %s::jsonb")
+                        values.append(json.dumps(metadata))
+                    except Exception:
+                        # Metadata column might not exist, skip it
+                        pass
+                
+                if len(set_clauses) == 0:
+                    return {"error": "No fields to update"}
+                
+                # Add updated_at
+                set_clauses.append("updated_at = NOW()")
+                
+                # Add docId to values
+                values.append(docId)
+                
+                # Execute UPDATE
+                query = f"UPDATE docs SET {', '.join(set_clauses)} WHERE id = %s"
+                cursor.execute(query, values)
+                conn.commit()
+            
+            logger.info(f"Document updated: id={docId}")
+            return {"success": True}
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error updating document: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def _lookup_user_info(self, email: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Look up user name and avatar from email.
+        
+        Args:
+            email: User email address
+            
+        Returns:
+            Tuple of (name, avatar) or (None, None) if not found
+        """
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT first_name, last_name FROM users WHERE email = %s",
+                    (email.lower(),)
+                )
+                result = cursor.fetchone()
+                if result:
+                    first_name = result.get('first_name', '')
+                    last_name = result.get('last_name', '')
+                    name = f"{first_name} {last_name}".strip() or email
+                    avatar = f"{first_name[0]}{last_name[0]}".upper() if first_name and last_name else email[0].upper()
+                    return name, avatar
+                return None, None
+        except Exception as e:
+            logger.error(f"Error looking up user info: {e}")
+            return None, None
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def _lookup_project_name(self, project_id: str) -> Optional[str]:
+        """
+        Look up project name from project ID.
+        
+        Args:
+            project_id: Project ID
+            
+        Returns:
+            Project name or None if not found
+        """
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT name FROM projects WHERE id = %s",
+                    (project_id,)
+                )
+                result = cursor.fetchone()
+                if result:
+                    return result.get('name')
+                return None
+        except Exception as e:
+            logger.error(f"Error looking up project name: {e}")
+            return None
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def _is_project_member(self, user_email: str, project_id: str) -> bool:
+        """
+        Check if user is a project member or owner.
+        
+        Args:
+            user_email: User email address
+            project_id: Project ID
+            
+        Returns:
+            True if user is member or owner, False otherwise
+        """
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 
+                        p.visibility,
+                        p.visible_to_members,
+                        p.owner_email
+                    FROM projects p
+                    WHERE p.id = %s
+                """, (project_id,))
+                result = cursor.fetchone()
+                if not result:
+                    return False
+                
+                project = result
+                visibility = project.get('visibility') or 'all_members'
+                owner_email = project.get('owner_email', '').lower()
+                user_email_lower = user_email.lower()
+                
+                # Owner always has access
+                if owner_email == user_email_lower:
+                    return True
+                
+                # If visibility is 'all_members', all org members have access
+                if visibility == 'all_members':
+                    return True
+                
+                # If visibility is 'specific_members', check if user is in visible_to_members
+                if visibility == 'specific_members':
+                    visible_to_members = project.get('visible_to_members')
+                    if isinstance(visible_to_members, str):
+                        visible_to_members = json.loads(visible_to_members)
+                    if isinstance(visible_to_members, list):
+                        return user_email_lower in [m.lower() for m in visible_to_members]
+                
+                return False
+        except Exception as e:
+            logger.error(f"Error checking project membership: {e}")
+            return False
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def _is_team_member(self, user_email: str, team_id: str) -> bool:
+        """
+        Check if user is a team member or owner.
+        
+        Args:
+            user_email: User email address
+            team_id: Team ID
+            
+        Returns:
+            True if user is member or owner, False otherwise
+        """
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 1 
+                    FROM teams t
+                    LEFT JOIN team_members tm ON t.id = tm.team_id AND tm.user_email = %s
+                    WHERE t.id = %s 
+                      AND (t.owner_email = %s OR tm.user_email IS NOT NULL)
+                """, (user_email.lower(), team_id, user_email.lower()))
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            logger.error(f"Error checking team membership: {e}")
+            return False
+        finally:
+            if conn:
+                self.pool.putconn(conn)
 

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="leanworks",
-    version="0.5.4",
+    version="0.6.0",
     packages=find_packages(),
     install_requires=[
         "pinecone==7.2.0",
@@ -11,7 +11,7 @@ setup(
         "google-auth==2.37.0",
         "google-auth-oauthlib==1.2.1",
         "google-auth-httplib2==0.2.0",
-        "anthropic==0.49.0",
+        "anthropic==0.75.0",
         "google-genai==1.24.0",
         "openai==1.60.0",
         "google-api-python-client==2.159.0",
