@@ -1,0 +1,15 @@
+apiVersion: compute.google.com/v1
+kind: ComputeFirewall
+metadata:
+  name: allow-proxy-traffic
+spec:
+  direction: INGRESS
+  allowed:
+  - IPProtocol: tcp
+    ports:
+    - "8000"  # Matches targetPort in services
+  sourceRanges:
+  - "0.0.0.0/0"  # Modify to use your proxy-only subnet range if known
+  targetTags:
+  - gke-cluster  # Update with your GKE cluster's network tags 
+

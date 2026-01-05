@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ask-api
+  template:
+    metadata:
+      labels:
+        app: ask-api
+    spec:
+      containers:
+      - name: ask-api
+        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260104-215815
+        command: ["hypercorn"]
+        args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "200m"        # Increased from 100m for better performance
+            memory: "256Mi"    # Increased from 128Mi for more stable operation
+          limits:
+            cpu: "2"           # 2 CPUs
+            memory: "1Gi"      # 1 GiB memory
+        env:
+        - name: VERIFY_API_KEY
+          value: "true"
+        - name: DB_HOST
+          value: "cloud-sql-proxy-service"  # Kubernetes service DNS name for shared Cloud SQL Proxy
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_REGION
+          value: "us-west1"
+        volumeMounts:
+        - name: gcp-credentials
+          mountPath: /app/gcp_credential.json
+          subPath: gcp_credential.json
+          readOnly: true
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-credentials
+

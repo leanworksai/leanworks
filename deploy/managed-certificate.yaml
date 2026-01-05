@@ -1,0 +1,14 @@
+# NOTE: This file is NOT used in deployment
+# The ingress uses the shared certificate from leanworks-hub: "leanworks-hub-ssl-cert"
+# This file is kept for reference only
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: "leanworks-certificate"
+  namespace: default
+spec:
+  domains:
+    - leanworks.ai
+    - hub.leanworks.ai
+

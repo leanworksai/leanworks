@@ -2,6 +2,7 @@ import json
 import re
 import copy
 import logging
+import time
 from typing import List, Dict, Any, Optional
 from google.cloud import firestore
 
@@ -82,9 +83,9 @@ class ConversationManager:
             # Limit results to get the most recent N messages
             query = query.limit(limit)
             
-            # Execute query
+            # Execute query with retry logic for transient errors
             logger.info(f"Loading conversation from messages collection: chatId={chat_id}, limit={limit}")
-            messages = query.get()
+            messages = self._execute_firestore_query_with_retry(query, max_retries=3)
             
             # Convert Firestore documents to conversation format
             conversation_messages = []
@@ -136,6 +137,59 @@ class ConversationManager:
             traceback.print_exc()
             self.conversation = []
             self.slim_conversation = []
+    
+    def _execute_firestore_query_with_retry(self, query, max_retries=3):
+        """
+        Execute a Firestore query with retry logic for transient errors.
+        
+        Args:
+            query: Firestore query object
+            max_retries: Maximum number of retry attempts (default: 3)
+            
+        Returns:
+            Query results
+            
+        Raises:
+            Exception: If all retries fail
+        """
+        import random
+        from google.api_core import exceptions as gcp_exceptions
+        
+        for attempt in range(max_retries + 1):
+            try:
+                return query.get()
+            except Exception as e:
+                error_str = str(e)
+                error_lower = error_str.lower()
+                
+                # Check if this is a transient error that should be retried
+                is_transient = (
+                    "stream removed" in error_lower or
+                    "ssl" in error_lower or
+                    "decryption error" in error_lower or
+                    "corruption detected" in error_lower or
+                    "connection" in error_lower or
+                    isinstance(e, gcp_exceptions.ServiceUnavailable) or
+                    isinstance(e, gcp_exceptions.DeadlineExceeded) or
+                    isinstance(e, gcp_exceptions.InternalServerError)
+                )
+                
+                if is_transient and attempt < max_retries:
+                    # Exponential backoff with jitter
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0.1, 0.5)
+                    delay = base_delay + jitter
+                    
+                    logger.warning(
+                        f"Transient Firestore error (attempt {attempt + 1}/{max_retries + 1}): {error_str[:200]}. "
+                        f"Retrying in {delay:.2f} seconds..."
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Not a transient error or max retries exceeded
+                    logger.error(f"Firestore query failed after {attempt + 1} attempts: {error_str}")
+                    raise
     
     def save_conversation(self):
         """DEPRECATED: Save conversation to files collection.

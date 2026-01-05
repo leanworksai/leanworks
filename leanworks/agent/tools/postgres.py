@@ -72,6 +72,7 @@ class PostgresTool:
         'project_comments',
         'project_members',
         'task_comments',
+        'events',
     ]
     
     # Comprehensive table descriptions to help the agent understand when to use each table
@@ -86,6 +87,7 @@ class PostgresTool:
             'Stores all tasks and action items within projects. '
             'Contains task details including status, priority, assignments, due dates, and progress tracking. '
             'Tasks are linked to projects via project_id and to users via assignee_id (email). '
+            'Note: When creating/updating tasks, assignee can be specified by display name (e.g., "John Doe") or email address. '
             'This is the primary table for task management queries.'
         ),
         'task_progress_updates': (
@@ -132,6 +134,12 @@ class PostgresTool:
         'task_comments': (
             'Stores comments and discussions on individual tasks. '
             'Each comment is linked to a task via task_id and includes comment text, author info, and date.'
+        ),
+        'events': (
+            'Stores calendar events and meetings for users. '
+            'Contains event details including title, description, start/end dates, location, attendees, and visibility settings. '
+            'Use this table to query user calendars, check availability, find meeting times, and understand scheduling conflicts. '
+            'Events can be all-day or have specific start/end times. Attendees are stored as a JSONB array of user emails.'
         ),
     }
     
@@ -571,6 +579,7 @@ class PostgresTool:
         - "project_comments": Comments on projects, project discussions, project feedback
         - "project_members": Project membership, who is assigned to projects, project collaborators
         - "task_comments": Comments on tasks, task discussions, task feedback
+        - "events": Calendar events, meetings, user availability, scheduling information
         
         Important Notes:
         - ALWAYS read the table Description in the schemas below to understand when to use each table
@@ -651,7 +660,7 @@ class PostgresTool:
         - description (optional): Task description
         - projectId (optional): Project ID (UUID)
         - projectName (optional): Project name (fallback if projectId not provided)
-        - assigneeId (optional): Assignee email
+        - assigneeId (optional): Assignee display name (e.g., "John Doe") or email address
         - status (optional): Task status - one of 'todo', 'in-progress', 'review', 'completed', 'blocked' (default: 'todo')
         - priority (optional): Task priority - one of 'low', 'medium', 'high', 'urgent' (default: 'medium')
         - dueDate (optional): Due date in ISO format (YYYY-MM-DD) or DATE
@@ -689,7 +698,7 @@ class PostgresTool:
                     },
                     "assigneeId": {
                         "type": "string",
-                        "description": "Assignee email address"
+                        "description": "Assignee display name (e.g., 'John Doe') or email address"
                     },
                     "status": {
                         "type": "string",
@@ -781,13 +790,17 @@ class PostgresTool:
                     return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
                 visible_to_members_array = [email.lower() for email in visibleToMembers]
             
-            # Look up assignee name/avatar if assigneeId provided
+            # Resolve assignee (display name or email) to email, name, and avatar
+            final_assignee_email = None
             final_assignee = None
             final_assignee_avatar = None
             if assigneeId:
-                assignee_name, assignee_avatar = self._lookup_user_info(assigneeId)
-                final_assignee = assignee_name or assigneeId
-                final_assignee_avatar = assignee_avatar or assigneeId[0].upper()
+                assignee_email, assignee_name, assignee_avatar = self._resolve_assignee(assigneeId)
+                if not assignee_email:
+                    return {"error": f"Assignee not found: {assigneeId}. Please use display name (e.g., 'John Doe') or email address."}
+                final_assignee_email = assignee_email
+                final_assignee = assignee_name
+                final_assignee_avatar = assignee_avatar
             
             # Look up project name if projectId provided but projectName not
             final_project_name = projectName
@@ -815,7 +828,7 @@ class PostgresTool:
                     description,
                     projectId,
                     final_project_name,
-                    assigneeId.lower() if assigneeId else None,
+                    final_assignee_email,
                     final_assignee,
                     final_assignee_avatar,
                     status,
@@ -836,7 +849,8 @@ class PostgresTool:
                 "title": title,
                 "description": description,
                 "projectId": projectId,
-                "assigneeId": assigneeId,
+                "assigneeId": final_assignee_email,
+                "assigneeName": final_assignee,
                 "status": status,
                 "priority": priority,
                 "created_by": AI_AGENT_ID
@@ -856,15 +870,13 @@ class PostgresTool:
         description = f"""
         Update an existing task in the tasks table for org `{self.org_slug}`.
         
-        This tool can only update tasks that were created by the AI agent 'lean' (created_by = 'lean@leanworks.ai').
-        
         Parameters:
         - taskId (required): Task ID to update
         - title (optional): Update title
         - description (optional): Update description
         - status (optional): Update status - one of 'todo', 'in-progress', 'review', 'completed', 'blocked'
         - priority (optional): Update priority - one of 'low', 'medium', 'high', 'urgent'
-        - assigneeId (optional): Update assignee email
+        - assigneeId (optional): Update assignee display name (e.g., "John Doe") or email address
         - projectId (optional): Update project ID
         - dueDate (optional): Update due date (ISO format YYYY-MM-DD)
         - tags (optional): Update tags array
@@ -908,7 +920,7 @@ class PostgresTool:
                     },
                     "assigneeId": {
                         "type": "string",
-                        "description": "Update assignee email"
+                        "description": "Update assignee display name (e.g., 'John Doe') or email address"
                     },
                     "projectId": {
                         "type": "string",
@@ -991,19 +1003,15 @@ class PostgresTool:
             
             conn = self.pool.getconn()
             with conn.cursor() as cursor:
-                # Check if task exists and was created by AI agent
+                # Check if task exists
                 cursor.execute(
-                    "SELECT created_by FROM tasks WHERE id = %s",
+                    "SELECT id FROM tasks WHERE id = %s",
                     (taskId,)
                 )
                 task_check = cursor.fetchone()
                 
                 if not task_check:
                     return {"error": "Task not found"}
-                
-                task_creator = task_check.get('created_by', '').lower()
-                if task_creator != AI_AGENT_ID.lower():
-                    return {"error": f"Only tasks created by {AI_AGENT_ID} can be updated by this tool"}
                 
                 # Build dynamic UPDATE query
                 set_clauses = []
@@ -1056,16 +1064,16 @@ class PostgresTool:
                     value = updates_dict.get(key)
                     if value is not None:
                         if key == 'assigneeId':
-                            # Look up assignee name/avatar
-                            assignee_name, assignee_avatar = self._lookup_user_info(value)
-                            final_assignee = assignee_name or value
-                            final_assignee_avatar = assignee_avatar or value[0].upper()
+                            # Resolve assignee (display name or email) to email, name, and avatar
+                            assignee_email, assignee_name, assignee_avatar = self._resolve_assignee(value)
+                            if not assignee_email:
+                                return {"error": f"Assignee not found: {value}. Please use display name (e.g., 'John Doe') or email address."}
                             set_clauses.append("assignee_id = %s")
-                            values.append(value.lower())
+                            values.append(assignee_email)
                             set_clauses.append("assignee_name = %s")
-                            values.append(final_assignee)
+                            values.append(assignee_name)
                             set_clauses.append("assignee_avatar = %s")
-                            values.append(final_assignee_avatar)
+                            values.append(assignee_avatar)
                         elif key == 'projectId':
                             # Look up project name
                             project_name = self._lookup_project_name(value)
@@ -1142,6 +1150,95 @@ class PostgresTool:
         finally:
             if conn:
                 self.pool.putconn(conn)
+    
+    def _lookup_email_from_display_name(self, display_name: str) -> Optional[str]:
+        """
+        Look up user email from display name (first_name + last_name).
+        
+        Args:
+            display_name: User display name (e.g., "John Doe" or "John")
+            
+        Returns:
+            User email address or None if not found or ambiguous
+        """
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Split display name into parts
+                name_parts = display_name.strip().split()
+                
+                if len(name_parts) == 0:
+                    return None
+                
+                # Try exact match first (first_name + last_name)
+                if len(name_parts) >= 2:
+                    first_name = name_parts[0]
+                    last_name = ' '.join(name_parts[1:])  # Handle multi-word last names
+                    cursor.execute(
+                        "SELECT email FROM users WHERE LOWER(first_name) = LOWER(%s) AND LOWER(last_name) = LOWER(%s)",
+                        (first_name, last_name)
+                    )
+                    results = cursor.fetchall()
+                    if len(results) == 1:
+                        return results[0].get('email')
+                    elif len(results) > 1:
+                        # Multiple users with same name - return first one but log warning
+                        logger.warning(f"Multiple users found with display name '{display_name}', using first match: {results[0].get('email')}")
+                        return results[0].get('email')
+                
+                # Try first name only (less precise)
+                if len(name_parts) == 1:
+                    first_name = name_parts[0]
+                    cursor.execute(
+                        "SELECT email FROM users WHERE LOWER(first_name) = LOWER(%s)",
+                        (first_name,)
+                    )
+                    results = cursor.fetchall()
+                    if len(results) == 1:
+                        return results[0].get('email')
+                    elif len(results) > 1:
+                        # Multiple users with same first name - return first one but log warning
+                        logger.warning(f"Multiple users found with first name '{first_name}', using first match: {results[0].get('email')}")
+                        return results[0].get('email')
+                
+                return None
+        except Exception as e:
+            logger.error(f"Error looking up email from display name: {e}")
+            return None
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def _resolve_assignee(self, assignee_input: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Resolve assignee input (display name or email) to email, display name, and avatar.
+        
+        Args:
+            assignee_input: User display name or email address
+            
+        Returns:
+            Tuple of (email, display_name, avatar) or (None, None, None) if not found
+        """
+        # Check if input looks like an email
+        if '@' in assignee_input:
+            # It's an email, look up name and avatar
+            email = assignee_input.lower()
+            display_name, avatar = self._lookup_user_info(email)
+            if display_name:
+                return email, display_name, avatar
+            else:
+                # Email not found, return email as fallback
+                return email, email, email[0].upper()
+        else:
+            # It's a display name, look up email
+            email = self._lookup_email_from_display_name(assignee_input)
+            if email:
+                display_name, avatar = self._lookup_user_info(email)
+                return email, display_name or assignee_input, avatar or assignee_input[0].upper()
+            else:
+                # Display name not found
+                return None, None, None
     
     def _lookup_project_name(self, project_id: str) -> Optional[str]:
         """
@@ -1255,6 +1352,199 @@ class PostgresTool:
         except Exception as e:
             logger.error(f"Error checking team membership: {e}")
             return False
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    @property
+    def list_events_property(self):
+        description = f"""
+        List calendar events for users to understand their availability and schedule.
+        
+        This tool queries the events table to retrieve calendar events, meetings, and scheduled activities.
+        Use this to check user availability, find free time slots, understand scheduling conflicts, and see upcoming meetings.
+        
+        Parameters:
+        - userEmail (optional): Filter events by user email (as attendee or creator). If not provided, returns all events.
+        - startDate (optional): Filter events starting from this date (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). Defaults to today.
+        - endDate (optional): Filter events ending before this date (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). If not provided, returns events up to 30 days from startDate.
+        - limit (optional): Maximum number of events to return (default: 100, max: 500)
+        
+        Returns:
+        - Success: List of event dictionaries with fields: id, title, description, start_date, end_date, all_day, location, attendees, created_by, visibility
+        - Error: Dictionary with error message
+        
+        Example Use Cases:
+        - Check if a user is available at a specific time
+        - Find free time slots for scheduling meetings
+        - List upcoming meetings for a user
+        - Check for scheduling conflicts
+        - Understand team member availability
+        """
+        return {
+            "type": "custom",
+            "name": "list_events",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "userEmail": {
+                        "type": "string",
+                        "description": "User email to filter events (as attendee or creator). If not provided, returns all events."
+                    },
+                    "startDate": {
+                        "type": "string",
+                        "description": "Start date filter (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). Defaults to today."
+                    },
+                    "endDate": {
+                        "type": "string",
+                        "description": "End date filter (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). Defaults to 30 days from startDate."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of events to return (default: 100, max: 500)",
+                        "minimum": 1,
+                        "maximum": 500
+                    }
+                }
+            }
+        }
+    
+    def list_events(
+        self,
+        userEmail: Optional[str] = None,
+        startDate: Optional[str] = None,
+        endDate: Optional[str] = None,
+        limit: int = 100,
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        List calendar events for users to understand availability.
+        
+        Args:
+            userEmail: User email to filter events (as attendee or creator)
+            startDate: Start date filter (ISO format)
+            endDate: End date filter (ISO format)
+            limit: Maximum number of events to return (default: 100, max: 500)
+            
+        Returns:
+            List of event dictionaries, or error dictionary
+        """
+        conn = None
+        try:
+            # Validate limit
+            if limit < 1:
+                limit = 100
+            if limit > 500:
+                limit = 500
+            
+            # Parse dates
+            today = datetime.datetime.now().date()
+            start_datetime = None
+            end_datetime = None
+            
+            if startDate:
+                try:
+                    # Try parsing as ISO datetime first
+                    if 'T' in startDate:
+                        start_datetime = datetime.datetime.fromisoformat(startDate.replace('Z', '+00:00'))
+                    else:
+                        # Parse as date and set to start of day
+                        start_datetime = datetime.datetime.combine(
+                            datetime.datetime.strptime(startDate, '%Y-%m-%d').date(),
+                            datetime.time.min
+                        )
+                except ValueError:
+                    return {"error": f"Invalid startDate format: {startDate}. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"}
+            else:
+                # Default to today
+                start_datetime = datetime.datetime.combine(today, datetime.time.min)
+            
+            if endDate:
+                try:
+                    # Try parsing as ISO datetime first
+                    if 'T' in endDate:
+                        end_datetime = datetime.datetime.fromisoformat(endDate.replace('Z', '+00:00'))
+                    else:
+                        # Parse as date and set to end of day
+                        end_datetime = datetime.datetime.combine(
+                            datetime.datetime.strptime(endDate, '%Y-%m-%d').date(),
+                            datetime.time.max
+                        )
+                except ValueError:
+                    return {"error": f"Invalid endDate format: {endDate}. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"}
+            else:
+                # Default to 30 days from startDate
+                end_datetime = start_datetime + datetime.timedelta(days=30)
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Build query
+                query_parts = ["SELECT * FROM events WHERE 1=1"]
+                params = []
+                
+                # Add date filters
+                query_parts.append("AND start_date >= %s")
+                params.append(start_datetime)
+                query_parts.append("AND end_date <= %s")
+                params.append(end_datetime)
+                
+                # Add user filter (check both attendees array and created_by)
+                if userEmail:
+                    user_email_lower = userEmail.lower()
+                    query_parts.append("AND (created_by = %s OR attendees @> %s::jsonb)")
+                    params.append(user_email_lower)
+                    # Create JSONB array with single email
+                    params.append(json.dumps([user_email_lower]))
+                
+                # Order by start_date ascending
+                query_parts.append("ORDER BY start_date ASC")
+                
+                # Add limit
+                query_parts.append("LIMIT %s")
+                params.append(limit)
+                
+                query = " ".join(query_parts)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                # Convert to list of dicts
+                events = []
+                for row in rows:
+                    event = dict(row)
+                    # Parse attendees JSONB if it's a string
+                    if 'attendees' in event:
+                        attendees = event['attendees']
+                        if isinstance(attendees, str):
+                            try:
+                                attendees = json.loads(attendees)
+                            except:
+                                attendees = []
+                        elif not isinstance(attendees, list):
+                            attendees = []
+                        event['attendees'] = attendees
+                    
+                    # Parse visible_to_members JSONB if it's a string
+                    if 'visible_to_members' in event:
+                        visible_to_members = event['visible_to_members']
+                        if isinstance(visible_to_members, str):
+                            try:
+                                visible_to_members = json.loads(visible_to_members)
+                            except:
+                                visible_to_members = []
+                        elif not isinstance(visible_to_members, list):
+                            visible_to_members = []
+                        event['visible_to_members'] = visible_to_members
+                    
+                    events.append(event)
+                
+                logger.info(f"Listed {len(events)} events for userEmail={userEmail}, startDate={startDate}, endDate={endDate}")
+                return events
+                
+        except Exception as e:
+            logger.error(f"Error listing events: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
         finally:
             if conn:
                 self.pool.putconn(conn)

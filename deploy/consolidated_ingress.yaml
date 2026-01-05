@@ -1,0 +1,68 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: consolidated-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "leanworks-hub-ip"
+    networking.gke.io/managed-certificates: "leanworks-hub-ssl-cert"
+    kubernetes.io/ingress.backend-config: '{"default": "ingress-backendconfig"}'
+spec:
+  ingressClassName: gce
+  rules:
+  - host: "leanworks.ai"
+    http:
+      paths:
+      # Root path
+      - path: /
+        pathType: Exact
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+      # API service paths with /api prefix
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+      # Legacy /ask path (for backward compatibility)
+      - path: /ask
+        pathType: Exact
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+  - host: "hub.leanworks.ai"
+    http:
+      paths:
+      # Root path
+      - path: /
+        pathType: Exact
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+      # API service paths with /api prefix
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+      # Legacy /ask path (for backward compatibility)
+      - path: /ask
+        pathType: Exact
+        backend:
+          service:
+            name: ask-api
+            port:
+              number: 80
+ 
+

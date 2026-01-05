@@ -305,6 +305,14 @@ class ChatAgent:
         # Extract the actual user message from embedded conversation history (if present)
         actual_user_message = self._extract_user_message_from_conversation_history(user_message)
         
+        # Log the user query with context
+        logger.info(f"User query received - user_id: {self.user_id}, session_id: {self.session_id}, org_slug: {self.org_slug}")
+        logger.info(f"User query: {actual_user_message}")
+        
+        # Log cited context if provided
+        if cited_context:
+            logger.info(f"Cited context provided: {cited_context}")
+        
         # Load conversation history from messages collection (source of truth for all chat types)
         # This ensures we have the latest context from the channel before processing the new message
         if self.session_id:
@@ -333,6 +341,8 @@ class ChatAgent:
         user_message = actual_user_message
         if cited_context:
             user_message = f"<cited_context>{cited_context}</cited_context>\n{user_message}"
+            # Log the final message with cited context
+            logger.info(f"Final user message with cited context: {user_message}")
         
         # Create user message object
         user_message_obj = {
@@ -1040,12 +1050,21 @@ If there's not enough information to make meaningful updates, return the current
                             # Control characters (0x00-0x1F) in JSON strings must be escaped
                             # Remove unescaped control characters that cause parsing errors
                             def clean_json_text(text):
-                                # Remove unescaped control characters (0x00-0x1F)
-                                # These include: null (\x00), bell (\x07), backspace (\x08), 
-                                # vertical tab (\x0B), form feed (\x0C), etc.
-                                # Note: \n (\x0A), \r (\x0D), \t (\x09) are allowed if escaped
-                                # We'll remove unescaped control chars that aren't part of \n, \r, \t
+                                # First, try to escape control characters in string values
+                                # This is more robust than just removing them
+                                import json as json_module
+                                
+                                # Remove unescaped control characters (0x00-0x1F) except newline, carriage return, tab
+                                # These are the most common problematic ones
                                 cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', text)
+                                
+                                # Also try to fix common JSON issues:
+                                # 1. Remove trailing commas before closing braces/brackets
+                                cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+                                
+                                # 2. Fix unescaped quotes in string values (basic attempt)
+                                # This is tricky, so we'll be conservative
+                                
                                 return cleaned
                             
                             # Clean and retry
@@ -1053,9 +1072,32 @@ If there's not enough information to make meaningful updates, return the current
                             try:
                                 analysis_result = json.loads(json_text_cleaned)
                             except json.JSONDecodeError as retry_error:
-                                # If cleaning still fails, log and skip this update
-                                logger.warning(f"Failed to parse profile analysis JSON even after cleaning: {retry_error}. Original error: {json_error}")
-                                return  # Skip profile update if JSON can't be parsed
+                                # Try one more time with a more aggressive approach: extract JSON using balanced braces
+                                try:
+                                    # Find the first { and then match balanced braces
+                                    start_idx = json_text_cleaned.find('{')
+                                    if start_idx >= 0:
+                                        brace_count = 0
+                                        end_idx = start_idx
+                                        for i in range(start_idx, len(json_text_cleaned)):
+                                            if json_text_cleaned[i] == '{':
+                                                brace_count += 1
+                                            elif json_text_cleaned[i] == '}':
+                                                brace_count -= 1
+                                                if brace_count == 0:
+                                                    end_idx = i + 1
+                                                    break
+                                        if brace_count == 0:
+                                            extracted_json = json_text_cleaned[start_idx:end_idx]
+                                            analysis_result = json.loads(extracted_json)
+                                        else:
+                                            raise retry_error
+                                    else:
+                                        raise retry_error
+                                except (json.JSONDecodeError, AttributeError, ValueError):
+                                    # If all attempts fail, log and skip this update
+                                    logger.warning(f"Failed to parse profile analysis JSON even after cleaning: {retry_error}. Original error: {json_error}")
+                                    return  # Skip profile update if JSON can't be parsed
                         
                         new_responsibilities = analysis_result.get("responsibilities", current_responsibilities)
                         new_work_style = analysis_result.get("work_style", current_work_style)

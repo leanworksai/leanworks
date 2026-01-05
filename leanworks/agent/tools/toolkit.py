@@ -869,6 +869,7 @@ class ToolUse:
                     self.postgres_tool.query_postgres_property,
                     self.postgres_tool.create_task_property,
                     self.postgres_tool.update_task_property,
+                    self.postgres_tool.list_events_property,
                 ])
                 logger.info("PostgreSQL tools added to tools list (lazy)")
             
@@ -877,6 +878,8 @@ class ToolUse:
                 self._tools_cache.extend([
                     self.doc_management_tool.create_doc_property,
                     self.doc_management_tool.update_doc_property,
+                    self.doc_management_tool.get_doc_property,
+                    self.doc_management_tool.list_docs_property,
                     self.doc_management_tool.get_doc_markdown_path_property,
                     self.doc_management_tool.create_doc_from_markdown_file_property,
                     self.doc_management_tool.update_doc_from_markdown_file_property,
@@ -1021,6 +1024,7 @@ class ToolUse:
                     "query_postgres": self.postgres_tool.query_postgres,
                     "create_task": self.postgres_tool.create_task,
                     "update_task": self.postgres_tool.update_task,
+                    "list_events": self.postgres_tool.list_events,
                 })
                 logger.info("PostgreSQL functions added to function_map (lazy)")
             
@@ -1029,6 +1033,8 @@ class ToolUse:
                 self._function_map_cache.update({
                     "create_doc": self.doc_management_tool.create_doc,
                     "update_doc": self.doc_management_tool.update_doc,
+                    "get_doc": self.doc_management_tool.get_doc,
+                    "list_docs": self.doc_management_tool.list_docs,
                     "get_doc_markdown_path": self.doc_management_tool.get_doc_markdown_path,
                     "create_doc_from_markdown_file": self.doc_management_tool.create_doc_from_markdown_file,
                     "update_doc_from_markdown_file": self.doc_management_tool.update_doc_from_markdown_file,

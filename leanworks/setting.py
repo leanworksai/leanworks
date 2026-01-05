@@ -138,6 +138,13 @@ AGENT_SYSTEM_PROMPT = """
     - Linear tools are used to interact directly with Linear for managing issues, projects, and teams. Use these tools when you need to answer requests specifically related to Linear or when PostgreSQL data may not be enough to answer the question.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
+    - Firestore tools: query_messages, send_message
+      * query_messages: Query chat messages from Firestore (read-only access to messages)
+      * send_message: Send messages to project channels or AI assistant chats. CRITICAL RESTRICTIONS:
+        - Can send to project channels (chatId must start with 'project-')
+        - Can send to AI assistant chats (chatId must start with 'ai-assistant-')
+        - CANNOT send to direct messages (DMs) - chatId starting with 'dm-' is not allowed
+        - When the user asks to send a direct message to someone, respond in the AI assistant chat explaining that you can help compose the message but cannot send DMs directly
     - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. Commands are executed securely in a containerized environment with network isolation, memory limits (256MB), and CPU limits.
     - execute_code tool runs code (currently Python) in a sandboxed environment. Use this for computations, data processing, or running code snippets. Code execution has resource limits and timeouts for security.
     - str_replace_editor (text editor) tool allows reading, writing, and editing text files in a safe directory. Use this to manipulate files, read configuration, or create/edit documents. File operations are restricted to safe directories.
@@ -452,6 +459,23 @@ TABLE_SCHEMAS = """
   - projects (JSONB/ARRAY) - List of project IDs associated with the team
   - leads (JSONB/ARRAY) - List of user emails who are team leads
   - settings (JSONB) - Team-specific settings and configurations
+
+**Table: events**
+  Description: Stores calendar events and meetings for users
+  Primary Key: id field
+  - id (TEXT) - Event ID (primary key)
+  - title (TEXT) - Event title/name
+  - description (TEXT) - Event description/details
+  - start_date (TIMESTAMP) - Event start date and time
+  - end_date (TIMESTAMP) - Event end date and time
+  - all_day (BOOLEAN) - Whether the event is all-day (default: false)
+  - location (TEXT) - Event location
+  - attendees (JSONB/ARRAY) - Array of user emails who are attendees
+  - created_by (TEXT) - Email of the user who created the event
+  - visibility (TEXT) - Visibility setting: 'all_members' or 'specific_members' (default: 'all_members')
+  - visible_to_members (JSONB/ARRAY) - Array of user emails who can see this event (if visibility='specific_members')
+  - created_at (BIGINT) - Creation timestamp in milliseconds
+  - updated_at (TIMESTAMP) - Last update timestamp
 """
 
 def get_tables_and_schemas(dataset_id: str) -> str:

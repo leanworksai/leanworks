@@ -253,8 +253,6 @@ class DocManagementTool:
         description = f"""
         Update an existing document in the docs table for org `{self.org_slug}`.
         
-        This tool can only update documents that are owned by the AI agent 'lean' (owner_email = 'lean@leanworks.ai').
-        
         Parameters:
         - docId (required): Document ID to update
         - title (optional): Update title
@@ -325,6 +323,143 @@ class DocManagementTool:
                 "required": ["docId"]
             }
         }
+    
+    @property
+    def get_doc_property(self):
+        description = f"""
+        Get one or more documents by their IDs from the docs table for org `{self.org_slug}`.
+        
+        This tool retrieves full document content and all properties for the specified document IDs.
+        Use this to read document content when you need the full text, not just a preview.
+        
+        Parameters:
+        - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
+        
+        Returns:
+        - Success: List of document dictionaries with all fields including: id, title, content (full HTML), owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+        - Error: Dictionary with error message
+        
+        Note: Content is returned as HTML. Use get_doc_markdown_path if you need markdown format for editing.
+        
+        Example Use Cases:
+        - Read a specific document's full content
+        - Get multiple documents at once
+        - Retrieve document details and content for analysis
+        """
+        return {
+            "type": "custom",
+            "name": "get_doc",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docIds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of document IDs to retrieve (required). Can contain one or more document IDs."
+                    }
+                },
+                "required": ["docIds"]
+            }
+        }
+    
+    def get_doc(
+        self,
+        docIds: List[str],
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        Get one or more documents by their IDs.
+        
+        Args:
+            docIds: List of document IDs to retrieve
+            
+        Returns:
+            List of document dictionaries with full content, or error dictionary
+        """
+        conn = None
+        try:
+            if not docIds:
+                return {"error": "docIds is required and must be a non-empty array"}
+            
+            if not isinstance(docIds, list):
+                return {"error": "docIds must be an array"}
+            
+            # Limit the number of documents to prevent excessive queries
+            if len(docIds) > 50:
+                return {"error": f"Too many document IDs requested. Maximum is 50, got {len(docIds)}"}
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Build query with IN clause for multiple IDs
+                placeholders = ','.join(['%s'] * len(docIds))
+                query = f"""
+                    SELECT id, title, content, owner_email, project_id, team_id, tags, 
+                           is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+                    FROM docs 
+                    WHERE id IN ({placeholders})
+                """
+                cursor.execute(query, tuple(docIds))
+                rows = cursor.fetchall()
+                
+                # Convert to list of dicts
+                docs = []
+                found_ids = set()
+                for row in rows:
+                    doc = dict(row)
+                    found_ids.add(doc['id'])
+                    
+                    # Parse JSONB fields if they're strings
+                    if 'tags' in doc:
+                        tags_value = doc['tags']
+                        if isinstance(tags_value, str):
+                            try:
+                                tags_value = json.loads(tags_value)
+                            except:
+                                tags_value = []
+                        elif not isinstance(tags_value, list):
+                            tags_value = []
+                        doc['tags'] = tags_value
+                    
+                    if 'visible_to_members' in doc:
+                        visible_to_members = doc['visible_to_members']
+                        if isinstance(visible_to_members, str):
+                            try:
+                                visible_to_members = json.loads(visible_to_members)
+                            except:
+                                visible_to_members = []
+                        elif not isinstance(visible_to_members, list):
+                            visible_to_members = []
+                        doc['visible_to_members'] = visible_to_members
+                    
+                    if 'metadata' in doc:
+                        metadata_value = doc['metadata']
+                        if isinstance(metadata_value, str):
+                            try:
+                                metadata_value = json.loads(metadata_value)
+                            except:
+                                metadata_value = {}
+                        elif not isinstance(metadata_value, dict):
+                            metadata_value = {}
+                        doc['metadata'] = metadata_value
+                    
+                    docs.append(doc)
+                
+                # Check if any requested documents were not found
+                missing_ids = set(docIds) - found_ids
+                if missing_ids:
+                    logger.warning(f"Some document IDs were not found: {missing_ids}")
+                
+                logger.info(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
+                return docs
+                
+        except Exception as e:
+            logger.error(f"Error getting documents: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
     
     @property
     def get_doc_markdown_path_property(self):
@@ -441,8 +576,6 @@ class DocManagementTool:
         converts it to HTML, and updates the document in the database. The temporary file is
         cleaned up after the operation.
         
-        This tool can only update documents that are owned by the AI agent 'lean' (owner_email = 'lean@leanworks.ai').
-        
         Parameters:
         - docId (required): Document ID to update
         - file_path (required): Path to markdown file
@@ -553,19 +686,15 @@ class DocManagementTool:
             
             conn = self.pool.getconn()
             with conn.cursor() as cursor:
-                # Check if doc exists and is owned by AI agent
+                # Check if doc exists
                 cursor.execute(
-                    "SELECT id, owner_email FROM docs WHERE id = %s",
+                    "SELECT id FROM docs WHERE id = %s",
                     (docId,)
                 )
                 doc_check = cursor.fetchone()
                 
                 if not doc_check:
                     return {"error": "Document not found"}
-                
-                doc_owner = doc_check.get('owner_email', '').lower()
-                if doc_owner != AI_AGENT_ID.lower():
-                    return {"error": f"Only documents owned by {AI_AGENT_ID} can be updated by this tool"}
                 
                 # Build dynamic UPDATE query
                 set_clauses = []
@@ -1052,4 +1181,251 @@ class DocManagementTool:
         else:
             # Looks like markdown, convert to HTML
             return self.markdown_to_html(content)
+    
+    @property
+    def list_docs_property(self):
+        description = f"""
+        List documents from the docs table for org `{self.org_slug}`.
+        
+        This tool queries the docs table to retrieve documents with optional filtering.
+        Use this to find documents by project, team, owner, tags, or other criteria.
+        
+        Parameters:
+        - projectId (optional): Filter documents by project ID
+        - teamId (optional): Filter documents by team ID
+        - ownerEmail (optional): Filter documents by owner email
+        - tags (optional): Filter documents that contain any of these tags (array of strings)
+        - isPinned (optional): Filter by pinned status (true/false)
+        - visibility (optional): Filter by visibility ('all_members' or 'specific_members')
+        - searchTitle (optional): Search for documents with title containing this text (case-insensitive)
+        - limit (optional): Maximum number of documents to return (default: 50, max: 200)
+        - orderBy (optional): Order results by 'created_at' or 'updated_at' (default: 'created_at')
+        - orderDirection (optional): 'asc' or 'desc' (default: 'desc' for newest first)
+        
+        Returns:
+        - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, is_pinned, visibility, created_at, updated_at
+        - Note: Full content is not included - only a preview. Use get_doc_markdown_path or query_postgres to get full content if needed.
+        - Error: Dictionary with error message
+        
+        Example Use Cases:
+        - List all documents in a project
+        - Find documents by specific tags
+        - List pinned documents
+        - Search for documents by title
+        - Get recent documents
+        """
+        return {
+            "type": "custom",
+            "name": "list_docs",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "projectId": {
+                        "type": "string",
+                        "description": "Filter documents by project ID"
+                    },
+                    "teamId": {
+                        "type": "string",
+                        "description": "Filter documents by team ID"
+                    },
+                    "ownerEmail": {
+                        "type": "string",
+                        "description": "Filter documents by owner email"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter documents that contain any of these tags"
+                    },
+                    "isPinned": {
+                        "type": "boolean",
+                        "description": "Filter by pinned status"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["all_members", "specific_members"],
+                        "description": "Filter by visibility"
+                    },
+                    "searchTitle": {
+                        "type": "string",
+                        "description": "Search for documents with title containing this text (case-insensitive)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of documents to return (default: 50, max: 200)",
+                        "minimum": 1,
+                        "maximum": 200
+                    },
+                    "orderBy": {
+                        "type": "string",
+                        "enum": ["created_at", "updated_at"],
+                        "description": "Order results by field (default: 'created_at')"
+                    },
+                    "orderDirection": {
+                        "type": "string",
+                        "enum": ["asc", "desc"],
+                        "description": "Order direction (default: 'desc' for newest first)"
+                    }
+                }
+            }
+        }
+    
+    def list_docs(
+        self,
+        projectId: Optional[str] = None,
+        teamId: Optional[str] = None,
+        ownerEmail: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        isPinned: Optional[bool] = None,
+        visibility: Optional[str] = None,
+        searchTitle: Optional[str] = None,
+        limit: int = 50,
+        orderBy: str = "created_at",
+        orderDirection: str = "desc",
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        List documents from the docs table with optional filtering.
+        
+        Args:
+            projectId: Filter by project ID
+            teamId: Filter by team ID
+            ownerEmail: Filter by owner email
+            tags: Filter by tags (documents containing any of these tags)
+            isPinned: Filter by pinned status
+            visibility: Filter by visibility
+            searchTitle: Search title text (case-insensitive)
+            limit: Maximum number of documents (default: 50, max: 200)
+            orderBy: Order by field ('created_at' or 'updated_at')
+            orderDirection: Order direction ('asc' or 'desc')
+            
+        Returns:
+            List of document dictionaries, or error dictionary
+        """
+        conn = None
+        try:
+            # Validate limit
+            if limit < 1:
+                limit = 50
+            if limit > 200:
+                limit = 200
+            
+            # Validate orderBy
+            valid_order_by = ['created_at', 'updated_at']
+            if orderBy not in valid_order_by:
+                orderBy = 'created_at'
+            
+            # Validate orderDirection
+            valid_directions = ['asc', 'desc']
+            if orderDirection not in valid_directions:
+                orderDirection = 'desc'
+            
+            conn = self.pool.getconn()
+            with conn.cursor() as cursor:
+                # Build query - include content preview (first 200 characters), not full content
+                # Use LEFT() function to get first 200 characters of content
+                query_parts = ["SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"]
+                params = []
+                
+                # Add filters
+                if projectId:
+                    query_parts.append("AND project_id = %s")
+                    params.append(projectId)
+                
+                if teamId:
+                    query_parts.append("AND team_id = %s")
+                    params.append(teamId)
+                
+                if ownerEmail:
+                    query_parts.append("AND owner_email = %s")
+                    params.append(ownerEmail.lower())
+                
+                if isPinned is not None:
+                    query_parts.append("AND is_pinned = %s")
+                    params.append(isPinned)
+                
+                if visibility:
+                    query_parts.append("AND visibility = %s")
+                    params.append(visibility)
+                
+                if searchTitle:
+                    query_parts.append("AND LOWER(title) LIKE %s")
+                    params.append(f"%{searchTitle.lower()}%")
+                
+                if tags:
+                    # Filter documents that contain any of the specified tags
+                    # Use JSONB containment operator @>
+                    tag_conditions = []
+                    for tag in tags:
+                        tag_conditions.append("tags @> %s::jsonb")
+                        params.append(json.dumps([tag]))
+                    if tag_conditions:
+                        query_parts.append(f"AND ({' OR '.join(tag_conditions)})")
+                
+                # Add ordering
+                query_parts.append(f"ORDER BY {orderBy} {orderDirection.upper()}")
+                
+                # Add limit
+                query_parts.append("LIMIT %s")
+                params.append(limit)
+                
+                query = " ".join(query_parts)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                # Convert to list of dicts
+                docs = []
+                for row in rows:
+                    doc = dict(row)
+                    
+                    # Clean up content preview - strip HTML tags and truncate if needed
+                    if 'content_preview' in doc and doc['content_preview']:
+                        content_preview = doc['content_preview']
+                        # Strip HTML tags for a cleaner preview
+                        content_preview = re.sub(r'<[^>]+>', '', content_preview)
+                        # Remove extra whitespace
+                        content_preview = ' '.join(content_preview.split())
+                        # Truncate to 200 characters if longer
+                        if len(content_preview) > 200:
+                            content_preview = content_preview[:200] + '...'
+                        doc['content_preview'] = content_preview
+                    else:
+                        doc['content_preview'] = ''
+                    
+                    # Parse JSONB fields if they're strings
+                    if 'tags' in doc:
+                        tags_value = doc['tags']
+                        if isinstance(tags_value, str):
+                            try:
+                                tags_value = json.loads(tags_value)
+                            except:
+                                tags_value = []
+                        elif not isinstance(tags_value, list):
+                            tags_value = []
+                        doc['tags'] = tags_value
+                    
+                    if 'visible_to_members' in doc:
+                        visible_to_members = doc['visible_to_members']
+                        if isinstance(visible_to_members, str):
+                            try:
+                                visible_to_members = json.loads(visible_to_members)
+                            except:
+                                visible_to_members = []
+                        elif not isinstance(visible_to_members, list):
+                            visible_to_members = []
+                        doc['visible_to_members'] = visible_to_members
+                    
+                    docs.append(doc)
+                
+                logger.info(f"Listed {len(docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, isPinned={isPinned}, searchTitle={searchTitle}")
+                return docs
+                
+        except Exception as e:
+            logger.error(f"Error listing documents: {str(e)}")
+            error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+            return {"error": error_msg}
+        finally:
+            if conn:
+                self.pool.putconn(conn)
 

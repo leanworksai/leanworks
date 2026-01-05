@@ -1,0 +1,55 @@
+steps:
+  # Step 1: Build the Docker image (no GitHub token needed since leanworks is in the same repo)
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Building Docker image..."
+        docker build \
+          -t ${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG} \
+          -f deploy/Dockerfile \
+          .
+    id: 'build-image'
+
+  # Step 2: Push the Docker image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG}'
+    id: 'push-image'
+
+  # Step 3: Tag with 'latest' for convenience
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'tag'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG}'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
+    id: 'tag-latest'
+
+  # Step 4: Push the 'latest' tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
+    id: 'push-latest'
+
+# Store the built image in Artifact Registry
+images:
+  - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG}'
+  - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
+
+# Build options
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+# Substitutions that will be provided when triggering the build
+substitutions:
+  _IMAGE_TAG: 'latest'
+  _REGISTRY: 'us-west1-docker.pkg.dev'
+  _REPO_NAME: 'leanworks-docker-images'
+  _IMAGE_NAME: 'ask-api'
+
+# Timeout for the entire build
+timeout: '1200s'

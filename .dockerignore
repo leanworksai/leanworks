@@ -1,0 +1,44 @@
+# Exclude sensitive files from Docker image
+gcp_credential.json
+*.json
+.env
+.env.local
+
+# Exclude development files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Exclude git files
+.git/
+.gitignore
+
+# Exclude test files
+tests/
+*.test.py
+
+# Exclude documentation
+*.md
+docs/
+
+# Exclude deployment scripts (not needed in image)
+deploy.sh
+cloudbuild.yaml
+

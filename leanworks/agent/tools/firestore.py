@@ -3,8 +3,16 @@ from typing import List, Dict, Any, Optional
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from datetime import datetime
+import json
+import re
+from threading import Lock
 
 logger = logging.getLogger(__name__)
+
+# Cache for project members (key: (org_slug, project_id))
+_project_members_cache: Dict[tuple, tuple] = {}  # (org_slug, project_id) -> (members_list, timestamp)
+_cache_lock = Lock()
+_cache_ttl = 300  # 5 minutes
 
 # AI Agent identifier - all messages are sent as 'lean'
 AI_AGENT_ID = 'lean@leanworks.ai'
@@ -20,7 +28,7 @@ class FirestoreTool:
     messages stored in orgs/{orgSlug}/messages collection.
     """
     
-    def __init__(self, firestore_client, org_slug: str, user_id: str = None):
+    def __init__(self, firestore_client, org_slug: str, user_id: str = None, secret_manager_client=None):
         """
         Initialize FirestoreTool with Firestore client and org context.
         
@@ -28,10 +36,12 @@ class FirestoreTool:
             firestore_client: Firestore client instance
             org_slug: Organization slug (e.g., 'leanworks.ai')
             user_id: Optional user ID for filtering user-specific data
+            secret_manager_client: Optional Secret Manager client for database access
         """
         self.firestore_client = firestore_client
         self.org_slug = org_slug
         self.user_id = user_id
+        self.secret_manager_client = secret_manager_client
     
     @property
     def query_messages_property(self):
@@ -250,29 +260,42 @@ class FirestoreTool:
     @property
     def send_message_property(self):
         description = f"""
-        Send a message to a chat channel in Firestore for org `{self.org_slug}`.
+        Send a message to a project channel in Firestore for org `{self.org_slug}`.
         
         This tool sends messages that are attributed to the AI agent 'lean'. All messages sent through this tool will have userId='lean@leanworks.ai', memberName='Lean', and memberAvatar='L'.
+        
+        IMPORTANT RESTRICTIONS:
+        - This tool can send messages to project channels (chatId starting with 'project-') and AI assistant chats (chatId starting with 'ai-assistant-')
+        - This tool CANNOT send messages to direct messages (DMs) - chatId starting with 'dm-' is not allowed
+        - For direct messages: The AI should respond in the AI assistant chat instead of using this tool
         
         Message Structure:
         - chatId: The chat/conversation ID (required)
           - Format: 'project-{{projectId}}' for project channels
           - Format: 'ai-assistant-{{userId}}' for AI assistant conversations
-          - Format: 'dm-{{email1}}-{{email2}}' for direct messages
+          - DO NOT use 'dm-{{email1}}-{{email2}}' - DMs are not allowed
         - content: Message text content (required)
         - projectId: Project ID if sending to project channel (optional, extracted from chatId if chatId starts with 'project-')
         - role: Message role ('user' or 'assistant', default: 'user')
         - citedContext: Optional cited context information
         - imageUrls: Optional array of image URLs
         
+        Usage Guidelines:
+        - Use this tool to send messages to project channels or AI assistant chats
+        - If the user asks to send a direct message to someone, respond in the AI assistant chat explaining that you can help compose the message but cannot send DMs directly
+        
+        Mentions:
+        - Mentions can be included naturally in the message content using the format @user@example.com (e.g., "Hey @user@example.com, can you review this?")
+        - Mentions are automatically extracted from the content and validated
+        - Mentions are only allowed in project channels (chatId starting with 'project-')
+        - All mentioned users must be project members
+        
         Authorization:
         - For project channels: User must be a project member or owner (verified by caller)
-        - For AI assistant: Already handled by existing security
-        - For DMs: Both users must be in same org (verified by caller)
         
         Returns:
-        - Success: Dictionary with message id and created message
-        - Error: Dictionary with error message
+        - Success: Dictionary with {{"success": true, "messageId": "...", "message": {{...}}, "status": "Message sent successfully"}}
+        - Error: Dictionary with {{"error": "error message"}}
         """
         return {
             "type": "custom",
@@ -283,7 +306,7 @@ class FirestoreTool:
                 "properties": {
                     "chatId": {
                         "type": "string",
-                        "description": "Chat ID (required) - format: 'project-{projectId}', 'ai-assistant-{userId}', or 'dm-{email1}-{email2}'"
+                        "description": "Chat ID (required) - format: 'project-{projectId}' for project channels, or 'ai-assistant-{userId}' for AI assistant chats. DO NOT use 'dm-' format - DMs are not allowed."
                     },
                     "content": {
                         "type": "string",
@@ -312,6 +335,154 @@ class FirestoreTool:
             }
         }
     
+    def _get_project_members(self, project_id: str) -> List[str]:
+        """
+        Get list of project member emails from PostgreSQL.
+        Handles different project visibility settings.
+        Results are cached for 5 minutes to avoid repeated database queries.
+        
+        Args:
+            project_id: Project ID
+            
+        Returns:
+            List of user emails who can access the project (members, owners, or all org members if visibility='all_members')
+        """
+        # Check cache first
+        cache_key = (self.org_slug, project_id)
+        current_time = datetime.now().timestamp()
+        
+        with _cache_lock:
+            if cache_key in _project_members_cache:
+                members, timestamp = _project_members_cache[cache_key]
+                if current_time - timestamp < _cache_ttl:
+                    logger.debug(f"Returning cached project members for {project_id}")
+                    return members
+                # Cache expired, remove it
+                del _project_members_cache[cache_key]
+        
+        try:
+            # Import here to avoid circular dependencies
+            from app.services.database import query_org
+            
+            # First, get project visibility settings
+            project_query = """
+                SELECT 
+                    p.visibility,
+                    p.visible_to_members,
+                    p.owner_email
+                FROM projects p
+                WHERE p.id = %s
+            """
+            
+            project_results = query_org(self.org_slug, project_query, (project_id,))
+            if not project_results:
+                logger.warning(f"Project {project_id} not found")
+                return []
+            
+            project = project_results[0]
+            visibility = project.get('visibility') or 'all_members'
+            owner_email = project.get('owner_email', '').lower()
+            visible_to_members = project.get('visible_to_members')
+            
+            member_emails = set()
+            
+            # Always include owner
+            if owner_email:
+                member_emails.add(owner_email)
+            
+            # Handle different visibility settings
+            if visibility == 'all_members':
+                # Get all users in the org
+                users_query = "SELECT email FROM users"
+                user_results = query_org(self.org_slug, users_query)
+                for row in user_results:
+                    email = row.get('email', '').lower()
+                    if email:
+                        member_emails.add(email)
+            elif visibility == 'specific_members':
+                # Get explicit project members
+                members_query = """
+                    SELECT DISTINCT pm.user_email
+                    FROM project_members pm
+                    WHERE pm.project_id = %s
+                """
+                members_results = query_org(self.org_slug, members_query, (project_id,))
+                for row in members_results:
+                    email = row.get('user_email', '').lower()
+                    if email:
+                        member_emails.add(email)
+                
+                # Also include users from visible_to_members if it's a JSON array
+                if visible_to_members:
+                    if isinstance(visible_to_members, str):
+                        try:
+                            visible_to_members = json.loads(visible_to_members)
+                        except:
+                            pass
+                    if isinstance(visible_to_members, list):
+                        for email in visible_to_members:
+                            if email:
+                                member_emails.add(email.lower())
+            else:
+                # Default: get explicit project members
+                members_query = """
+                    SELECT DISTINCT pm.user_email
+                    FROM project_members pm
+                    WHERE pm.project_id = %s
+                """
+                members_results = query_org(self.org_slug, members_query, (project_id,))
+                for row in members_results:
+                    email = row.get('user_email', '').lower()
+                    if email:
+                        member_emails.add(email)
+            
+            members_list = list(member_emails)
+            
+            # Cache the result
+            with _cache_lock:
+                _project_members_cache[cache_key] = (members_list, current_time)
+                # Clean up old cache entries (keep cache size reasonable)
+                if len(_project_members_cache) > 100:
+                    # Remove oldest entries
+                    sorted_entries = sorted(_project_members_cache.items(), key=lambda x: x[1][1])
+                    for key in sorted_entries[:20]:
+                        del _project_members_cache[key[0]]
+            
+            return members_list
+        except Exception as e:
+            logger.warning(f"Error getting project members for project {project_id}: {str(e)}")
+            # If we can't query, return empty list - validation will fail which is safer
+            return []
+    
+    def _extract_mentions_from_content(self, content: str) -> List[str]:
+        """
+        Extract user email mentions from message content.
+        Looks for mentions in the format @user@example.com (with @ prefix).
+        
+        Args:
+            content: Message content text
+            
+        Returns:
+            List of unique email addresses found in mentions (without the @ prefix)
+        """
+        if not content:
+            return []
+        
+        # Pattern to match mentions: @user@example.com
+        # The @ at the start indicates it's a mention, followed by an email address
+        # Improved pattern: more robust email validation
+        # Matches: @user@example.com, @user.name@example.co.uk, etc.
+        # Excludes: URLs, other @ symbols that aren't email addresses
+        mention_pattern = r'@([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?@[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)'
+        
+        # Find all mentions in the content
+        mentions = re.findall(mention_pattern, content)
+        
+        # Normalize to lowercase and remove duplicates
+        unique_mentions = list(set([email.lower() for email in mentions if email]))
+        
+        return unique_mentions
+    
     def send_message(
         self,
         chatId: str,
@@ -327,7 +498,7 @@ class FirestoreTool:
         
         Args:
             chatId: Chat ID (required)
-            content: Message text content (required)
+            content: Message text content (required). Can include mentions in the format @user@example.com (e.g., "Hey @user@example.com, can you review this?")
             projectId: Project ID if sending to project channel (optional, extracted from chatId if chatId starts with 'project-')
             role: Message role (default: 'user')
             citedContext: Optional cited context information
@@ -343,11 +514,45 @@ class FirestoreTool:
             if not chatId or not content:
                 return {"error": "chatId and content are required"}
             
+            # CRITICAL: Reject DM chatIds - this tool cannot send to DMs
+            if chatId.startswith('dm-'):
+                return {"error": "Cannot send messages to direct message (DM) channels. For direct messages, respond in the AI assistant chat instead."}
+            
             # Extract projectId from chatId if not provided
             actual_project_id = projectId
+            is_project_channel = False
             
             if chatId.startswith('project-'):
                 actual_project_id = chatId.replace('project-', '')
+                is_project_channel = True
+            elif not chatId.startswith('ai-assistant-'):
+                # If chatId doesn't start with 'project-' or 'ai-assistant-', it's invalid
+                return {"error": "chatId must start with 'project-' for project channels or 'ai-assistant-' for AI assistant chats. This tool cannot send messages to DMs."}
+            
+            # Extract mentions from content (email addresses in the message)
+            mentions = self._extract_mentions_from_content(content)
+            
+            # Validate mentions: only allowed in project channels
+            if mentions:
+                if not is_project_channel:
+                    return {"error": "Mentions are only allowed in project channels (chatId must start with 'project-')"}
+                
+                if not actual_project_id:
+                    return {"error": "Cannot validate mentions: projectId is required for project channels"}
+                
+                # Get project members
+                project_members = self._get_project_members(actual_project_id)
+                
+                # Validate all mentioned users are project members
+                invalid_mentions = []
+                for mention_email in mentions:
+                    if mention_email not in project_members:
+                        invalid_mentions.append(mention_email)
+                
+                if invalid_mentions:
+                    return {
+                        "error": f"The following users are not project members and cannot be mentioned: {', '.join(invalid_mentions)}"
+                    }
             
             # Note: Authorization checks for project membership should be done by the caller
             # For now, we'll just send the message with AI agent identity
@@ -373,6 +578,10 @@ class FirestoreTool:
             if imageUrls and isinstance(imageUrls, list) and len(imageUrls) > 0:
                 message_data['imageUrls'] = imageUrls
             
+            # Add mentions if found in content (already validated)
+            if mentions and len(mentions) > 0:
+                message_data['mentions'] = mentions
+            
             # Write to Firestore
             messages_path = f"orgs/{self.org_slug}/messages"
             write_result, doc_ref = self.firestore_client.collection(messages_path).add(message_data)
@@ -384,12 +593,14 @@ class FirestoreTool:
             message_dict['timestamp'] = message_dict.get('timestamp').to_date().isoformat() if message_dict.get('timestamp') and hasattr(message_dict.get('timestamp'), 'to_date') else message_dict.get('timestamp')
             message_dict['imageUrls'] = message_dict.get('imageUrls') or []
             message_dict['likes'] = message_dict.get('likes') or []
+            message_dict['mentions'] = message_dict.get('mentions') or []
             
             logger.info(f"Message sent: chatId={chatId}, messageId={doc_ref.id}, userId={AI_AGENT_ID}")
             return {
                 "success": True,
                 "messageId": doc_ref.id,
-                "message": message_dict
+                "message": message_dict,
+                "status": "Message sent successfully"
             }
         except Exception as e:
             logger.error(f"Error sending message: {str(e)}")

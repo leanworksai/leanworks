@@ -142,56 +142,79 @@ class RAGStorageTool:
     
     def cleanup_session_data(self, session_id: str) -> None:
         """
-        Clean up RAG namespace data for a specific session.
-        Deletes all vectors with matching session_id in metadata.
+        Clean up RAG namespace data by deleting the entire namespace.
+        Deletes all vectors in the namespace from both leanworks-dense and leanworks-sparse indexes.
         
         Args:
-            session_id: The session ID to clean up
+            session_id: The session ID (for logging purposes, but entire namespace is deleted)
         """
         if not session_id:
             logger.warning("No session_id provided for RAG cleanup")
             return
         
         try:
-            # Create filter to match session_id in metadata
-            filter_dict = {
-                "type": {"$eq": "tool_response"},
-                "session_id": {"$eq": session_id}
-            }
-            
-            # Delete from both dense and sparse indexes
+            # Delete entire namespace from both dense and sparse indexes
+            # This effectively removes the namespace from both indexes
             deleted_count = 0
+            
             if self.vectordb_client.dense_index:
                 try:
-                    # Pinecone delete_by_filter returns a dict with deleted count
+                    # Delete all vectors in the namespace (this deletes the namespace)
                     result = self.vectordb_client.dense_index.delete(
-                        filter=filter_dict,
+                        delete_all=True,
                         namespace=self.namespace
                     )
                     # Result might be a dict or just indicate success
                     if isinstance(result, dict) and "deleted" in result:
                         deleted_count += result.get("deleted", 0)
-                    logger.info(f"Deleted RAG vectors from dense index for session {session_id}")
+                    logger.info(f"Deleted namespace '{self.namespace}' from leanworks-dense index")
                 except Exception as e:
-                    logger.error(f"Failed to delete from dense index for session {session_id}: {e}")
+                    # Handle 404 errors (namespace not found) gracefully - this is not an error
+                    error_str = str(e)
+                    # Check for Pinecone namespace not found errors (code 5 or 404)
+                    is_namespace_not_found = (
+                        "404" in error_str or 
+                        "Namespace not found" in error_str or 
+                        '"code":5' in error_str or
+                        "'code': 5" in error_str
+                    )
+                    if is_namespace_not_found:
+                        # Namespace doesn't exist, which is fine - nothing to clean up
+                        logger.debug(f"Namespace '{self.namespace}' not found in leanworks-dense index, nothing to delete")
+                    else:
+                        logger.error(f"Failed to delete namespace '{self.namespace}' from leanworks-dense index: {e}")
             
             if self.vectordb_client.sparse_index:
                 try:
+                    # Delete all vectors in the namespace (this deletes the namespace)
                     result = self.vectordb_client.sparse_index.delete(
-                        filter=filter_dict,
+                        delete_all=True,
                         namespace=self.namespace
                     )
                     if isinstance(result, dict) and "deleted" in result:
                         deleted_count += result.get("deleted", 0)
-                    logger.info(f"Deleted RAG vectors from sparse index for session {session_id}")
+                    logger.info(f"Deleted namespace '{self.namespace}' from leanworks-sparse index")
                 except Exception as e:
-                    logger.error(f"Failed to delete from sparse index for session {session_id}: {e}")
+                    # Handle 404 errors (namespace not found) gracefully - this is not an error
+                    error_str = str(e)
+                    # Check for Pinecone namespace not found errors (code 5 or 404)
+                    is_namespace_not_found = (
+                        "404" in error_str or 
+                        "Namespace not found" in error_str or 
+                        '"code":5' in error_str or
+                        "'code': 5" in error_str
+                    )
+                    if is_namespace_not_found:
+                        # Namespace doesn't exist, which is fine - nothing to clean up
+                        logger.debug(f"Namespace '{self.namespace}' not found in leanworks-sparse index, nothing to delete")
+                    else:
+                        logger.error(f"Failed to delete namespace '{self.namespace}' from leanworks-sparse index: {e}")
             
             if deleted_count > 0:
-                logger.info(f"RAG cleanup completed: deleted {deleted_count} vector(s) for session {session_id}")
+                logger.info(f"RAG cleanup completed: deleted namespace '{self.namespace}' ({deleted_count} vector(s))")
             else:
-                logger.info(f"RAG cleanup completed: no vectors found for session {session_id}")
+                logger.info(f"RAG cleanup completed: namespace '{self.namespace}' not found or already empty")
                 
         except Exception as e:
-            logger.error(f"Error during RAG cleanup for session {session_id}: {e}")
+            logger.error(f"Error during RAG cleanup for namespace '{self.namespace}': {e}")
 

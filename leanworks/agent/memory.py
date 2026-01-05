@@ -353,16 +353,47 @@ class MemoryManager:
                 if profile_doc.exists:
                     profile_data = profile_doc.to_dict()
                     if profile_data:
-                        profile_content = profile_data.get('content', {})
-                        
-                        # Handle both old format (string) and new format (dict)
-                        if isinstance(profile_content, dict):
-                            self.user_profile = profile_content.get("user_profile", "")
+                        # Check if it's new flattened structure (fields directly on document)
+                        # or old structure (nested in content.user_profile as JSON string)
+                        if 'content' in profile_data:
+                            # Old format: content.user_profile is a JSON string
+                            profile_content = profile_data.get('content', {})
+                            
+                            if isinstance(profile_content, dict):
+                                old_profile_json = profile_content.get("user_profile", "")
+                            else:
+                                old_profile_json = profile_content if profile_content else ""
+                            
+                            if old_profile_json:
+                                # Try to parse the old JSON string format
+                                try:
+                                    profile_dict = json.loads(old_profile_json)
+                                    # Successfully parsed - convert to new format and save
+                                    self._migrate_profile_to_flattened(profile_dict, profile_ref)
+                                    # Convert to JSON string for in-memory use (exclude Firestore metadata)
+                                    profile_dict_for_json = self._filter_firestore_metadata(profile_dict)
+                                    self.user_profile = json.dumps(profile_dict_for_json, ensure_ascii=False)
+                                    logger.info(f"Migrated and loaded user profile from old format")
+                                except json.JSONDecodeError as json_error:
+                                    # JSON parsing failed - create clean profile from available data
+                                    logger.warning(f"Failed to parse profile JSON, migrating to flattened structure: {json_error}")
+                                    # Try to extract what we can, or start fresh
+                                    profile_dict = self._extract_profile_from_corrupted_json(old_profile_json)
+                                    self._migrate_profile_to_flattened(profile_dict, profile_ref)
+                                    # Convert to JSON string for in-memory use (exclude Firestore metadata)
+                                    profile_dict_for_json = self._filter_firestore_metadata(profile_dict)
+                                    self.user_profile = json.dumps(profile_dict_for_json, ensure_ascii=False)
+                                    logger.info(f"Migrated corrupted profile to flattened structure")
                         else:
-                            self.user_profile = profile_content if profile_content else ""
-                        
-                        if self.user_profile:
-                            logger.info(f"Loaded user profile from user-level storage")
+                            # New flattened format: fields are directly on the document
+                            # Remove metadata fields and Firestore Sentinel objects, then convert to JSON string
+                            profile_dict = self._filter_firestore_metadata(profile_data)
+                            
+                            if profile_dict:
+                                self.user_profile = json.dumps(profile_dict, ensure_ascii=False)
+                                logger.info(f"Loaded user profile from flattened structure")
+                            else:
+                                logger.info("Profile document exists but has no profile data")
                     else:
                         logger.info("Profile document exists but has no data")
                 else:
@@ -792,22 +823,47 @@ Please provide an updated running summary that incorporates both the existing su
         self._save_user_profile()
     
     def _save_user_profile(self):
-        """Save user profile to user-level storage (shared across all sessions)."""
+        """Save user profile to user-level storage (shared across all sessions).
+        
+        Uses flattened structure: profile fields are stored directly on the document,
+        not nested in a JSON string. This allows querying individual fields and avoids
+        JSON parsing issues.
+        """
         if not self.firestore_client or not self.user_id or not self.org_slug or not self.profile_path:
             return
         
         try:
-            profile_state = {
-                "user_profile": self.user_profile,
-                "last_updated": datetime.now().isoformat()
-            }
+            # Get profile as dict
+            profile_dict = self.get_user_profile_dict()
             
+            # Handle case where profile_dict is corrupted (contains "raw" key)
+            if "raw" in profile_dict and len(profile_dict) == 1:
+                # Profile is corrupted - try to extract from corrupted JSON
+                logger.warning("In-memory profile is corrupted, attempting to extract data")
+                corrupted_json = profile_dict["raw"]
+                profile_dict = self._extract_profile_from_corrupted_json(corrupted_json)
+                # Update in-memory profile with extracted data
+                self.user_profile = json.dumps(profile_dict, ensure_ascii=False)
+            
+            # Ensure required fields exist
+            if not profile_dict:
+                profile_dict = {}
+            
+            # Ensure user_id and org_slug are set
+            profile_dict["user_id"] = self.user_id
+            if "org_slug" not in profile_dict:
+                profile_dict["org_slug"] = self.org_slug
+            
+            # Remove "raw" key if present (from corrupted profile fallback)
+            profile_dict.pop("raw", None)
+            
+            # Add metadata
+            profile_dict["updated_at"] = firestore.SERVER_TIMESTAMP
+            
+            # Save directly in flattened structure (merge to preserve other fields)
             profile_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.profile_path)
-            profile_ref.set({
-                'content': profile_state,
-                'updated_at': firestore.SERVER_TIMESTAMP
-            })
-            logger.info("Saved user profile to user-level storage")
+            profile_ref.set(profile_dict, merge=True)
+            logger.info("Saved user profile to user-level storage (flattened structure)")
         except Exception as e:
             logger.error(f"Error saving user profile: {str(e)}")
     
@@ -816,13 +872,116 @@ Please provide an updated running summary that incorporates both the existing su
         if not self.user_profile:
             return {}
         try:
-            import json
             if isinstance(self.user_profile, str):
                 return json.loads(self.user_profile)
             return self.user_profile
         except (json.JSONDecodeError, TypeError):
             # If it's not valid JSON, return as a simple dict with the string as a value
             return {"raw": self.user_profile}
+    
+    def _filter_firestore_metadata(self, profile_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter out Firestore metadata fields and Sentinel objects from profile dict.
+        
+        Args:
+            profile_dict: Profile dictionary that may contain Firestore metadata
+            
+        Returns:
+            Cleaned profile dictionary without Firestore-specific objects
+        """
+        # Fields to exclude (metadata fields)
+        metadata_fields = {'updated_at', 'created_at'}
+        
+        # Filter out metadata fields and check for Sentinel objects
+        cleaned_dict = {}
+        for key, value in profile_dict.items():
+            # Skip metadata fields
+            if key in metadata_fields:
+                continue
+            
+            # Skip Firestore Sentinel objects (like SERVER_TIMESTAMP)
+            # Sentinel objects can't be JSON serialized - check by type name
+            value_type_str = str(type(value))
+            if 'Sentinel' in value_type_str:
+                # This is a Firestore Sentinel (e.g., SERVER_TIMESTAMP) - skip it
+                continue
+            
+            cleaned_dict[key] = value
+        
+        return cleaned_dict
+    
+    def _migrate_profile_to_flattened(self, profile_dict: Dict[str, Any], profile_ref):
+        """Migrate profile from old format to new flattened structure in Firestore.
+        
+        Args:
+            profile_dict: Profile data as dictionary
+            profile_ref: Firestore document reference
+        """
+        try:
+            # Ensure required fields
+            if not profile_dict:
+                profile_dict = {}
+            
+            profile_dict["user_id"] = self.user_id
+            if "org_slug" not in profile_dict:
+                profile_dict["org_slug"] = self.org_slug
+            
+            # Create a copy for Firestore (with metadata)
+            firestore_dict = profile_dict.copy()
+            firestore_dict["updated_at"] = firestore.SERVER_TIMESTAMP
+            
+            # Save in flattened structure (set with merge=False to replace old structure)
+            profile_ref.set(firestore_dict)
+            logger.info("Migrated user profile to flattened structure in Firestore")
+        except Exception as e:
+            logger.error(f"Error migrating profile to flattened structure: {str(e)}")
+    
+    def _extract_profile_from_corrupted_json(self, corrupted_json: str) -> Dict[str, Any]:
+        """Extract profile data from corrupted JSON string.
+        
+        Attempts to recover as much data as possible from a corrupted JSON string.
+        
+        Args:
+            corrupted_json: Corrupted JSON string
+            
+        Returns:
+            Dictionary with extracted profile data
+        """
+        profile_dict = {
+            "user_id": self.user_id,
+            "org_slug": self.org_slug,
+            "first_name": "",
+            "last_name": "",
+            "job_title": "",
+            "responsibilities": "",
+            "work_style": "",
+            "timezone": "UTC"
+        }
+        
+        try:
+            # Try to extract fields using regex as fallback
+            import re
+            
+            # Try to extract responsibilities
+            responsibilities_match = re.search(r'"responsibilities"\s*:\s*"([^"]*)"', corrupted_json)
+            if responsibilities_match:
+                profile_dict["responsibilities"] = responsibilities_match.group(1)
+            
+            # Try to extract work_style
+            work_style_match = re.search(r'"work_style"\s*:\s*"([^"]*)"', corrupted_json)
+            if work_style_match:
+                profile_dict["work_style"] = work_style_match.group(1)
+            
+            # Try to extract other fields
+            for field in ["first_name", "last_name", "job_title", "timezone"]:
+                field_match = re.search(rf'"{field}"\s*:\s*"([^"]*)"', corrupted_json)
+                if field_match:
+                    profile_dict[field] = field_match.group(1)
+            
+            logger.info(f"Extracted profile data from corrupted JSON: {list(profile_dict.keys())}")
+        except Exception as e:
+            logger.warning(f"Error extracting profile from corrupted JSON: {e}")
+        
+        return profile_dict
     
     def update_user_profile(self, responsibilities: str = None, work_style: str = None):
         """
@@ -839,11 +998,40 @@ Please provide an updated running summary that incorporates both the existing su
         if work_style is not None:
             profile["work_style"] = work_style
         
-        # Store back as JSON string
-        import json
+        # Update in-memory JSON string
         self.user_profile = json.dumps(profile, ensure_ascii=False)
-        # Save profile to user-level storage (not session-level)
-        self._save_user_profile()
+        
+        # Save directly to Firestore in flattened structure (more efficient)
+        if self.firestore_client and self.user_id and self.org_slug and self.profile_path:
+            try:
+                profile_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.profile_path)
+                
+                # Build update data (only fields being updated)
+                update_data = {}
+                if responsibilities is not None:
+                    update_data["responsibilities"] = responsibilities
+                if work_style is not None:
+                    update_data["work_style"] = work_style
+                
+                # Ensure user_id and org_slug are set
+                update_data["user_id"] = self.user_id
+                if "org_slug" not in profile:
+                    update_data["org_slug"] = self.org_slug
+                
+                # Add metadata
+                update_data["updated_at"] = firestore.SERVER_TIMESTAMP
+                
+                # Use merge=True to only update specified fields
+                profile_ref.set(update_data, merge=True)
+                logger.info(f"Updated user profile in Firestore (flattened structure): responsibilities={responsibilities is not None}, work_style={work_style is not None}")
+            except Exception as e:
+                logger.error(f"Error saving user profile to Firestore: {str(e)}")
+                # Fallback to old save method
+                self._save_user_profile()
+        else:
+            # Fallback to old save method if Firestore not available
+            self._save_user_profile()
+        
         logger.info(f"Updated user profile: responsibilities={responsibilities is not None}, work_style={work_style is not None}")
     
     def clear_memory(self):
