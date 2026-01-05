@@ -1,4 +1,5 @@
 from leanworks.agent.tools.postgres import PostgresTool
+from leanworks.agent.tools.doc_management import DocManagementTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
@@ -117,6 +118,32 @@ class ToolUse:
             else:
                 self._tool_cache['postgres_tool'] = None
         return self._tool_cache['postgres_tool']
+    
+    @property
+    def doc_management_tool(self):
+        """Lazy-load DocManagementTool on first access."""
+        if 'doc_management_tool' not in self._tool_cache:
+            if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
+                try:
+                    # Set Secret Manager client for PostgresTool (needed for connection pool)
+                    if self.secret_manager_client:
+                        PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
+                    self._tool_cache['doc_management_tool'] = DocManagementTool(
+                        self.postgres_client_wrapper,
+                        user_id=self.user_id
+                    )
+                    if 'doc_management' not in self.enabled_tools:
+                        self.enabled_tools.append('doc_management')
+                    logger.info("DocManagementTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize DocManagementTool: {str(e)}")
+                    self._tool_cache['doc_management_tool'] = None
+            elif 'postgres' in self.requested_tools:
+                logger.warning("DocManagementTool not initialized: missing postgres_client_wrapper")
+                self._tool_cache['doc_management_tool'] = None
+            else:
+                self._tool_cache['doc_management_tool'] = None
+        return self._tool_cache['doc_management_tool']
     
     @property
     def search_tool(self):
@@ -842,10 +869,19 @@ class ToolUse:
                     self.postgres_tool.query_postgres_property,
                     self.postgres_tool.create_task_property,
                     self.postgres_tool.update_task_property,
-                    self.postgres_tool.create_doc_property,
-                    self.postgres_tool.update_doc_property,
                 ])
                 logger.info("PostgreSQL tools added to tools list (lazy)")
+            
+            # Add Doc Management tools if available
+            if self.doc_management_tool:
+                self._tools_cache.extend([
+                    self.doc_management_tool.create_doc_property,
+                    self.doc_management_tool.update_doc_property,
+                    self.doc_management_tool.get_doc_markdown_path_property,
+                    self.doc_management_tool.create_doc_from_markdown_file_property,
+                    self.doc_management_tool.update_doc_from_markdown_file_property,
+                ])
+                logger.info("Doc Management tools added to tools list (lazy)")
             
             # Add Search tools if available
             if self.search_tool:
@@ -985,10 +1021,19 @@ class ToolUse:
                     "query_postgres": self.postgres_tool.query_postgres,
                     "create_task": self.postgres_tool.create_task,
                     "update_task": self.postgres_tool.update_task,
-                    "create_doc": self.postgres_tool.create_doc,
-                    "update_doc": self.postgres_tool.update_doc,
                 })
                 logger.info("PostgreSQL functions added to function_map (lazy)")
+            
+            # Add Doc Management functions if available
+            if self.doc_management_tool:
+                self._function_map_cache.update({
+                    "create_doc": self.doc_management_tool.create_doc,
+                    "update_doc": self.doc_management_tool.update_doc,
+                    "get_doc_markdown_path": self.doc_management_tool.get_doc_markdown_path,
+                    "create_doc_from_markdown_file": self.doc_management_tool.create_doc_from_markdown_file,
+                    "update_doc_from_markdown_file": self.doc_management_tool.update_doc_from_markdown_file,
+                })
+                logger.info("Doc Management functions added to function_map (lazy)")
             
             # Add search function if available
             if self.search_tool:

@@ -218,8 +218,8 @@ async def main_async():
             model_client=model_client,
             user_id=user_id,
             org_slug=org_slug,
-            session_id="hcdw9gey",
-            clear_conversation=True,  # Set to False to test loading previous conversations
+            session_id="hdewfgpowg",
+            clear_conversation=False,  # Set to False to test loading previous conversations
             tools=tools
         )
         
@@ -234,7 +234,7 @@ async def main_async():
         
         # Process a user message with timing
         user_message = '''
-       show me the latest progress for web development
+       for the first one, do you think it is assigned to the correct person? 
 '''
         
         print("💬 Processing user message:")

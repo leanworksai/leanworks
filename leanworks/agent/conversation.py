@@ -17,41 +17,20 @@ class ConversationManager:
         self.session_id = session_id
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
-        self.slim_conversation = []  # Only tracks initial user query and verified responses
+        self.slim_conversation = []  # Mirrors conversation - kept for backward compatibility
         
-        # Load previous conversation if firestore client and user_id are provided
-        if firestore_client and user_id and session_id:
-            self.load_conversation()
+        # Note: Conversation is now loaded from messages collection (source of truth)
+        # This is done in ChatAgent.__init__ or ChatAgent.process_message()
         
     def load_conversation(self):
-        """Load the most recent slim conversation from Firestore."""
-        if not self.firestore_client or not self.user_id or not self.org_slug:
-            return
+        """DEPRECATED: Load conversation from files collection.
         
-        try:
-            file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.conversation_path)
-            doc = file_ref.get()
-            
-            if doc.exists:
-                data = doc.to_dict()
-                content = data.get('content', [])
-                
-                # Ensure slim_conversation is always a list and take last 6 messages
-                if isinstance(content, list):
-                    self.slim_conversation = content[-6:] if len(content) > 6 else content
-                else:
-                    print(f"Conversation data for user {self.user_id} is not a list. Creating new list.")
-                    self.slim_conversation = []
-                print(f"Loaded slim conversation history for user {self.user_id}")
-            else:
-                print(f"No previous conversation found for user {self.user_id}")
-                self.slim_conversation = []
-        except Exception as e:
-            logger.error(f"Error loading conversation from Firestore: {e}")
-            self.slim_conversation = []
-        
-        # Initialize the current conversation as empty
-        self.conversation = self.slim_conversation.copy()
+        This method is deprecated. Conversations are now loaded from messages collection
+        (source of truth) using load_conversation_from_messages().
+        This method is kept for backward compatibility but is a no-op.
+        """
+        logger.warning("load_conversation() is deprecated. Use load_conversation_from_messages() instead.")
+        # No-op: conversations are now loaded from messages collection
     
     def load_conversation_from_messages(self, chat_id: str, limit: int = 10, exclude_last: bool = True, current_message: str = None):
         """
@@ -144,7 +123,7 @@ class ConversationManager:
             # Set conversation (excluding the last message which is the current one being processed)
             if len(conversation_messages) > 0:
                 self.conversation = conversation_messages
-                self.slim_conversation = conversation_messages
+                self.slim_conversation = conversation_messages  # Keep in sync for backward compatibility
                 logger.info(f"Loaded {len(self.conversation)} messages from messages collection for chatId: {chat_id}")
             else:
                 self.conversation = []
@@ -159,26 +138,15 @@ class ConversationManager:
             self.slim_conversation = []
     
     def save_conversation(self):
-        """Save conversation messages to Firestore files collection for agent's own loading.
+        """DEPRECATED: Save conversation to files collection.
         
-        The agent only saves to files collection. The web app handles saving to messages collection.
-        This ensures the agent can reload its own conversation history when initialized with the same session_id.
+        This method is deprecated. Messages are now saved to messages collection by the frontend
+        (source of truth). The agent only needs to save running_summary to files collection
+        (handled by MemoryManager).
+        This method is kept for backward compatibility but is a no-op.
         """
-        if not self.firestore_client or not self.user_id or not self.org_slug or not self.session_id:
-            return
-        
-        try:
-            # Save to files collection for agent's own loading (load_conversation reads from files)
-            file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.conversation_path)
-            file_ref.set({
-                'content': self.slim_conversation,  # Save as list of messages
-                'updated_at': firestore.SERVER_TIMESTAMP
-            }, merge=False)  # Use set (not merge) to replace entire conversation
-            logger.info(f"Saved conversation to files collection for user {self.user_id}, session {self.session_id}")
-        except Exception as e:
-            logger.error(f"Error saving conversation to Firestore: {e}")
-            import traceback
-            traceback.print_exc()
+        logger.debug("save_conversation() is deprecated. Messages are saved to messages collection by frontend.")
+        # No-op: messages are saved to messages collection by the frontend
         
     def add_user_message(self, content, include_in_slim=False):
         """Add a user message to the conversation history"""
@@ -189,7 +157,7 @@ class ConversationManager:
         self.conversation.append(user_message)
         
         if include_in_slim:
-            self.slim_conversation.append(user_message)
+            self.slim_conversation.append(user_message)  # Keep in sync for backward compatibility
 
     def add_tool_results(self, tool_results):
         """Add tool results to the conversation history
@@ -224,7 +192,7 @@ class ConversationManager:
             self.slim_conversation.append({
                 "role": "assistant",
                 "content": [{"type": "text", "text": content}]
-            })
+            })  # Keep in sync for backward compatibility
             
     def clear_conversation(self):
         """Clear the conversation history and start fresh"""

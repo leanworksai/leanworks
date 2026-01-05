@@ -110,20 +110,16 @@ class ChatAgent:
                 self.memory_manager.clear_memory()
         # When clear_conversation=False, keep existing memory for context continuity
         
-        # Load conversation from messages collection for non-AI channels
-        # AI assistant chats already load from files collection via ConversationManager.__init__
-        # For project/team/other channels, we need to load from messages collection (web app source of truth)
+        # Load conversation from messages collection (source of truth for all chat types)
+        # This includes AI assistant chats, project channels, team channels, etc.
         # Do this after clear_conversation check so we don't clear what we just loaded
         if self.session_id and not clear_conversation:
-            # Skip AI assistant chats - they already loaded from files collection
-            if not self.session_id.startswith('ai-assistant-'):
-                # For all other channel types (project, team, etc.), load from messages collection
-                logger.info(f"Loading conversation history from messages collection for channel: {self.session_id}")
-                self.conversation.load_conversation_from_messages(
-                    chat_id=self.session_id,
-                    limit=10,
-                    exclude_last=False  # Don't exclude last message during initialization
-                )
+            logger.info(f"Loading conversation history from messages collection for chatId: {self.session_id}")
+            self.conversation.load_conversation_from_messages(
+                chat_id=self.session_id,
+                limit=10,
+                exclude_last=False  # Don't exclude last message during initialization
+            )
         
         # Get user info from Firestore
         user_info = self._get_user_info()
@@ -309,10 +305,9 @@ class ChatAgent:
         # Extract the actual user message from embedded conversation history (if present)
         actual_user_message = self._extract_user_message_from_conversation_history(user_message)
         
-        # For non-AI channels, load conversation history from messages collection
-        # AI assistant chats already have their conversation loaded from files collection
+        # Load conversation history from messages collection (source of truth for all chat types)
         # This ensures we have the latest context from the channel before processing the new message
-        if self.session_id and not self.session_id.startswith('ai-assistant-'):
+        if self.session_id:
             logger.info(f"Loading conversation history from messages collection before processing message: {self.session_id}")
             self.conversation.load_conversation_from_messages(
                 chat_id=self.session_id,
@@ -671,9 +666,43 @@ class ChatAgent:
                 unique_sources.append(source)
                 seen.add(source)
 
-        # Always add last response to slim_conversation
-        self.conversation.add_assistant_message(response_text, include_in_slim=True)
-        self.conversation.save_conversation()
+        # Always add last response to slim_conversation (if not already added)
+        if response_text:
+            # Check if last message in conversation is already an assistant message
+            if self.conversation.conversation and self.conversation.conversation[-1].get("role") == "assistant":
+                # Message already in conversation, extract text and add to slim_conversation only
+                last_msg = self.conversation.conversation[-1]
+                # Extract text from the message
+                text_content = None
+                if isinstance(last_msg.get("content"), list):
+                    # Find text block in content
+                    for block in last_msg["content"]:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_content = block.get("text", "")
+                            break
+                elif isinstance(last_msg.get("content"), str):
+                    text_content = last_msg.get("content", "")
+                
+                # Use response_text if we couldn't extract from last message
+                if not text_content:
+                    text_content = response_text
+                
+                # Only add to slim_conversation if not already there
+                if not self.conversation.slim_conversation or \
+                   self.conversation.slim_conversation[-1].get("role") != "assistant" or \
+                   (isinstance(self.conversation.slim_conversation[-1].get("content"), list) and
+                    len(self.conversation.slim_conversation[-1]["content"]) > 0 and
+                    self.conversation.slim_conversation[-1]["content"][0].get("text") != text_content):
+                    self.conversation.slim_conversation.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text_content}]
+                    })
+            else:
+                # No assistant message yet, add it normally to both conversation and slim_conversation
+                self.conversation.add_assistant_message(response_text, include_in_slim=True)
+        
+        # Note: Messages are saved to messages collection by the frontend (source of truth)
+        # We no longer save slim_conversation to files collection
         # Only log full response if not streaming (to avoid duplicate output)
         if not streaming:
             logger.info(f"Final answer: {response_text}")
@@ -995,13 +1024,38 @@ If there's not enough information to make meaningful updates, return the current
             if analysis_text:
                 # Parse JSON response
                 import json
+                import re
                 try:
                     # Extract JSON from response
                     json_start = analysis_text.find('{')
                     json_end = analysis_text.rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
                         json_text = analysis_text[json_start:json_end]
-                        analysis_result = json.loads(json_text)
+                        
+                        # Try to parse JSON - if it fails due to control characters, clean and retry
+                        try:
+                            analysis_result = json.loads(json_text)
+                        except json.JSONDecodeError as json_error:
+                            # If parsing fails due to control characters, clean the JSON text
+                            # Control characters (0x00-0x1F) in JSON strings must be escaped
+                            # Remove unescaped control characters that cause parsing errors
+                            def clean_json_text(text):
+                                # Remove unescaped control characters (0x00-0x1F)
+                                # These include: null (\x00), bell (\x07), backspace (\x08), 
+                                # vertical tab (\x0B), form feed (\x0C), etc.
+                                # Note: \n (\x0A), \r (\x0D), \t (\x09) are allowed if escaped
+                                # We'll remove unescaped control chars that aren't part of \n, \r, \t
+                                cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', text)
+                                return cleaned
+                            
+                            # Clean and retry
+                            json_text_cleaned = clean_json_text(json_text)
+                            try:
+                                analysis_result = json.loads(json_text_cleaned)
+                            except json.JSONDecodeError as retry_error:
+                                # If cleaning still fails, log and skip this update
+                                logger.warning(f"Failed to parse profile analysis JSON even after cleaning: {retry_error}. Original error: {json_error}")
+                                return  # Skip profile update if JSON can't be parsed
                         
                         new_responsibilities = analysis_result.get("responsibilities", current_responsibilities)
                         new_work_style = analysis_result.get("work_style", current_work_style)
