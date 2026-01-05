@@ -120,7 +120,7 @@ class ServerToolResponseHandler(ToolResponseHandler):
         return tool_names
     
     def _extract_final_text(self, response) -> Optional[str]:
-        """Extract the last text block that comes after all tool blocks"""
+        """Extract all text blocks that come after all tool blocks and join them"""
         # Find index of last tool block
         last_tool_index = -1
         all_tool_block_types = ToolRegistry.SERVER_TOOL_BLOCK_TYPES | ToolRegistry.CLIENT_TOOL_BLOCK_TYPES
@@ -130,21 +130,22 @@ class ServerToolResponseHandler(ToolResponseHandler):
             if block_type in all_tool_block_types:
                 last_tool_index = i
         
-        # Get text blocks after last tool block
+        # Get ALL text blocks after last tool block and join them
         text_blocks_after_tools = [
             block.text for i, block in enumerate(response.content)
             if getattr(block, 'type', None) == "text" and i > last_tool_index
         ]
         
         if text_blocks_after_tools:
-            return text_blocks_after_tools[-1]
+            # Join all text blocks, not just return the last one
+            return "".join(text_blocks_after_tools)
         
-        # Fallback: return last text block overall
+        # Fallback: return all text blocks joined
         all_text_blocks = [
             block.text for block in response.content
             if getattr(block, 'type', None) == "text"
         ]
-        return all_text_blocks[-1] if all_text_blocks else None
+        return "".join(all_text_blocks) if all_text_blocks else None
 
 class ClientToolResponseHandler(ToolResponseHandler):
     """Handles responses from client-defined tools"""
