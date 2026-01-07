@@ -123,8 +123,13 @@ class ChatAgent:
         
         # Get user info from Firestore
         user_info = self._get_user_info()
-        user_timezone = user_info.get("timezone", "UTC")
-        user_timezone = pytz.timezone(user_timezone)
+        user_timezone_str = user_info.get("timezone", "UTC") or "UTC"
+        # Validate and convert timezone string to pytz timezone object
+        try:
+            user_timezone = pytz.timezone(user_timezone_str)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.warning(f"Unknown timezone '{user_timezone_str}' for user {self.user_id}, defaulting to UTC")
+            user_timezone = pytz.UTC
         # Set up API parameters for main model
         # Only include additional_context section if it's not None or empty
         if self.additional_context and self.additional_context.strip():
@@ -143,8 +148,8 @@ class ChatAgent:
         
         self.system_prompt = AGENT_SYSTEM_PROMPT.format(
             USER_INFO=user_info, 
-            CURRENT_DATE_UTC=datetime.now(timezone.utc).isoformat(),
             CURRENT_DATE_LOCAL=datetime.now(user_timezone).isoformat(),
+            USER_TIMEZONE=user_timezone_str,
             ADDITIONAL_CONTEXT=additional_context_section
         )
         
@@ -181,7 +186,7 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": all_tools,
-            "max_tokens": 1024,
+            "max_tokens": 8192,  # Increased from 1024 to support longer responses
             "temperature": 0.1,
             "timeout": 60
         }
@@ -193,13 +198,13 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Get user information. Since org_slug is already provided directly,
-        returns default user info without database lookup.
+        Get user information from the shared database (users table).
+        Falls back to default values if user not found or query fails.
         
         Returns:
-            dict: User information dictionary with user_id, org_slug, and default values
+            dict: User information dictionary with user_id, org_slug, timezone, and other fields
         """
-        return {
+        default_info = {
             "user_id": self.user_id or "Unknown", 
             "first_name": "", 
             "last_name": "", 
@@ -209,6 +214,35 @@ class ChatAgent:
             "timezone": "UTC",
             "work_style": ""
         }
+        
+        # Try to fetch user info from shared database
+        if not self.user_id:
+            return default_info
+        
+        try:
+            from app.services.database import query_shared_one
+            
+            user_data = query_shared_one(
+                "SELECT email, first_name, last_name, job_title, timezone, responsibilities FROM users WHERE email = %s",
+                (self.user_id.lower(),)
+            )
+            
+            if user_data:
+                return {
+                    "user_id": self.user_id or "Unknown",
+                    "first_name": user_data.get("first_name", ""),
+                    "last_name": user_data.get("last_name", ""),
+                    "job_title": user_data.get("job_title", ""),
+                    "responsibilities": user_data.get("responsibilities", ""),
+                    "org_slug": self.org_slug or "",
+                    "timezone": user_data.get("timezone", "UTC") or "UTC",  # Fallback to UTC if None
+                    "work_style": ""
+                }
+        except Exception as e:
+            logger.warning(f"Could not fetch user info from shared database for {self.user_id}: {str(e)}")
+            # Fall back to default info
+        
+        return default_info
 
 
     def _extract_user_message_from_conversation_history(self, user_message: str) -> str:
@@ -434,12 +468,34 @@ class ChatAgent:
                     break
                 elif stop_reason == "max_tokens":
                     logger.warning("Response truncated due to max_tokens limit")
-                    # Extract what we have and continue if needed
-                    text_content = next((block.text for block in response.content if block.type == "text"), "")
-                    if text_content:
-                        response_text = text_content + "\n\n[Response truncated due to token limit]"
-                        self.conversation.add_assistant_message(response_text)
-                        break
+                    # Check if there are tool calls that need execution
+                    has_tool_use = any(
+                        getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
+                        for block in response.content
+                    )
+                    
+                    if has_tool_use:
+                        # If there are tool calls, continue the conversation loop to execute them
+                        logger.info("Response hit max_tokens but has tool calls - continuing conversation")
+                        # Use unified handler to process response (will execute tools and continue)
+                        handler = self.tool_response_handler_factory.get_handler(response)
+                        context = {
+                            'conversation': self.conversation,
+                            'tool_use': self.tool_use,
+                            'data_sources': self.data_sources,
+                            'streaming': streaming,
+                            'memory_manager': self.memory_manager
+                        }
+                        handler.handle(response, context)
+                        # Continue the loop to get the next response
+                        continue
+                    else:
+                        # No tool calls, just extract text and return
+                        text_content = next((block.text for block in response.content if block.type == "text"), "")
+                        if text_content:
+                            response_text = text_content + "\n\n[Response truncated due to token limit. Please ask me to continue if you need more information.]"
+                            self.conversation.add_assistant_message(response_text)
+                            break
                 elif stop_reason == "model_context_window_exceeded":
                     logger.warning("Response reached model's context window limit")
                     text_content = next((block.text for block in response.content if block.type == "text"), "")

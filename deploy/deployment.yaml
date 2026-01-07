@@ -11,10 +11,12 @@ spec:
     metadata:
       labels:
         app: ask-api
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
     spec:
       containers:
       - name: ask-api
-        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260104-215815
+        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260104-231107
         command: ["hypercorn"]
         args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
         ports:
@@ -37,11 +39,11 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: "200m"        # Increased from 100m for better performance
-            memory: "256Mi"    # Increased from 128Mi for more stable operation
+            cpu: "500m"        # Increased for better performance and stability
+            memory: "512Mi"    # Increased to prevent OOM errors with large responses
           limits:
-            cpu: "2"           # 2 CPUs
-            memory: "1Gi"      # 1 GiB memory
+            cpu: "2"           # 2 CPUs (burst capacity)
+            memory: "2Gi"      # Increased to 2Gi to handle large AI responses and prevent OOM
         env:
         - name: VERIFY_API_KEY
           value: "true"

@@ -18,6 +18,9 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+.venv/
+venv/
+env/
 
 # Exclude IDE files
 .vscode/
@@ -29,16 +32,42 @@ htmlcov/
 # Exclude git files
 .git/
 .gitignore
+.gitattributes
 
 # Exclude test files
 tests/
 *.test.py
+test_*.py
+*_test.py
 
 # Exclude documentation
 *.md
 docs/
+README*
 
 # Exclude deployment scripts (not needed in image)
 deploy.sh
 cloudbuild.yaml
+deploy/
 
+# Exclude CI/CD files
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Exclude large data files
+*.pkl
+*.model
+*.bin
+*.h5
+*.onnx
+*.pt
+*.pth
+*.data
+*.db
+*.sqlite
+*.sqlite3
+
+# Exclude logs
+*.log
+logs/

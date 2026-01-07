@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Global connection pools
 _org_pools: Dict[str, pool.ThreadedConnectionPool] = {}  # org_<slug> -> pool
 _tenant_pools: Dict[str, pool.ThreadedConnectionPool] = {}  # Legacy: domain -> pool (deprecated)
+_shared_pool: Optional[pool.ThreadedConnectionPool] = None  # Shared database pool (for users table)
 _cached_password: Optional[str] = None
 _secret_manager_client: Optional[secretmanager.SecretManagerServiceClient] = None
 _project_id: Optional[str] = None
@@ -665,6 +666,81 @@ def query_tenant_one(user_email: str, query: str, params: Optional[tuple] = None
     """Execute a query for a specific tenant and return first row or None"""
     results = query_tenant(user_email, query, params)
     return results[0] if results else None
+
+
+# ============================================================================
+# SHARED DATABASE POOL (for users table and other shared data)
+# ============================================================================
+
+def get_shared_pool() -> pool.ThreadedConnectionPool:
+    """Get or create connection pool for the shared database (contains users table)"""
+    global _shared_pool
+    
+    if _shared_pool:
+        return _shared_pool
+    
+    logger.info("🔌 Creating connection pool for shared database")
+    
+    password = get_postgres_password()
+    db_host, db_port = _determine_db_host()
+    db_user = os.environ.get("DB_USER", "postgres")
+    db_name = "shared"
+    
+    # Ensure database exists
+    ensure_database_exists(db_name, password)
+    
+    try:
+        pool_params = {
+            'minconn': 1,
+            'maxconn': 10,
+            'database': db_name,
+            'user': db_user,
+            'password': password,
+        }
+        if db_host.startswith('/'):
+            pool_params['host'] = db_host
+            logger.info(f"🔌 Using Unix socket connection: {db_host}, database: {db_name}")
+        else:
+            pool_params['host'] = db_host
+            pool_params['port'] = db_port
+            logger.info(f"🔌 Using TCP/IP connection: {db_host}:{db_port}, database: {db_name}")
+        
+        _shared_pool = pool.ThreadedConnectionPool(**pool_params)
+        logger.info(f"✅ Connection pool created for shared database")
+        return _shared_pool
+    except Exception as e:
+        logger.error(f"❌ Failed to create connection pool for shared database: {str(e)}")
+        raise
+
+
+def query_shared_one(query: str, params: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
+    """Execute a query on the shared database and return first row or None.
+    
+    Args:
+        query: SQL query to execute
+        params: Query parameters
+        
+    Returns:
+        First result row as dictionary or None if no results
+    """
+    conn = None
+    shared_pool = None
+    try:
+        shared_pool = get_shared_pool()
+        conn = shared_pool.getconn()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        cursor.close()
+        return dict(results[0]) if results else None
+    except Exception as e:
+        logger.error(f"Shared database query error: {str(e)}")
+        logger.error(f"Query: {query}")
+        logger.error(f"Params: {params}")
+        raise
+    finally:
+        if conn and shared_pool:
+            shared_pool.putconn(conn)
 
 
 # Initialize on import

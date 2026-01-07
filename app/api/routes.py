@@ -27,19 +27,20 @@ logger = logging.getLogger(__name__)
 
 def get_user_details_from_postgres(user_email: str):
     """
-    Get user details from PostgreSQL.
+    Get user details from PostgreSQL shared database.
     
     Args:
         user_email: User email address
         
     Returns:
-        dict: User details with first_name, last_name, avatar, or None if not found
+        dict: User details with first_name, last_name, avatar, timezone, or None if not found
     """
     try:
-        # Query users table in the tenant's database
-        user_data = query_tenant_one(
-            user_email,
-            "SELECT first_name, last_name, job_title FROM users WHERE email = %s",
+        # Query users table in the shared database
+        from app.services.database import query_shared_one
+        
+        user_data = query_shared_one(
+            "SELECT first_name, last_name, job_title, timezone FROM users WHERE email = %s",
             (user_email.lower(),)
         )
         
@@ -54,7 +55,8 @@ def get_user_details_from_postgres(user_email: str):
             return {
                 "first_name": first_name,
                 "last_name": last_name,
-                "avatar": avatar
+                "avatar": avatar,
+                "timezone": user_data.get("timezone", "UTC") or "UTC"
             }
     except Exception as e:
         logger.warning(f"Could not fetch user details from PostgreSQL for {user_email}: {str(e)}")
