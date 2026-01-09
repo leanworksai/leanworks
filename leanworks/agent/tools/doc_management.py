@@ -184,7 +184,7 @@ class DocManagementTool:
             
             conn = self.pool.getconn()
             with conn.cursor() as cursor:
-                # Try to insert with metadata column first
+                # Try to insert with metadata and is_pinned columns first
                 try:
                     cursor.execute("""
                         INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, is_pinned, visibility, visible_to_members, created_at)
@@ -203,23 +203,85 @@ class DocManagementTool:
                         json.dumps(visible_to_members_array)
                     ))
                 except Exception as e:
-                    # If metadata column doesn't exist, insert without it
-                    if 'column "metadata" does not exist' in str(e).lower() or 'metadata' in str(e).lower():
-                        cursor.execute("""
-                            INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        """, (
-                            doc_id,
-                            title,
-                            html_content,
-                            AI_AGENT_ID,  # Always use AI agent ID
-                            projectId,
-                            teamId,
-                            json.dumps(tags) if tags else '[]',
-                            isPinned,
-                            doc_visibility,
-                            json.dumps(visible_to_members_array)
-                        ))
+                    error_str = str(e).lower()
+                    # If is_pinned column doesn't exist, try without it
+                    if 'is_pinned' in error_str or 'column "is_pinned" does not exist' in error_str:
+                        try:
+                            # Try with metadata but without is_pinned
+                            cursor.execute("""
+                                INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, visibility, visible_to_members, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            """, (
+                                doc_id,
+                                title,
+                                html_content,
+                                AI_AGENT_ID,  # Always use AI agent ID
+                                projectId,
+                                teamId,
+                                json.dumps(tags) if tags else '[]',
+                                json.dumps(metadata) if metadata else '{}',
+                                doc_visibility,
+                                json.dumps(visible_to_members_array)
+                            ))
+                        except Exception as e2:
+                            error_str2 = str(e2).lower()
+                            # If metadata column also doesn't exist, insert without both
+                            if 'metadata' in error_str2 or 'column "metadata" does not exist' in error_str2:
+                                cursor.execute("""
+                                    INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                """, (
+                                    doc_id,
+                                    title,
+                                    html_content,
+                                    AI_AGENT_ID,  # Always use AI agent ID
+                                    projectId,
+                                    teamId,
+                                    json.dumps(tags) if tags else '[]',
+                                    doc_visibility,
+                                    json.dumps(visible_to_members_array)
+                                ))
+                            else:
+                                raise
+                    # If only metadata column doesn't exist
+                    elif 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
+                        try:
+                            # Try with is_pinned but without metadata
+                            cursor.execute("""
+                                INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            """, (
+                                doc_id,
+                                title,
+                                html_content,
+                                AI_AGENT_ID,  # Always use AI agent ID
+                                projectId,
+                                teamId,
+                                json.dumps(tags) if tags else '[]',
+                                isPinned,
+                                doc_visibility,
+                                json.dumps(visible_to_members_array)
+                            ))
+                        except Exception as e2:
+                            error_str2 = str(e2).lower()
+                            # If is_pinned also doesn't exist, insert without both
+                            if 'is_pinned' in error_str2 or 'column "is_pinned" does not exist' in error_str2:
+                                cursor.execute("""
+                                    INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                """, (
+                                    doc_id,
+                                    title,
+                                    html_content,
+                                    AI_AGENT_ID,  # Always use AI agent ID
+                                    projectId,
+                                    teamId,
+                                    json.dumps(tags) if tags else '[]',
+                                    doc_visibility,
+                                    json.dumps(visible_to_members_array)
+                                ))
+                            else:
+                                raise
                     else:
                         raise
                 
@@ -390,16 +452,70 @@ class DocManagementTool:
                 return {"error": f"Too many document IDs requested. Maximum is 50, got {len(docIds)}"}
             
             conn = self.pool.getconn()
-            with conn.cursor() as cursor:
+            cursor = None
+            try:
+                cursor = conn.cursor()
                 # Build query with IN clause for multiple IDs
+                # Try to include is_pinned and metadata, but handle if they don't exist
                 placeholders = ','.join(['%s'] * len(docIds))
-                query = f"""
-                    SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                           is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
-                    FROM docs 
-                    WHERE id IN ({placeholders})
-                """
-                cursor.execute(query, tuple(docIds))
+                
+                # Try query with is_pinned and metadata first
+                try:
+                    query = f"""
+                        SELECT id, title, content, owner_email, project_id, team_id, tags, 
+                               is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+                        FROM docs 
+                        WHERE id IN ({placeholders})
+                    """
+                    cursor.execute(query, tuple(docIds))
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # Rollback transaction immediately - PostgreSQL aborts transaction on any error
+                    try:
+                        conn.rollback()
+                    except:
+                        pass
+                    
+                    # Try without is_pinned
+                    if 'is_pinned' in error_str or 'column "is_pinned" does not exist' in error_str:
+                        try:
+                            query = f"""
+                                SELECT id, title, content, owner_email, project_id, team_id, tags, 
+                                       visibility, visible_to_members, created_at, updated_at, metadata
+                                FROM docs 
+                                WHERE id IN ({placeholders})
+                            """
+                            cursor.execute(query, tuple(docIds))
+                        except Exception as e2:
+                            error_str2 = str(e2).lower()
+                            # Rollback again if needed
+                            try:
+                                conn.rollback()
+                            except:
+                                pass
+                            # Try without metadata
+                            if 'metadata' in error_str2 or 'column "metadata" does not exist' in error_str2:
+                                query = f"""
+                                    SELECT id, title, content, owner_email, project_id, team_id, tags, 
+                                           visibility, visible_to_members, created_at, updated_at
+                                    FROM docs 
+                                    WHERE id IN ({placeholders})
+                                """
+                                cursor.execute(query, tuple(docIds))
+                            else:
+                                raise
+                    # Try without metadata only
+                    elif 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
+                        query = f"""
+                            SELECT id, title, content, owner_email, project_id, team_id, tags, 
+                                   is_pinned, visibility, visible_to_members, created_at, updated_at
+                            FROM docs 
+                            WHERE id IN ({placeholders})
+                        """
+                        cursor.execute(query, tuple(docIds))
+                    else:
+                        raise
+                
                 rows = cursor.fetchall()
                 
                 # Convert to list of dicts
@@ -408,6 +524,10 @@ class DocManagementTool:
                 for row in rows:
                     doc = dict(row)
                     found_ids.add(doc['id'])
+                    
+                    # Set default for is_pinned if not present
+                    if 'is_pinned' not in doc:
+                        doc['is_pinned'] = False
                     
                     # Parse JSONB fields if they're strings
                     if 'tags' in doc:
@@ -453,13 +573,26 @@ class DocManagementTool:
                 logger.info(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
                 return docs
                 
+            except Exception as e:
+                # Rollback on any error before retrying or returning
+                if conn:
+                    try:
+                        conn.rollback()
+                    except:
+                        pass
+                raise
+            finally:
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if conn:
+                    self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"Error getting documents: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-        finally:
-            if conn:
-                self.pool.putconn(conn)
     
     @property
     def get_doc_markdown_path_property(self):
@@ -726,14 +859,27 @@ class DocManagementTool:
                         set_clauses.append("visible_to_members = %s::jsonb")
                         values.append(json.dumps([]))
                 
+                # Check if is_pinned column exists
+                is_pinned_exists = False
+                if isPinned is not None:
+                    try:
+                        cursor.execute("SELECT is_pinned FROM docs LIMIT 1")
+                        is_pinned_exists = True
+                    except Exception:
+                        # Column doesn't exist, skip is_pinned updates
+                        is_pinned_exists = False
+                
                 # Handle regular fields
                 updates_dict = {
                     'title': title,
                     'content': content,
                     'projectId': projectId,
                     'teamId': teamId,
-                    'isPinned': isPinned,
                 }
+                # Only add isPinned if column exists
+                if isPinned is not None and is_pinned_exists:
+                    updates_dict['isPinned'] = isPinned
+                
                 for key, db_field in field_map.items():
                     value = updates_dict.get(key)
                     if value is not None:
@@ -748,14 +894,14 @@ class DocManagementTool:
                     set_clauses.append("tags = %s::jsonb")
                     values.append(json.dumps(tags))
                 
-                # Handle metadata
+                # Handle metadata - check if column exists first
                 if metadata is not None:
-                    # Try to update metadata column, but handle if it doesn't exist
                     try:
+                        cursor.execute("SELECT metadata FROM docs LIMIT 1")
                         set_clauses.append("metadata = %s::jsonb")
                         values.append(json.dumps(metadata))
                     except Exception:
-                        # Metadata column might not exist, skip it
+                        # Metadata column doesn't exist, skip it
                         pass
                 
                 if len(set_clauses) == 0:
@@ -1325,7 +1471,20 @@ class DocManagementTool:
             with conn.cursor() as cursor:
                 # Build query - include content preview (first 200 characters), not full content
                 # Use LEFT() function to get first 200 characters of content
-                query_parts = ["SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"]
+                # Try to include is_pinned, but handle if column doesn't exist
+                base_query = "SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"
+                include_is_pinned = False
+                
+                # Check if is_pinned column exists by trying a test query
+                try:
+                    cursor.execute("SELECT is_pinned FROM docs LIMIT 1")
+                    include_is_pinned = True
+                    base_query = "SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"
+                except Exception:
+                    # Column doesn't exist, use query without is_pinned
+                    include_is_pinned = False
+                
+                query_parts = [base_query]
                 params = []
                 
                 # Add filters
@@ -1341,7 +1500,7 @@ class DocManagementTool:
                     query_parts.append("AND owner_email = %s")
                     params.append(ownerEmail.lower())
                 
-                if isPinned is not None:
+                if isPinned is not None and include_is_pinned:
                     query_parts.append("AND is_pinned = %s")
                     params.append(isPinned)
                 
@@ -1378,6 +1537,10 @@ class DocManagementTool:
                 docs = []
                 for row in rows:
                     doc = dict(row)
+                    
+                    # Set default for is_pinned if not present
+                    if 'is_pinned' not in doc:
+                        doc['is_pinned'] = False
                     
                     # Clean up content preview - strip HTML tags and truncate if needed
                     if 'content_preview' in doc and doc['content_preview']:
