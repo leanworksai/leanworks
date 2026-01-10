@@ -31,6 +31,7 @@ hypercorn==0.15.0
 asgiref==3.7.2
 aiohttp==3.10.5
 jsonschema==4.23.0
+markdown>=3.5.0
 # wheel>=0.45.0
 # torch>=2.8.0
 # torchvision>=0.23.0

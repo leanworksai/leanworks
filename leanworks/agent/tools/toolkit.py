@@ -23,6 +23,7 @@ import signal
 import queue
 import threading
 import time
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -469,6 +470,12 @@ class ToolUse:
                 self.container_name = f"bash-session-{uuid.uuid4().hex[:12]}"
                 self.container_id = None
                 
+                # Get system temp directory to mount into container
+                # This allows files created on the host to be accessible from inside the container
+                host_temp_dir = tempfile.gettempdir()
+                # Mount temp directory at /host-tmp in container
+                container_mount_path = '/host-tmp'
+                
                 # Create and start Docker container
                 try:
                     # Use a lightweight base image (alpine with bash)
@@ -483,6 +490,7 @@ class ToolUse:
                         '--read-only',  # Read-only root filesystem
                         '--tmpfs', '/tmp:rw,noexec,nosuid,size=100m',  # Writable /tmp
                         '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
+                        '-v', f'{host_temp_dir}:{container_mount_path}:ro',  # Mount temp dir as read-only
                         'alpine:latest',
                         'sh', '-c', 'tail -f /dev/null'  # Keep container running
                     ]
@@ -498,7 +506,9 @@ class ToolUse:
                         raise Exception(f"Failed to create Docker container: {result.stderr}")
                     
                     self.container_id = result.stdout.strip()
-                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]})")
+                    self.host_temp_dir = host_temp_dir
+                    self.container_mount_path = container_mount_path
+                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with temp dir mounted at {container_mount_path}")
                     
                 except FileNotFoundError:
                     raise Exception("Docker is not installed or not in PATH")
@@ -509,6 +519,55 @@ class ToolUse:
                     raise
         
         return DockerBashSession()
+    
+    def _translate_path_for_container(self, command: str, session) -> str:
+        """
+        Translate file paths in command from host temp directory to container mount path.
+        
+        Args:
+            command: The bash command with potential file paths
+            session: DockerBashSession instance with mount info
+            
+        Returns:
+            Command with translated paths
+        """
+        if not hasattr(session, 'host_temp_dir') or not hasattr(session, 'container_mount_path'):
+            return command
+        
+        host_temp_dir = session.host_temp_dir
+        container_mount_path = session.container_mount_path
+        
+        # Normalize paths for comparison
+        host_temp_dir_norm = os.path.normpath(host_temp_dir)
+        
+        # Simple approach: replace temp directory path with container mount path
+        if host_temp_dir_norm in command:
+            # Escape special regex characters in the temp directory path
+            escaped_temp_dir = re.escape(host_temp_dir_norm)
+            
+            def replace_temp_path(match):
+                matched_path = match.group(0)
+                # Get the relative path from temp directory
+                if matched_path.startswith(host_temp_dir_norm):
+                    rel_path = matched_path[len(host_temp_dir_norm):].lstrip(os.sep)
+                    if rel_path:
+                        # Construct container path
+                        container_path = os.path.join(container_mount_path, rel_path).replace('\\', '/')
+                    else:
+                        container_path = container_mount_path
+                    return container_path
+                return matched_path
+            
+            # Replace temp directory paths (match the temp dir followed by any path characters)
+            # This pattern matches the temp dir path and everything after it until a space, quote, or special char
+            translated_command = re.sub(
+                escaped_temp_dir + r'[^\s"\'<>|&;()]*',
+                replace_temp_path,
+                command
+            )
+            return translated_command
+        
+        return command
     
     def _execute_bash_command_in_session(self, command: str, timeout: int = 30) -> dict:
         """
@@ -550,12 +609,15 @@ class ToolUse:
                 self._bash_session = self._create_bash_session()
                 session = self._bash_session
             
+            # Translate file paths from host temp directory to container mount path
+            translated_command = self._translate_path_for_container(command, session)
+            
             # Execute command in Docker container
             # Use sh -c to execute the command (alpine uses sh, not bash)
             exec_cmd = [
                 'docker', 'exec',
                 session.container_name,
-                'sh', '-c', command
+                'sh', '-c', translated_command
             ]
             
             try:
@@ -845,17 +907,204 @@ class ToolUse:
     def _handle_text_editor_from_kwargs(self, **kwargs) -> dict:
         """
         Handle text editor operations from Claude's tool call parameters.
-        The exact parameter names depend on the tool's built-in schema.
+        The text_editor_20250728 tool uses specific command names: view, create, str_replace, insert
         """
-        # Map common text editor operations
-        # Note: The actual parameter names come from Anthropic's tool schema
-        action = kwargs.get("action") or kwargs.get("operation")
-        file_path = kwargs.get("file_path") or kwargs.get("path")
-        content = kwargs.get("content") or kwargs.get("text")
-        start_line = kwargs.get("start_line") or kwargs.get("start")
-        end_line = kwargs.get("end_line") or kwargs.get("end")
+        # Check which command is present in kwargs
+        # The text_editor_20250728 tool uses command names directly, not an "action" parameter
+        # Priority: create > str_replace > insert > view (check for specific params first)
         
-        return self._handle_text_editor(action, file_path, content, start_line, end_line)
+        # Handle 'create' command (has file_text)
+        if 'file_text' in kwargs:
+            path = kwargs.get('path')
+            file_text = kwargs.get('file_text')
+            
+            if not path:
+                return {"error": "path is required for create operation"}
+            
+            # Determine safe directory
+            safe_dir = os.getcwd()
+            if not os.path.exists(safe_dir):
+                safe_dir = tempfile.gettempdir()
+            
+            # Handle absolute paths or relative paths
+            if os.path.isabs(path):
+                temp_dir = tempfile.gettempdir()
+                if path.startswith(temp_dir):
+                    full_path = path
+                else:
+                    full_path = os.path.join(safe_dir, os.path.basename(path))
+            else:
+                full_path = os.path.join(safe_dir, path)
+            
+            # Security check
+            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
+                return {"error": "File path is outside safe directory"}
+            
+            # Create directory if needed
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            # Write file
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(file_text)
+            
+            return {"success": True, "file_path": path, "message": f"File created successfully"}
+        
+        # Handle 'str_replace' command
+        if 'old_str' in kwargs and 'new_str' in kwargs:
+            path = kwargs.get('path')
+            old_str = kwargs.get('old_str')
+            new_str = kwargs.get('new_str')
+            
+            if not path:
+                return {"error": "path is required for str_replace operation"}
+            
+            # Determine safe directory
+            safe_dir = os.getcwd()
+            if not os.path.exists(safe_dir):
+                safe_dir = tempfile.gettempdir()
+            
+            # Handle absolute paths or relative paths
+            if os.path.isabs(path):
+                temp_dir = tempfile.gettempdir()
+                if path.startswith(temp_dir):
+                    full_path = path
+                else:
+                    full_path = os.path.join(safe_dir, os.path.basename(path))
+            else:
+                full_path = os.path.join(safe_dir, path)
+            
+            # Security check
+            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
+                return {"error": "File path is outside safe directory"}
+            
+            if not os.path.exists(full_path):
+                return {"error": f"File not found: {path}"}
+            
+            # Read file
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Count occurrences
+            count = content.count(old_str)
+            if count == 0:
+                return {"error": f"No matches found for the string to replace in {path}"}
+            if count > 1:
+                return {"error": f"Multiple matches ({count}) found for the string to replace. Please be more specific."}
+            
+            # Replace
+            new_content = content.replace(old_str, new_str, 1)  # Replace only first occurrence
+            
+            # Write back
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            
+            return {"success": True, "file_path": path, "message": f"String replaced successfully in {path}"}
+        
+        # Handle 'insert' command
+        if 'insert_line' in kwargs and 'new_str' in kwargs:
+            path = kwargs.get('path')
+            insert_line = kwargs.get('insert_line')
+            new_str = kwargs.get('new_str')
+            
+            if not path:
+                return {"error": "path is required for insert operation"}
+            
+            # Determine safe directory
+            safe_dir = os.getcwd()
+            if not os.path.exists(safe_dir):
+                safe_dir = tempfile.gettempdir()
+            
+            # Handle absolute paths or relative paths
+            if os.path.isabs(path):
+                temp_dir = tempfile.gettempdir()
+                if path.startswith(temp_dir):
+                    full_path = path
+                else:
+                    full_path = os.path.join(safe_dir, os.path.basename(path))
+            else:
+                full_path = os.path.join(safe_dir, path)
+            
+            # Security check
+            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
+                return {"error": "File path is outside safe directory"}
+            
+            if not os.path.exists(full_path):
+                return {"error": f"File not found: {path}"}
+            
+            # Read file
+            with open(full_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Insert at specified line (1-indexed, insert after the line)
+            if insert_line < 0:
+                insert_line = 0
+            if insert_line > len(lines):
+                insert_line = len(lines)
+            
+            # Insert the new string (add newline if new_str doesn't end with one)
+            insert_text = new_str if new_str.endswith('\n') else new_str + '\n'
+            lines.insert(insert_line, insert_text)
+            
+            # Write back
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            
+            return {"success": True, "file_path": path, "message": f"Text inserted successfully at line {insert_line + 1}"}
+        
+        # Handle 'view' command (default if only path is provided)
+        if 'path' in kwargs:
+            path = kwargs.get('path')
+            view_range = kwargs.get('view_range')  # Optional: [start_line, end_line]
+            max_characters = kwargs.get('max_characters')  # Optional
+            
+            # Determine safe directory
+            safe_dir = os.getcwd()
+            if not os.path.exists(safe_dir):
+                safe_dir = tempfile.gettempdir()
+            
+            # Handle absolute paths or relative paths
+            if os.path.isabs(path):
+                # If absolute path, check if it's in temp directory (for doc management files)
+                temp_dir = tempfile.gettempdir()
+                if path.startswith(temp_dir):
+                    # It's a temp file, use it directly
+                    full_path = path
+                else:
+                    # Absolute path outside temp - treat as relative to safe_dir
+                    full_path = os.path.join(safe_dir, os.path.basename(path))
+            else:
+                # Relative path
+                full_path = os.path.join(safe_dir, path)
+            
+            # Security check
+            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
+                return {"error": "File path is outside safe directory"}
+            
+            if not os.path.exists(full_path):
+                return {"error": f"File not found: {path}"}
+            
+            # Read file content
+            with open(full_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Apply view_range if specified
+            if view_range and len(view_range) == 2:
+                start_line, end_line = view_range
+                # Convert to 0-indexed and handle bounds
+                start_idx = max(0, start_line - 1) if start_line > 0 else 0
+                end_idx = min(len(lines), end_line) if end_line > 0 else len(lines)
+                content = ''.join(lines[start_idx:end_idx])
+            else:
+                content = ''.join(lines)
+            
+            # Apply max_characters limit if specified
+            if max_characters and len(content) > max_characters:
+                content = content[:max_characters] + "\n... [truncated]"
+            
+            return {"content": content, "file_path": path}
+        
+        # If no recognized command, return error
+        return {"error": "Unknown text editor command. Supported commands: view (path), create (path, file_text), str_replace (path, old_str, new_str), insert (path, insert_line, new_str)"}
 
     @property
     def tools(self):

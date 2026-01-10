@@ -212,6 +212,23 @@ class ConversationManager:
         
         if include_in_slim:
             self.slim_conversation.append(user_message)  # Keep in sync for backward compatibility
+    
+    def add_user_message_multimodal(self, content_blocks: List[Dict], include_in_slim: bool = False):
+        """
+        Add a multimodal user message with content blocks.
+        
+        Args:
+            content_blocks: List of content blocks (text, image, document)
+            include_in_slim: Whether to include in slim conversation
+        """
+        message = {
+            "role": "user",
+            "content": content_blocks
+        }
+        self.conversation.append(message)
+        
+        if include_in_slim:
+            self.slim_conversation.append(message)
 
     def add_tool_results(self, tool_results):
         """Add tool results to the conversation history

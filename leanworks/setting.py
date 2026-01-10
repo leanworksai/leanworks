@@ -11,6 +11,21 @@ QUERY_REWRITES = True
 GENERATION_MODEL = "claude-haiku-4-5-20251001"
 OTHER_MODEL = "claude-3-haiku-20240307"
 
+# File upload configuration (Claude Files API limits)
+MAX_FILE_SIZE_MB = 500  # Claude Files API limit per file
+MAX_FILES_PER_REQUEST = 5  # Our application limit
+MAX_TOTAL_STORAGE_GB = 100  # Claude Files API limit per org
+
+# Supported file types for Claude Files API
+SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+SUPPORTED_DOCUMENT_TYPES = ["application/pdf", "text/plain"]
+
+# Claude Files API beta header
+CLAUDE_FILES_API_BETA = "files-api-2025-04-14"
+
+# File retention policy (our application)
+FILE_RETENTION_DAYS = 90  # Track when to clean up old file records
+
 # Reranker configuration
 RERANK_MODEL = "claude-3-haiku-20240307"
 RERANKER_TYPE = "llm"  # Options: "llm", "bge" (now uses optimized version)

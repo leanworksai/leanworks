@@ -6,6 +6,7 @@ import os
 from typing import Dict, List, Any, Optional, Union
 from psycopg2.extras import RealDictCursor
 import re
+import markdown
 
 from .postgres import PostgresTool, AI_AGENT_ID
 
@@ -66,7 +67,7 @@ class DocManagementTool:
         
         Parameters:
         - title (required): Document title
-        - content (required): Document content (markdown or HTML/rich text)
+        - content (required): Document content in markdown format
         - projectId (optional): Associated project ID
         - teamId (optional): Associated team ID
         - tags (optional): Array of tag strings
@@ -74,6 +75,10 @@ class DocManagementTool:
         - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
         - visibleToMembers (optional): Array of email addresses
         - metadata (optional): JSON object for additional metadata
+        
+        Content Format:
+        - Input: Markdown format (required)
+        - Output: Markdown format (returned to agent)
         
         Returns:
         - Success: Dictionary with doc id and created fields
@@ -92,7 +97,7 @@ class DocManagementTool:
                     },
                     "content": {
                         "type": "string",
-                        "description": "Document content (markdown or HTML/rich text) (required)"
+                        "description": "Document content in markdown format (required). Will be converted to TipTap JSON format for storage."
                     },
                     "projectId": {
                         "type": "string",
@@ -165,8 +170,10 @@ class DocManagementTool:
             if not title or not content:
                 return {"error": "title and content are required"}
             
-            # Detect if content is markdown and convert to HTML
-            html_content = self._convert_to_html_if_needed(content)
+            # Normalize content to markdown first (handles HTML/TipTap JSON input)
+            # Then convert to TipTap JSON format for storage
+            markdown_content = self._normalize_content_to_markdown(content)
+            tiptap_json_content = self.markdown_to_tiptap_json(markdown_content)
             
             # Validate visibility
             valid_visibility = ['all_members', 'specific_members']
@@ -192,7 +199,7 @@ class DocManagementTool:
                     """, (
                         doc_id,
                         title,
-                        html_content,
+                        tiptap_json_content,
                         AI_AGENT_ID,  # Always use AI agent ID
                         projectId,
                         teamId,
@@ -214,7 +221,7 @@ class DocManagementTool:
                             """, (
                                 doc_id,
                                 title,
-                                html_content,
+                                tiptap_json_content,
                                 AI_AGENT_ID,  # Always use AI agent ID
                                 projectId,
                                 teamId,
@@ -233,7 +240,7 @@ class DocManagementTool:
                                 """, (
                                     doc_id,
                                     title,
-                                    html_content,
+                                    tiptap_json_content,
                                     AI_AGENT_ID,  # Always use AI agent ID
                                     projectId,
                                     teamId,
@@ -253,7 +260,7 @@ class DocManagementTool:
                             """, (
                                 doc_id,
                                 title,
-                                html_content,
+                                tiptap_json_content,
                                 AI_AGENT_ID,  # Always use AI agent ID
                                 projectId,
                                 teamId,
@@ -272,7 +279,7 @@ class DocManagementTool:
                                 """, (
                                     doc_id,
                                     title,
-                                    html_content,
+                                    tiptap_json_content,
                                     AI_AGENT_ID,  # Always use AI agent ID
                                     projectId,
                                     teamId,
@@ -288,10 +295,11 @@ class DocManagementTool:
                 conn.commit()
             
             logger.info(f"Document created: id={doc_id}, title={title}, owner_email={AI_AGENT_ID}")
+            # Return markdown content to agent (not TipTap JSON)
             return {
                 "id": doc_id,
                 "title": title,
-                "content": html_content,
+                "content": content,  # Return original markdown, not TipTap JSON
                 "ownerEmail": AI_AGENT_ID,
                 "projectId": projectId,
                 "teamId": teamId,
@@ -318,7 +326,7 @@ class DocManagementTool:
         Parameters:
         - docId (required): Document ID to update
         - title (optional): Update title
-        - content (optional): Update content (markdown or HTML)
+        - content (optional): Update content in markdown format
         - projectId (optional): Update project association
         - teamId (optional): Update team association
         - tags (optional): Update tags array
@@ -326,6 +334,10 @@ class DocManagementTool:
         - visibility (optional): Update visibility
         - visibleToMembers (optional): Update visible members
         - metadata (optional): Update metadata
+        
+        Content Format:
+        - Input: Markdown format
+        - Output: Success status (content is converted to TipTap JSON format for storage)
         
         Returns:
         - Success: Dictionary with success: true
@@ -348,7 +360,7 @@ class DocManagementTool:
                     },
                     "content": {
                         "type": "string",
-                        "description": "Update content (markdown or HTML)"
+                        "description": "Update content in markdown format. Will be converted to TipTap JSON format for storage."
                     },
                     "projectId": {
                         "type": "string",
@@ -398,10 +410,10 @@ class DocManagementTool:
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
         
         Returns:
-        - Success: List of document dictionaries with all fields including: id, title, content (full HTML), owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success: List of document dictionaries with all fields including: id, title, content (markdown format), owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
         - Error: Dictionary with error message
         
-        Note: Content is returned as HTML. Use get_doc_markdown_path if you need markdown format for editing.
+        Note: Content is returned as markdown format (converted from TipTap JSON stored in database). Documents are stored in TipTap JSON format internally, but are automatically converted to markdown for the agent.
         
         Example Use Cases:
         - Read a specific document's full content
@@ -529,6 +541,11 @@ class DocManagementTool:
                     if 'is_pinned' not in doc:
                         doc['is_pinned'] = False
                     
+                    # Convert content from TipTap JSON (or legacy HTML) to markdown
+                    if 'content' in doc and doc['content']:
+                        content = doc['content']
+                        doc['content'] = self._convert_content_to_markdown(content)
+                    
                     # Parse JSONB fields if they're strings
                     if 'tags' in doc:
                         tags_value = doc['tags']
@@ -631,8 +648,8 @@ class DocManagementTool:
         Create a new document from a markdown file in org `{self.org_slug}`.
         
         This tool reads a markdown file (typically created/edited with the text editor tool),
-        converts it to HTML, and saves it to the database. The temporary file is cleaned up
-        after the operation.
+        converts it to TipTap JSON format, and saves it to the database. The temporary file is cleaned up
+        after the operation. Content is stored as TipTap JSON internally but returned as markdown to the agent.
         
         Parameters:
         - file_path (required): Path to markdown file
@@ -706,8 +723,8 @@ class DocManagementTool:
         Update an existing document from a markdown file in org `{self.org_slug}`.
         
         This tool reads a markdown file (typically created/edited with the text editor tool),
-        converts it to HTML, and updates the document in the database. The temporary file is
-        cleaned up after the operation.
+        converts it to TipTap JSON format, and updates the document in the database. The temporary file is
+        cleaned up after the operation. Content is stored as TipTap JSON internally but returned as markdown to the agent.
         
         Parameters:
         - docId (required): Document ID to update
@@ -883,9 +900,11 @@ class DocManagementTool:
                 for key, db_field in field_map.items():
                     value = updates_dict.get(key)
                     if value is not None:
-                        # Convert markdown to HTML if content field
+                        # Normalize content to markdown first (handles HTML/TipTap JSON input)
+                        # Then convert to TipTap JSON if content field
                         if key == 'content':
-                            value = self._convert_to_html_if_needed(value)
+                            markdown_content = self._normalize_content_to_markdown(value)
+                            value = self.markdown_to_tiptap_json(markdown_content)
                         set_clauses.append(f"{db_field} = %s")
                         values.append(value)
                 
@@ -934,126 +953,66 @@ class DocManagementTool:
     # Content Conversion Functions
     # ============================================================================
     
-    def markdown_to_html(self, markdown: str) -> str:
-        """Convert markdown to TipTap-compatible HTML."""
-        html = markdown
+    def markdown_to_html(self, markdown_text: str) -> str:
+        """
+        Convert markdown to TipTap-compatible HTML using the markdown library.
         
-        # Headers
-        html = re.sub(r'^### (.*?)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
-        html = re.sub(r'^## (.*?)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
-        html = re.sub(r'^# (.*?)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+        Supports:
+        - Headers (h1-h6)
+        - Bold, italic, strikethrough
+        - Links and images
+        - Lists (ordered, unordered, nested)
+        - Tables
+        - Code blocks and inline code
+        - Blockquotes
+        - Horizontal rules
+        - Line breaks
         
-        # Bold (must come before italic to avoid conflicts)
-        html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
-        html = re.sub(r'__(.*?)__', r'<strong>\1</strong>', html)
-        
-        # Italic (process after bold to avoid conflicts)
-        html = re.sub(r'(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', html)
-        html = re.sub(r'(?<!_)_(?!_)([^_]+?)(?<!_)_(?!_)', r'<em>\1</em>', html)
-        
-        # Links
-        html = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2" class="text-primary underline">\1</a>', html)
-        
-        # Tables (process before lists to avoid conflicts)
-        # Markdown table format: | col1 | col2 | col3 |
-        #                        |------|------|------|
-        #                        | val1 | val2 | val3 |
-        table_pattern = r'(\|.+\|(?:\n\|[-\s|:]+\|)?(?:\n\|.+\|)+)'
-        def convert_table(match):
-            table_text = match.group(1)
-            lines = [l.strip() for l in table_text.split('\n') if l.strip()]
-            if len(lines) < 2:
-                return table_text
+        Args:
+            markdown_text: Markdown content to convert
             
-            # First line is header, second is separator, rest are rows
-            header_line = lines[0]
-            rows = lines[2:] if len(lines) > 2 else []
-            
-            # Parse header
-            headers = [cell.strip() for cell in header_line.split('|')[1:-1]]
-            
-            # Build HTML table
-            table_html = '<table><thead><tr>'
-            for header in headers:
-                escaped_header = self._escape_html(header)
-                table_html += f'<th>{escaped_header}</th>'
-            table_html += '</tr></thead>'
-            
-            if rows:
-                table_html += '<tbody>'
-                for row_line in rows:
-                    cells = [cell.strip() for cell in row_line.split('|')[1:-1]]
-                    table_html += '<tr>'
-                    for cell in cells:
-                        escaped_cell = self._escape_html(cell)
-                        table_html += f'<td>{escaped_cell}</td>'
-                    table_html += '</tr>'
-                table_html += '</tbody>'
-            
-            table_html += '</table>'
-            return table_html
+        Returns:
+            HTML content compatible with TipTap editor
+        """
+        if not markdown_text:
+            return markdown_text
         
-        html = re.sub(table_pattern, convert_table, html, flags=re.MULTILINE)
+        # Configure markdown with extensions
+        md = markdown.Markdown(
+            extensions=[
+                'tables',      # Table support
+                'fenced_code', # Code blocks with ```
+                'nl2br',       # Line breaks (two spaces + newline)
+                'sane_lists',  # Better list handling
+            ],
+            output_format='html'
+        )
         
-        # Lists (simple implementation)
-        lines = html.split('\n')
-        in_list = False
-        list_type = None
-        result_lines = []
+        # Convert markdown to HTML
+        html = md.convert(markdown_text)
         
-        for line in lines:
-            # Skip lines that are already part of HTML tables
-            if line.strip().startswith('<table') or line.strip().startswith('</table') or \
-               line.strip().startswith('<thead') or line.strip().startswith('</thead') or \
-               line.strip().startswith('<tbody') or line.strip().startswith('</tbody') or \
-               line.strip().startswith('<tr') or line.strip().startswith('</tr') or \
-               line.strip().startswith('<th') or line.strip().startswith('</th') or \
-               line.strip().startswith('<td') or line.strip().startswith('</td'):
-                if in_list:
-                    result_lines.append(f'</{list_type}>')
-                    in_list = False
-                    list_type = None
-                result_lines.append(line)
-                continue
-            
-            # Ordered list
-            if re.match(r'^\d+\.\s+(.*)', line):
-                if not in_list or list_type != 'ol':
-                    if in_list:
-                        result_lines.append(f'</{list_type}>')
-                    result_lines.append('<ol>')
-                    in_list = True
-                    list_type = 'ol'
-                match = re.match(r'^\d+\.\s+(.*)', line)
-                result_lines.append(f'<li>{self._escape_html(match.group(1))}</li>')
-            # Unordered list
-            elif re.match(r'^[-*]\s+(.*)', line):
-                if not in_list or list_type != 'ul':
-                    if in_list:
-                        result_lines.append(f'</{list_type}>')
-                    result_lines.append('<ul>')
-                    in_list = True
-                    list_type = 'ul'
-                match = re.match(r'^[-*]\s+(.*)', line)
-                result_lines.append(f'<li>{self._escape_html(match.group(1))}</li>')
+        # Post-process to add custom styling for links (preserve original behavior)
+        # Add class="text-primary underline" to links if not already present
+        def add_link_class(match):
+            href = match.group(1)
+            attrs = match.group(2)
+            # Check if class already exists
+            if 'class=' in attrs:
+                # Append to existing class
+                attrs = re.sub(
+                    r'class="([^"]*)"',
+                    r'class="\1 text-primary underline"',
+                    attrs
+                )
             else:
-                if in_list:
-                    result_lines.append(f'</{list_type}>')
-                    in_list = False
-                    list_type = None
-                if line.strip():
-                    # Convert plain text lines to paragraphs
-                    escaped_line = self._escape_html(line)
-                    escaped_line = escaped_line.replace('\n', '<br>')
-                    result_lines.append(f'<p style="white-space: pre-wrap;">{escaped_line}</p>')
+                # Add new class attribute
+                attrs = f' class="text-primary underline"{attrs}'
+            return f'<a href="{href}"{attrs}>'
         
-        if in_list:
-            result_lines.append(f'</{list_type}>')
+        html = re.sub(r'<a href="([^"]+)"([^>]*)>', add_link_class, html)
         
-        html = '\n'.join(result_lines)
-        
-        # Code blocks (simple)
-        html = re.sub(r'`([^`]+)`', r'<code>\1</code>', html)
+        # Clean up any extra whitespace
+        html = html.strip()
         
         return html
     
@@ -1108,6 +1067,516 @@ class DocManagementTool:
         
         return markdown
     
+    def tiptap_json_to_markdown(self, tiptap_json: Union[str, dict]) -> str:
+        """
+        Convert TipTap JSON format to markdown.
+        
+        TipTap JSON structure:
+        {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Hello"}]},
+                {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Title"}]}
+            ]
+        }
+        
+        Args:
+            tiptap_json: TipTap JSON as string or dict
+            
+        Returns:
+            Markdown string
+        """
+        if not tiptap_json:
+            return ""
+        
+        # Parse JSON string if needed
+        if isinstance(tiptap_json, str):
+            try:
+                doc = json.loads(tiptap_json)
+            except json.JSONDecodeError:
+                # If not valid JSON, might be HTML or plain text - return as is
+                return tiptap_json
+        else:
+            doc = tiptap_json
+        
+        # Validate TipTap JSON structure
+        if not isinstance(doc, dict) or doc.get("type") != "doc":
+            # Not TipTap JSON format, return as string
+            if isinstance(tiptap_json, str):
+                return tiptap_json
+            return json.dumps(tiptap_json)
+        
+        content = doc.get("content", [])
+        if not content:
+            return ""
+        
+        markdown_lines = []
+        
+        def process_node(node: dict, list_context: Optional[dict] = None) -> str:
+            """Process a TipTap node and return markdown representation."""
+            node_type = node.get("type", "")
+            attrs = node.get("attrs", {})
+            node_content = node.get("content", [])
+            
+            if node_type == "text":
+                text = node.get("text", "")
+                marks = node.get("marks", [])
+                
+                # Apply marks (bold, italic, etc.)
+                for mark in marks:
+                    mark_type = mark.get("type", "")
+                    if mark_type == "bold":
+                        text = f"**{text}**"
+                    elif mark_type == "italic":
+                        text = f"*{text}*"
+                    elif mark_type == "strike":
+                        text = f"~~{text}~~"
+                    elif mark_type == "code":
+                        text = f"`{text}`"
+                    elif mark_type == "link":
+                        href = mark.get("attrs", {}).get("href", "")
+                        text = f"[{text}]({href})"
+                
+                return text
+            
+            elif node_type == "paragraph":
+                if not node_content:
+                    return "\n"
+                text = "".join(process_node(child) for child in node_content)
+                return text + "\n"
+            
+            elif node_type == "heading":
+                level = attrs.get("level", 1)
+                prefix = "#" * level + " "
+                text = "".join(process_node(child) for child in node_content)
+                return prefix + text.strip() + "\n"
+            
+            elif node_type == "bulletList":
+                items = []
+                for child in node_content:
+                    if child.get("type") == "listItem":
+                        item_text = process_list_item(child)
+                        items.append(f"- {item_text}")
+                return "\n".join(items) + "\n"
+            
+            elif node_type == "orderedList":
+                items = []
+                for idx, child in enumerate(node_content, 1):
+                    if child.get("type") == "listItem":
+                        item_text = process_list_item(child)
+                        items.append(f"{idx}. {item_text}")
+                return "\n".join(items) + "\n"
+            
+            elif node_type == "listItem":
+                # Handled by parent list
+                return ""
+            
+            elif node_type == "codeBlock":
+                language = attrs.get("language", "")
+                code = "".join(process_node(child) for child in node_content)
+                lang_prefix = language if language else ""
+                return f"```{lang_prefix}\n{code}\n```\n"
+            
+            elif node_type == "blockquote":
+                quote_text = "".join(process_node(child) for child in node_content)
+                lines = quote_text.strip().split("\n")
+                return "\n".join(f"> {line}" for line in lines if line.strip()) + "\n"
+            
+            elif node_type == "horizontalRule":
+                return "---\n"
+            
+            elif node_type == "hardBreak":
+                return "\n"
+            
+            elif node_type == "image":
+                src = attrs.get("src", "")
+                alt = attrs.get("alt", "")
+                title = attrs.get("title", "")
+                title_part = f' "{title}"' if title else ""
+                return f"![{alt}]({src}{title_part})\n"
+            
+            elif node_type == "table":
+                # Process table
+                rows = []
+                for child in node_content:
+                    if child.get("type") == "tableRow":
+                        cells = []
+                        for cell_node in child.get("content", []):
+                            if cell_node.get("type") in ["tableHeader", "tableCell"]:
+                                cell_text = "".join(process_node(c) for c in cell_node.get("content", []))
+                                cells.append(cell_text.strip())
+                        if cells:
+                            rows.append("| " + " | ".join(cells) + " |")
+                
+                if rows:
+                    # Add separator row after header
+                    if len(rows) > 0:
+                        separator = "| " + " | ".join(["---"] * len(rows[0].split("|")[1:-1])) + " |"
+                        return "\n".join([rows[0], separator] + rows[1:]) + "\n"
+                return ""
+            
+            else:
+                # Unknown node type - try to process content
+                if node_content:
+                    return "".join(process_node(child) for child in node_content)
+                return ""
+        
+        def process_list_item(item_node: dict) -> str:
+            """Process a list item node."""
+            text_parts = []
+            for child in item_node.get("content", []):
+                if child.get("type") == "paragraph":
+                    text_parts.append(process_node(child))
+                elif child.get("type") in ["bulletList", "orderedList"]:
+                    # Nested list
+                    nested = process_node(child)
+                    # Indent nested list items
+                    nested_lines = nested.strip().split("\n")
+                    text_parts.append("\n" + "\n".join("  " + line for line in nested_lines))
+                else:
+                    text_parts.append(process_node(child))
+            return "".join(text_parts).strip()
+        
+        # Process all top-level content nodes
+        for node in content:
+            result = process_node(node)
+            if result:
+                markdown_lines.append(result)
+        
+        # Join and clean up
+        markdown_text = "".join(markdown_lines)
+        # Remove excessive blank lines
+        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+        return markdown_text.strip()
+    
+    def markdown_to_tiptap_json(self, markdown_text: str) -> str:
+        """
+        Convert markdown to TipTap JSON format.
+        
+        Args:
+            markdown_text: Markdown content
+            
+        Returns:
+            TipTap JSON as stringified JSON
+        """
+        if not markdown_text or not markdown_text.strip():
+            # Return empty document
+            empty_doc = {
+                "type": "doc",
+                "content": [{"type": "paragraph"}]
+            }
+            return json.dumps(empty_doc)
+        
+        # First convert markdown to HTML using existing method
+        html = self.markdown_to_html(markdown_text)
+        
+        # Then convert HTML to TipTap JSON
+        # Parse HTML and build TipTap JSON structure
+        return self._html_to_tiptap_json(html)
+    
+    def _html_to_tiptap_json(self, html: str) -> str:
+        """
+        Convert HTML to TipTap JSON format.
+        
+        This is a helper method that parses HTML and builds TipTap JSON structure.
+        
+        Args:
+            html: HTML content
+            
+        Returns:
+            TipTap JSON as stringified JSON
+        """
+        if not html or not html.strip():
+            empty_doc = {"type": "doc", "content": [{"type": "paragraph"}]}
+            return json.dumps(empty_doc)
+        
+        # Use regex to parse HTML into TipTap JSON structure
+        # This is a simplified parser - for production, consider using BeautifulSoup
+        content = []
+        
+        # Split HTML into blocks (rough parsing)
+        # Remove script and style tags
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Extract paragraphs, headers, lists, etc.
+        # This is a simplified approach - for better results, use proper HTML parser
+        
+        # Split by block-level elements
+        blocks = re.split(r'(<(?:h[1-6]|p|ul|ol|blockquote|pre|table|hr)[^>]*>.*?</(?:h[1-6]|p|ul|ol|blockquote|pre|table|hr)>)', 
+                        html, flags=re.IGNORECASE | re.DOTALL)
+        
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            
+            # Parse different block types
+            if re.match(r'<h([1-6])', block, re.IGNORECASE):
+                match = re.match(r'<h([1-6])[^>]*>(.*?)</h[1-6]>', block, re.IGNORECASE | re.DOTALL)
+                if match:
+                    level = int(match.group(1))
+                    text_content = self._extract_text_from_html(match.group(2))
+                    content.append({
+                        "type": "heading",
+                        "attrs": {"level": level},
+                        "content": self._text_to_tiptap_nodes(text_content)
+                    })
+            
+            elif re.match(r'<p', block, re.IGNORECASE):
+                match = re.match(r'<p[^>]*>(.*?)</p>', block, re.IGNORECASE | re.DOTALL)
+                if match:
+                    text_content = match.group(1)
+                    nodes = self._html_inline_to_tiptap_nodes(text_content)
+                    if nodes:
+                        content.append({"type": "paragraph", "content": nodes})
+                    else:
+                        content.append({"type": "paragraph"})
+            
+            elif re.match(r'<ul', block, re.IGNORECASE):
+                list_items = re.findall(r'<li[^>]*>(.*?)</li>', block, re.IGNORECASE | re.DOTALL)
+                items = []
+                for item_html in list_items:
+                    item_nodes = self._html_inline_to_tiptap_nodes(item_html)
+                    items.append({
+                        "type": "listItem",
+                        "content": [{"type": "paragraph", "content": item_nodes} if item_nodes else {"type": "paragraph"}]
+                    })
+                if items:
+                    content.append({"type": "bulletList", "content": items})
+            
+            elif re.match(r'<ol', block, re.IGNORECASE):
+                list_items = re.findall(r'<li[^>]*>(.*?)</li>', block, re.IGNORECASE | re.DOTALL)
+                items = []
+                for item_html in list_items:
+                    item_nodes = self._html_inline_to_tiptap_nodes(item_html)
+                    items.append({
+                        "type": "listItem",
+                        "content": [{"type": "paragraph", "content": item_nodes} if item_nodes else {"type": "paragraph"}]
+                    })
+                if items:
+                    content.append({"type": "orderedList", "content": items})
+            
+            elif re.match(r'<blockquote', block, re.IGNORECASE):
+                match = re.match(r'<blockquote[^>]*>(.*?)</blockquote>', block, re.IGNORECASE | re.DOTALL)
+                if match:
+                    quote_text = self._extract_text_from_html(match.group(1))
+                    quote_nodes = self._text_to_tiptap_nodes(quote_text)
+                    content.append({
+                        "type": "blockquote",
+                        "content": [{"type": "paragraph", "content": quote_nodes} if quote_nodes else {"type": "paragraph"}]
+                    })
+            
+            elif re.match(r'<pre', block, re.IGNORECASE):
+                match = re.match(r'<pre[^>]*><code[^>]*>(.*?)</code></pre>', block, re.IGNORECASE | re.DOTALL)
+                if match:
+                    code_text = self._extract_text_from_html(match.group(1))
+                    content.append({
+                        "type": "codeBlock",
+                        "attrs": {},
+                        "content": [{"type": "text", "text": code_text}]
+                    })
+            
+            elif re.match(r'<hr', block, re.IGNORECASE):
+                content.append({"type": "horizontalRule"})
+        
+        # If no content was parsed, create a paragraph with the text
+        if not content:
+            text_content = self._extract_text_from_html(html)
+            if text_content.strip():
+                content.append({
+                    "type": "paragraph",
+                    "content": self._text_to_tiptap_nodes(text_content)
+                })
+            else:
+                content.append({"type": "paragraph"})
+        
+        doc = {"type": "doc", "content": content}
+        return json.dumps(doc)
+    
+    def _extract_text_from_html(self, html: str) -> str:
+        """Extract plain text from HTML, preserving basic structure."""
+        # Remove HTML tags but keep text
+        text = re.sub(r'<[^>]+>', '', html)
+        # Decode HTML entities
+        text = text.replace('&amp;', '&')
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&quot;', '"')
+        text = text.replace('&#39;', "'")
+        text = text.replace('&nbsp;', ' ')
+        return text.strip()
+    
+    def _html_inline_to_tiptap_nodes(self, html: str) -> List[dict]:
+        """Convert inline HTML to TipTap text nodes with marks."""
+        if not html:
+            return []
+        
+        nodes = []
+        # Extract text and inline formatting
+        # This is simplified - handles bold, italic, links, code
+        
+        # Process links first (they can contain other formatting)
+        parts = re.split(r'(<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>)', html, flags=re.IGNORECASE | re.DOTALL)
+        
+        for i, part in enumerate(parts):
+            if i % 4 == 0:  # Regular text
+                if part:
+                    # Process inline formatting in text
+                    nodes.extend(self._text_with_marks_to_nodes(part))
+            elif i % 4 == 1:  # Full link match
+                href = parts[i+1] if i+1 < len(parts) else ""
+                link_text = parts[i+2] if i+2 < len(parts) else ""
+                # Process link text for formatting
+                link_nodes = self._text_with_marks_to_nodes(link_text, marks=[{"type": "link", "attrs": {"href": href}}])
+                nodes.extend(link_nodes)
+        
+        # If no links found, process as regular text
+        if len(nodes) == 0:
+            nodes = self._text_with_marks_to_nodes(html)
+        
+        return nodes if nodes else [{"type": "text", "text": self._extract_text_from_html(html)}]
+    
+    def _text_with_marks_to_nodes(self, text: str, marks: Optional[List[dict]] = None) -> List[dict]:
+        """Convert text with markdown-style formatting to TipTap nodes."""
+        if not text:
+            return []
+        
+        # Simple approach: extract text and apply marks
+        # For more complex formatting, parse markdown syntax
+        text = self._extract_text_from_html(text)
+        
+        # Check for markdown-style formatting
+        # Bold: **text** or __text__
+        # Italic: *text* or _text_
+        # Code: `text`
+        # Strikethrough: ~~text~~
+        
+        nodes = []
+        current_pos = 0
+        
+        # Process bold first (to avoid conflicts with italic)
+        while True:
+            bold_match = re.search(r'\*\*(.+?)\*\*|__(.+?)__', text[current_pos:])
+            if not bold_match:
+                break
+            
+            # Add text before bold
+            if bold_match.start() > 0:
+                before_text = text[current_pos:current_pos + bold_match.start()]
+                if before_text:
+                    nodes.append({"type": "text", "text": before_text})
+            
+            # Add bold text
+            bold_text = bold_match.group(1) or bold_match.group(2)
+            node_marks = (marks or []) + [{"type": "bold"}]
+            nodes.append({"type": "text", "text": bold_text, "marks": node_marks})
+            
+            current_pos += bold_match.end()
+        
+        # Add remaining text
+        if current_pos < len(text):
+            remaining = text[current_pos:]
+            if remaining:
+                if marks:
+                    nodes.append({"type": "text", "text": remaining, "marks": marks})
+                else:
+                    nodes.append({"type": "text", "text": remaining})
+        
+        # If no formatting found, return simple text node
+        if not nodes:
+            if marks:
+                return [{"type": "text", "text": text, "marks": marks}]
+            return [{"type": "text", "text": text}]
+        
+        return nodes
+    
+    def _text_to_tiptap_nodes(self, text: str) -> List[dict]:
+        """Convert plain text to TipTap text nodes."""
+        if not text:
+            return []
+        return [{"type": "text", "text": text}]
+    
+    def _convert_content_to_markdown(self, content: str) -> str:
+        """
+        Convert content from database (TipTap JSON or legacy HTML) to markdown.
+        Handles backward compatibility with HTML content.
+        
+        Args:
+            content: Content from database (TipTap JSON string or HTML string)
+            
+        Returns:
+            Markdown string
+        """
+        if not content:
+            return ""
+        
+        # Check if content is TipTap JSON format
+        if isinstance(content, str):
+            # Try to detect TipTap JSON
+            content_stripped = content.strip()
+            if content_stripped.startswith('{') and '"type":"doc"' in content_stripped.replace(' ', ''):
+                try:
+                    # It's TipTap JSON
+                    return self.tiptap_json_to_markdown(content)
+                except Exception as e:
+                    logger.warning(f"Failed to parse TipTap JSON, treating as HTML: {str(e)}")
+                    # Fall through to HTML conversion
+        
+        # Check if it's already a dict (TipTap JSON object)
+        if isinstance(content, dict):
+            return self.tiptap_json_to_markdown(content)
+        
+        # Otherwise, treat as HTML (legacy format) and convert to markdown
+        return self.html_to_markdown(content)
+    
+    def _is_tiptap_json(self, content: str) -> bool:
+        """
+        Check if content is TipTap JSON format.
+        
+        Args:
+            content: Content string to check
+            
+        Returns:
+            True if content appears to be TipTap JSON
+        """
+        if not content or not isinstance(content, str):
+            return False
+        
+        content_stripped = content.strip()
+        # Check for TipTap JSON signature
+        return (content_stripped.startswith('{') and 
+                ('"type":"doc"' in content_stripped.replace(' ', '') or 
+                 '"type": "doc"' in content_stripped))
+    
+    def _normalize_content_to_markdown(self, content: str) -> str:
+        """
+        Normalize content to markdown format.
+        Handles TipTap JSON, HTML, or markdown input.
+        
+        Args:
+            content: Content in any format (TipTap JSON, HTML, or markdown)
+            
+        Returns:
+            Markdown string
+        """
+        if not content:
+            return ""
+        
+        # Check if it's TipTap JSON
+        if self._is_tiptap_json(content):
+            return self.tiptap_json_to_markdown(content)
+        
+        # Check if it's HTML (contains HTML tags)
+        if isinstance(content, str) and '<' in content and '>' in content:
+            # Check for common HTML patterns
+            html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
+            if any(pattern in content for pattern in html_patterns):
+                return self.html_to_markdown(content)
+        
+        # Otherwise, assume it's already markdown
+        return content
+    
     # ============================================================================
     # Temporary File Management
     # ============================================================================
@@ -1153,8 +1622,9 @@ class DocManagementTool:
                         cursor.execute("SELECT content FROM docs WHERE id = %s", (docId,))
                         result = cursor.fetchone()
                         if result:
-                            html_content = result.get('content', '')
-                            content = self.html_to_markdown(html_content)
+                            db_content = result.get('content', '')
+                            # Convert from TipTap JSON (or legacy HTML) to markdown
+                            content = self._convert_content_to_markdown(db_content)
                         else:
                             content = ""
                 except Exception as e:
@@ -1306,26 +1776,102 @@ class DocManagementTool:
                 .replace('"', '&quot;')
                 .replace("'", '&#39;'))
     
-    def _convert_to_html_if_needed(self, content: str) -> str:
+    def _sanitize_html(self, html: str) -> str:
         """
-        Detect if content is markdown and convert to HTML if needed.
+        Sanitize HTML content by removing dangerous elements and attributes.
         
         Args:
-            content: Content string (markdown or HTML)
+            html: HTML content to sanitize
+            
+        Returns:
+            Sanitized HTML content
+        """
+        if not html:
+            return html
+        
+        sanitized = html
+        
+        # Remove script tags and their content
+        sanitized = re.sub(r'<script[^>]*>.*?</script>', '', sanitized, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove iframe, object, and embed tags (potentially dangerous)
+        sanitized = re.sub(r'<iframe[^>]*>.*?</iframe>', '', sanitized, flags=re.IGNORECASE | re.DOTALL)
+        sanitized = re.sub(r'<object[^>]*>.*?</object>', '', sanitized, flags=re.IGNORECASE | re.DOTALL)
+        sanitized = re.sub(r'<embed[^>]*>.*?</embed>', '', sanitized, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove event handler attributes (onclick, onerror, onload, etc.)
+        event_handlers = [
+            'onclick', 'onerror', 'onload', 'onmouseover', 'onmouseout',
+            'onfocus', 'onblur', 'onchange', 'onsubmit', 'onreset',
+            'onselect', 'onunload', 'onabort', 'onkeydown', 'onkeypress',
+            'onkeyup', 'ondblclick', 'onmousedown', 'onmouseup', 'onmousemove'
+        ]
+        for handler in event_handlers:
+            sanitized = re.sub(
+                rf'\s+{handler}\s*=\s*["\'][^"\']*["\']',
+                '',
+                sanitized,
+                flags=re.IGNORECASE
+            )
+            sanitized = re.sub(
+                rf'\s+{handler}\s*=\s*[^\s>]+',
+                '',
+                sanitized,
+                flags=re.IGNORECASE
+            )
+        
+        # Remove javascript: protocol from href and src attributes
+        sanitized = re.sub(
+            r'(href|src)\s*=\s*["\']javascript:[^"\']*["\']',
+            r'\1="#"',
+            sanitized,
+            flags=re.IGNORECASE
+        )
+        sanitized = re.sub(
+            r'(href|src)\s*=\s*javascript:[^\s>]+',
+            r'\1="#"',
+            sanitized,
+            flags=re.IGNORECASE
+        )
+        
+        # Log if any sanitization occurred
+        if sanitized != html:
+            logger.warning("HTML sanitization removed potentially dangerous content")
+        
+        return sanitized
+    
+    def _convert_to_html_if_needed(self, content: str) -> str:
+        """
+        Convert content to HTML. Defaults to treating content as markdown.
+        Only accepts HTML if explicitly wrapped in <html>...</html> tags.
+        
+        Args:
+            content: Content string (markdown preferred, or HTML wrapped in <html>...</html>)
             
         Returns:
             HTML content
         """
-        if not content:
+        if not content or not content.strip():
             return content
         
-        # Simple heuristic: if content looks like HTML (contains HTML tags), treat as HTML
-        # Otherwise, treat as markdown
-        if re.search(r'<[a-z][\s\S]*>', content, re.IGNORECASE):
-            # Looks like HTML, return as-is
-            return content
+        # Check if content is explicitly wrapped in <html>...</html> tags
+        html_wrapper_pattern = re.compile(
+            r'^\s*<html[^>]*>(.*?)</html>\s*$',
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        match = html_wrapper_pattern.match(content)
+        if match:
+            # Extract content between tags
+            html_content = match.group(1).strip()
+            logger.info("HTML content detected (wrapped in <html> tags), sanitizing...")
+            
+            # Sanitize HTML before returning
+            sanitized_html = self._sanitize_html(html_content)
+            return sanitized_html
         else:
-            # Looks like markdown, convert to HTML
+            # Default to markdown
+            logger.debug("Treating content as markdown (no <html> wrapper detected)")
             return self.markdown_to_html(content)
     
     @property

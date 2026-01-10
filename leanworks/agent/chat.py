@@ -198,7 +198,7 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Get user information from the shared database (users table).
+        Get user information from the organization database (users table).
         Falls back to default values if user not found or query fails.
         
         Returns:
@@ -215,14 +215,15 @@ class ChatAgent:
             "work_style": ""
         }
         
-        # Try to fetch user info from shared database
-        if not self.user_id:
+        # Try to fetch user info from organization database
+        if not self.user_id or not self.org_slug:
             return default_info
         
         try:
-            from app.services.database import query_shared_one
+            from app.services.database import query_org_one
             
-            user_data = query_shared_one(
+            user_data = query_org_one(
+                self.org_slug,
                 "SELECT email, first_name, last_name, job_title, timezone, responsibilities FROM users WHERE email = %s",
                 (self.user_id.lower(),)
             )
@@ -239,7 +240,7 @@ class ChatAgent:
                     "work_style": ""
                 }
         except Exception as e:
-            logger.warning(f"Could not fetch user info from shared database for {self.user_id}: {str(e)}")
+            logger.warning(f"Could not fetch user info from org database for {self.user_id} (org: {self.org_slug}): {str(e)}")
             # Fall back to default info
         
         return default_info
@@ -324,13 +325,23 @@ class ChatAgent:
         # No conversation history detected, return as-is
         return user_message
 
-    def process_message(self, user_message, cited_context=None, thinking=False, streaming=False):
+    def process_message(self, user_message, cited_context=None, file_references=None, thinking=False, streaming=False):
         """
         Process a user message and handle the conversation flow.
         
         Args:
             user_message (str): The user's message content (may contain embedded conversation history)
             cited_context (str): The cited context for the user message
+            file_references (list): List of file references from Claude Files API
+                [
+                    {
+                        "file_id": "file_011CNha8iCJcU1wXNR6q4V8w",
+                        "filename": "document.pdf",
+                        "mime_type": "application/pdf",
+                        "size_bytes": 1024000
+                    },
+                    ...
+                ]
             thinking (bool): When True, enable evaluation-and-critique loop. When False, skip evaluation and return the first direct response.
             streaming (bool): When True, show tools being used and print response in a streaming way.
         Returns:
@@ -346,6 +357,10 @@ class ChatAgent:
         # Log cited context if provided
         if cited_context:
             logger.info(f"Cited context provided: {cited_context}")
+        
+        # Log file references if provided
+        if file_references:
+            logger.info(f"File references: {[f.get('filename', 'unknown') for f in file_references]}")
         
         # Load conversation history from messages collection (source of truth for all chat types)
         # This ensures we have the latest context from the channel before processing the new message
@@ -378,10 +393,53 @@ class ChatAgent:
             # Log the final message with cited context
             logger.info(f"Final user message with cited context: {user_message}")
         
-        # Create user message object
+        # Build multimodal message content
+        content_blocks = [{"type": "text", "text": user_message}]
+        
+        # Add file references to message content
+        if file_references:
+            for file_ref in file_references:
+                file_id = file_ref.get("file_id")
+                mime_type = file_ref.get("mime_type", "")
+                filename = file_ref.get("filename", "unknown")
+                
+                if not file_id:
+                    logger.warning(f"Skipping file reference without file_id: {filename}")
+                    continue
+                
+                # Determine content block type based on MIME type
+                if mime_type in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+                    # Image content block
+                    content_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "file",
+                            "file_id": file_id
+                        }
+                    })
+                    logger.info(f"Added image reference: {filename} ({file_id})")
+                    
+                elif mime_type in ["application/pdf", "text/plain"]:
+                    # Document content block with citations enabled
+                    content_blocks.append({
+                        "type": "document",
+                        "source": {
+                            "type": "file",
+                            "file_id": file_id
+                        },
+                        "title": filename,
+                        "citations": {"enabled": True}  # Enable citations for PDFs
+                    })
+                    logger.info(f"Added document reference: {filename} ({file_id})")
+                    
+                else:
+                    # For unsupported types, log warning
+                    logger.warning(f"Unsupported MIME type for Files API: {mime_type} (file: {filename})")
+        
+        # Create user message object with multimodal content
         user_message_obj = {
             "role": "user",
-            "content": [{"type": "text", "text": user_message}]
+            "content": content_blocks
         }
         
         # Add to memory manager if enabled
@@ -389,8 +447,11 @@ class ChatAgent:
             self.memory_manager.add_turn(user_message_obj)
             logger.info(f"Added user message to memory manager. Stats: {self.memory_manager.get_memory_stats()}")
         
-        # Add the user message to conversation
-        self.conversation.add_user_message(user_message, include_in_slim=True)
+        # Add the user message to conversation (multimodal support)
+        if file_references:
+            self.conversation.add_user_message_multimodal(content_blocks, include_in_slim=True)
+        else:
+            self.conversation.add_user_message(user_message, include_in_slim=True)
         
         # If using memory manager, update API params with memory context
         if self.memory_manager:

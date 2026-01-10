@@ -481,6 +481,43 @@ def query_org_one(org_slug: str, query: str, params: Optional[tuple] = None) -> 
     return results[0] if results else None
 
 
+def save_file_metadata(org_slug: str, user_id: str, session_id: Optional[str], file_id: str, 
+                       filename: str, mime_type: str, size_bytes: int, metadata: Optional[Dict] = None) -> None:
+    """
+    Save file metadata to the database.
+    
+    Args:
+        org_slug: Organization slug
+        user_id: User ID
+        session_id: Session ID (optional)
+        file_id: Claude file_id
+        filename: Original filename
+        mime_type: MIME type
+        size_bytes: File size in bytes
+        metadata: Optional additional metadata (JSONB)
+    """
+    try:
+        query = """
+            INSERT INTO file_metadata (org_slug, user_id, session_id, file_id, filename, mime_type, size_bytes, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (file_id) DO UPDATE SET
+                org_slug = EXCLUDED.org_slug,
+                user_id = EXCLUDED.user_id,
+                session_id = EXCLUDED.session_id,
+                filename = EXCLUDED.filename,
+                mime_type = EXCLUDED.mime_type,
+                size_bytes = EXCLUDED.size_bytes,
+                metadata = EXCLUDED.metadata
+        """
+        metadata_json = json.dumps(metadata) if metadata else None
+        params = (org_slug, user_id, session_id, file_id, filename, mime_type, size_bytes, metadata_json)
+        execute_org(org_slug, query, params)
+        logger.info(f"Saved file metadata: {file_id} for user {user_id} in org {org_slug}")
+    except Exception as e:
+        logger.error(f"Error saving file metadata: {str(e)}")
+        # Don't raise - file upload succeeded, metadata save failure shouldn't break the request
+
+
 def execute_org(org_slug: str, query: str, params: Optional[tuple] = None) -> None:
     """Execute a non-SELECT query (UPDATE, INSERT, DELETE) on an organization's database.
     

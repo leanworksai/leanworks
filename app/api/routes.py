@@ -19,8 +19,10 @@ from app.services.client import (
     initialize_clients_async, 
     get_cached_storage_client
 )
-from app.services.database import query_tenant_one, get_domain_from_email
+from app.services.database import query_tenant_one, get_domain_from_email, save_file_metadata
+from app.services.anthropic_files import AnthropicFilesService
 from app.utils.cache import clear_cache
+from leanworks.setting import MAX_FILES_PER_REQUEST, MAX_FILE_SIZE_MB
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +172,50 @@ async def ask():
     logger.info("Ask endpoint accessed")
     
     try:
-        data = await request.get_json()
-        # Use authenticated user email if available (from Bearer token), otherwise use user_id from request
-        user_id = data.get("user_id")
-        org_slug = data.get("org_slug")
-        session_id = data.get("session_id")
-        tools = data.get("tools")
+        # Check if request contains files (multipart/form-data)
+        content_type = request.headers.get('Content-Type', '')
+        uploaded_files = []
+        file_references = []
+        
+        if 'multipart/form-data' in content_type:
+            # Handle multipart request with files
+            form = await request.form
+            files = await request.files
+            
+            # Extract form fields
+            user_id = form.get("user_id")
+            org_slug = form.get("org_slug")
+            session_id = form.get("session_id")
+            query = form.get("query")
+            cited_context = form.get("cited_context")
+            tools = form.get("tools")
+            
+            # Process uploaded files
+            uploaded_files = files.getlist("files")  # Support multiple files
+            
+            logger.info(f"Multipart request received with {len(uploaded_files)} files")
+            
+        else:
+            # Handle regular JSON request (existing behavior)
+            data = await request.get_json()
+            user_id = data.get("user_id")
+            org_slug = data.get("org_slug")
+            session_id = data.get("session_id")
+            query = data.get("query")
+            cited_context = data.get("cited_context")
+            tools = data.get("tools")
+        
+        # Validate required fields
+        if not user_id:
+            return {"error": "user_id is required"}, 400
+        
+        if not org_slug:
+            return {"error": "org_slug is required"}, 400
+        
+        if not query:
+            return {"error": "query is required"}, 400
+        
+        # Process tools parameter
         if tools:
             if isinstance(tools, str):
                 tools = tools.split(",")
@@ -185,15 +225,17 @@ async def ask():
                 tools = None
         else:
             tools = None
-        
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-        
-        if not org_slug:
-            return {"error": "org_slug is required"}, 400
             
         logger.info(f"Request from user_id: {user_id}, org_slug: {org_slug}, session_id: {session_id}")
-        logger.info(f"Request data: {data}")
+        if uploaded_files:
+            logger.info(f"Processing {len(uploaded_files)} uploaded files")
+        
+        # Validate file count
+        if len(uploaded_files) > MAX_FILES_PER_REQUEST:
+            return {
+                "error": f"Maximum {MAX_FILES_PER_REQUEST} files per request",
+                "code": "TOO_MANY_FILES"
+            }, 400
         
         # Performance optimization: Initialize clients asynchronously with caching
         try:
@@ -209,6 +251,68 @@ async def ask():
             logger.error(f"Error initializing clients for user {user_id} in org slug {org_slug}: {str(e)}")
             traceback.print_exc()
             return {"error": f"Failed to initialize clients: {str(e)}"}, 500
+        
+        # Process files if present
+        if uploaded_files:
+            files_service = AnthropicFilesService(model_client)
+            
+            for file in uploaded_files:
+                try:
+                    # Read file data (Quart file objects support async read)
+                    try:
+                        file_data = await file.read()
+                    except AttributeError:
+                        # Fallback for synchronous read if async not supported
+                        loop = asyncio.get_event_loop()
+                        file_data = await loop.run_in_executor(None, file.read)
+                    
+                    # Reset file pointer for validation
+                    file.seek(0)
+                    
+                    # Validate file
+                    validation = files_service.validate_file(file, max_size_mb=MAX_FILE_SIZE_MB)
+                    if not validation.get("valid", False):
+                        error_msg = validation.get("error", "Invalid file")
+                        logger.warning(f"Invalid file {file.filename}: {error_msg}")
+                        # Continue processing other files instead of failing entire request
+                        continue
+                    
+                    # Upload to Claude Files API
+                    file_info = await files_service.upload_file(
+                        file_data=file_data,
+                        filename=file.filename,
+                        mime_type=file.content_type or "application/octet-stream"
+                    )
+                    
+                    # Store metadata in database for audit
+                    try:
+                        save_file_metadata(
+                            org_slug=org_slug,
+                            user_id=user_id,
+                            session_id=session_id,
+                            file_id=file_info["file_id"],
+                            filename=file_info["filename"],
+                            mime_type=file_info["mime_type"],
+                            size_bytes=file_info["size_bytes"]
+                        )
+                    except Exception as e:
+                        # Log but don't fail - file upload succeeded
+                        logger.warning(f"Failed to save file metadata to database: {str(e)}")
+                    
+                    # Build file reference for ChatAgent
+                    file_references.append({
+                        "file_id": file_info["file_id"],
+                        "filename": file_info["filename"],
+                        "mime_type": file_info["mime_type"],
+                        "size_bytes": file_info["size_bytes"]
+                    })
+                    
+                    logger.info(f"Uploaded file to Claude Files API: {file.filename} -> {file_info['file_id']}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing file {file.filename}: {str(e)}")
+                    # Continue processing other files instead of failing entire request
+                    continue
 
         # Filter tools based on integrations table in PostgreSQL if tools are provided
         if tools is not None:
@@ -245,17 +349,27 @@ async def ask():
             tools=filtered_tools
         )
         
-        # Generate response
-        query = data.get("query")
-        cited_context = data.get("cited_context") if "cited_context" in data else None
+        # Generate response with file references
         logger.info(f"Processing query: {query[:100]}{'...' if len(query) > 100 else ''}")
+        if file_references:
+            logger.info(f"Including {len(file_references)} file references in message")
         
         # Performance optimization: Process message with timing
         processing_start_time = time.time()
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, agent.process_message, query, cited_context)
+        response = await loop.run_in_executor(
+            None, 
+            agent.process_message, 
+            query, 
+            cited_context,
+            file_references if file_references else None  # New parameter: list of file_id references
+        )
         processing_time = time.time() - processing_start_time
         logger.info(f"Message processing completed in {processing_time:.3f}s")
+        
+        # Add file metadata to response
+        if file_references:
+            response["files"] = file_references
         
         # Performance optimization: Log the interaction in the background without blocking
         # Initialize CloudStorage client for logging separately
@@ -264,9 +378,20 @@ async def ask():
             if client_name:
                 loop = asyncio.get_event_loop()
                 storage_client = await loop.run_in_executor(None, get_cached_storage_client, client_name)
+                # Prepare payload for logging (include file info if present)
+                payload = {
+                    "user_id": user_id,
+                    "org_slug": org_slug,
+                    "session_id": session_id,
+                    "query": query,
+                    "cited_context": cited_context,
+                    "tools": tools
+                }
+                if file_references:
+                    payload["files"] = [{"file_id": f["file_id"], "filename": f["filename"]} for f in file_references]
                 asyncio.create_task(async_log_interaction(
                     storage_client=storage_client,
-                    payload=data,
+                    payload=payload,
                     response=response,
                     client_domain=client_name
                 ))
