@@ -11,9 +11,13 @@ from google.cloud import firestore, secretmanager
 from google.oauth2 import service_account
 
 # Configure logging first
+# Write to stdout instead of stderr so GKE doesn't treat all logs as errors
+# GKE/Cloud Logging interprets stderr as errors regardless of log level
+import sys
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Use stdout instead of stderr (default)
 )
 logger = logging.getLogger(__name__)
 

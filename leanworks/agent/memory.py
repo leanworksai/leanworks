@@ -822,6 +822,64 @@ Please provide an updated running summary that incorporates both the existing su
         # Save profile to user-level storage (not session-level)
         self._save_user_profile()
     
+    def _save_user_profile_with_reload(self, responsibilities: str = None, work_style: str = None):
+        """Save user profile with reload from Firestore first to ensure completeness.
+        
+        This method is used as a fallback when the primary save fails. It reloads
+        the current state from Firestore, merges the updates, and saves back.
+        This prevents data loss if in-memory state is incomplete.
+        
+        Args:
+            responsibilities: Updated responsibilities text (optional)
+            work_style: Updated work style description (optional)
+        """
+        if not self.firestore_client or not self.user_id or not self.org_slug or not self.profile_path:
+            return
+        
+        try:
+            # Reload current state from Firestore to ensure completeness
+            profile_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.profile_path)
+            profile_doc = profile_ref.get()
+            
+            # Start with current Firestore state (most complete)
+            if profile_doc.exists:
+                profile_data = profile_doc.to_dict()
+                if profile_data:
+                    # Filter out Firestore metadata
+                    profile_dict = self._filter_firestore_metadata(profile_data)
+                else:
+                    profile_dict = {}
+            else:
+                # No existing profile, start fresh
+                profile_dict = {}
+            
+            # Merge in-memory updates if provided
+            if responsibilities is not None:
+                profile_dict["responsibilities"] = responsibilities
+            if work_style is not None:
+                profile_dict["work_style"] = work_style
+            
+            # Ensure required fields exist
+            profile_dict["user_id"] = self.user_id
+            profile_dict["org_slug"] = self.org_slug
+            
+            # Remove "raw" key if present (from corrupted profile fallback)
+            profile_dict.pop("raw", None)
+            
+            # Add metadata
+            profile_dict["updated_at"] = firestore.SERVER_TIMESTAMP
+            
+            # Save complete profile
+            profile_ref.set(profile_dict, merge=True)
+            
+            # Update in-memory after successful save
+            profile_dict_for_json = self._filter_firestore_metadata(profile_dict)
+            self.user_profile = json.dumps(profile_dict_for_json, ensure_ascii=False)
+            
+            logger.info("Saved user profile to user-level storage (with reload from Firestore)")
+        except Exception as e:
+            logger.error(f"Error saving user profile with reload: {str(e)}")
+    
     def _save_user_profile(self):
         """Save user profile to user-level storage (shared across all sessions).
         
@@ -987,20 +1045,13 @@ Please provide an updated running summary that incorporates both the existing su
         """
         Update user profile fields (responsibilities and/or work_style).
         
+        Uses atomic updates: only updates in-memory after successful Firestore save
+        to prevent data inconsistency on failures.
+        
         Args:
             responsibilities: Updated responsibilities text
             work_style: Updated work style description
         """
-        profile = self.get_user_profile_dict()
-        
-        if responsibilities is not None:
-            profile["responsibilities"] = responsibilities
-        if work_style is not None:
-            profile["work_style"] = work_style
-        
-        # Update in-memory JSON string
-        self.user_profile = json.dumps(profile, ensure_ascii=False)
-        
         # Save directly to Firestore in flattened structure (more efficient)
         if self.firestore_client and self.user_id and self.org_slug and self.profile_path:
             try:
@@ -1015,8 +1066,7 @@ Please provide an updated running summary that incorporates both the existing su
                 
                 # Ensure user_id and org_slug are set
                 update_data["user_id"] = self.user_id
-                if "org_slug" not in profile:
-                    update_data["org_slug"] = self.org_slug
+                update_data["org_slug"] = self.org_slug
                 
                 # Add metadata
                 update_data["updated_at"] = firestore.SERVER_TIMESTAMP
@@ -1024,12 +1074,28 @@ Please provide an updated running summary that incorporates both the existing su
                 # Use merge=True to only update specified fields
                 profile_ref.set(update_data, merge=True)
                 logger.info(f"Updated user profile in Firestore (flattened structure): responsibilities={responsibilities is not None}, work_style={work_style is not None}")
+                
+                # Only update in-memory AFTER successful save to prevent inconsistency
+                profile = self.get_user_profile_dict()
+                if responsibilities is not None:
+                    profile["responsibilities"] = responsibilities
+                if work_style is not None:
+                    profile["work_style"] = work_style
+                self.user_profile = json.dumps(profile, ensure_ascii=False)
+                
             except Exception as e:
                 logger.error(f"Error saving user profile to Firestore: {str(e)}")
-                # Fallback to old save method
-                self._save_user_profile()
+                # Fallback: reload from Firestore first to ensure completeness, then save
+                self._save_user_profile_with_reload(responsibilities, work_style)
         else:
             # Fallback to old save method if Firestore not available
+            # Update in-memory first since we can't save
+            profile = self.get_user_profile_dict()
+            if responsibilities is not None:
+                profile["responsibilities"] = responsibilities
+            if work_style is not None:
+                profile["work_style"] = work_style
+            self.user_profile = json.dumps(profile, ensure_ascii=False)
             self._save_user_profile()
         
         logger.info(f"Updated user profile: responsibilities={responsibilities is not None}, work_style={work_style is not None}")

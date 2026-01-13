@@ -61,7 +61,7 @@ class ToolUse:
         self.session_id = session_id
         
         # Internal tools that are always available
-        internal_tools = ['search', 'postgres', 'duckdb', 'firestore']
+        internal_tools = ['search', 'postgres', 'duckdb', 'firestore', 'doc_management']
         
         # Set default tools if not provided
         if tools is None:
@@ -124,7 +124,7 @@ class ToolUse:
     def doc_management_tool(self):
         """Lazy-load DocManagementTool on first access."""
         if 'doc_management_tool' not in self._tool_cache:
-            if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
+            if 'doc_management' in self.requested_tools and self.postgres_client_wrapper:
                 try:
                     # Set Secret Manager client for PostgresTool (needed for connection pool)
                     if self.secret_manager_client:
@@ -139,7 +139,7 @@ class ToolUse:
                 except Exception as e:
                     logger.error(f"Failed to initialize DocManagementTool: {str(e)}")
                     self._tool_cache['doc_management_tool'] = None
-            elif 'postgres' in self.requested_tools:
+            elif 'doc_management' in self.requested_tools:
                 logger.warning("DocManagementTool not initialized: missing postgres_client_wrapper")
                 self._tool_cache['doc_management_tool'] = None
             else:
@@ -1153,7 +1153,6 @@ class ToolUse:
             if self.firestore_tool:
                 self._tools_cache.extend([
                     self.firestore_tool.query_messages_property,
-                    self.firestore_tool.send_message_property,
                 ])
                 logger.info("Firestore tools added to tools list (lazy)")
 
@@ -1308,7 +1307,6 @@ class ToolUse:
             if self.firestore_tool:
                 self._function_map_cache.update({
                     "query_messages": self.firestore_tool.query_messages,
-                    "send_message": self.firestore_tool.send_message,
                 })
                 logger.info("Firestore functions added to function_map (lazy)")
 

@@ -128,6 +128,7 @@ AGENT_SYSTEM_PROMPT = """
     <tool_calling>
     You have below tools at your disposal to answer project management related questions.
     PostgreSQL tools: query_postgres
+    Document management tools: create_doc, update_doc, get_doc, list_docs, get_doc_markdown_path, create_doc_from_markdown_file, update_doc_from_markdown_file
     Search tools: search_documents
     Outlook tools: list_upcoming_meetings,find_available_slots
     Atlassian tools: search_issues,get_issue,create_issue,update_issue,add_comment,jira_search_users
@@ -138,19 +139,15 @@ AGENT_SYSTEM_PROMPT = """
     Server tools: web_search
     Tool Usage Guidelines:
     - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as Atlassian/Jira, PostgreSQL tools should be your primary tools to answer questions.
+    - Document management tools are used to create, read, update, and list structured documents within the organization.
     - Outlook tools are used to retrieve user's calendar information and find meeting info and available meeting slots. This should be the only source of information for meetings and scheduling when this tool is available.
     - Atlassian tools are used to interact directly with Atlassian work suite, including Jira, Confluence, and other Atlassian products. Use these tools when you need to answer requests specifically related to Atlassian work suite or when PostgreSQL data may not be enough to answer the question.
     - GitHub tools are used to interact directly with GitHub for managing repositories, issues, pull requests, and commits.
     - Linear tools are used to interact directly with Linear for managing issues, projects, and teams. Use these tools when you need to answer requests specifically related to Linear or when PostgreSQL data may not be enough to answer the question.
     - DuckDB tools are used to access the response database that stores large responses from the tools. You can use this tool to access the response database to get the response schema and query the response database.
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
-    - Firestore tools: query_messages, send_message
+    - Firestore tools: query_messages
       * query_messages: Query chat messages from Firestore (read-only access to messages)
-      * send_message: Send messages to project channels or AI assistant chats. CRITICAL RESTRICTIONS:
-        - Can send to project channels (chatId must start with 'project-')
-        - Can send to AI assistant chats (chatId must start with 'ai-assistant-')
-        - CANNOT send to direct messages (DMs) - chatId starting with 'dm-' is not allowed
-        - When the user asks to send a direct message to someone, respond in the AI assistant chat explaining that you can help compose the message but cannot send DMs directly
     - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. Commands are executed securely in a containerized environment with network isolation, memory limits (256MB), and CPU limits.
     - execute_code tool runs code (currently Python) in a sandboxed environment. Use this for computations, data processing, or running code snippets. Code execution has resource limits and timeouts for security.
     - str_replace_editor (text editor) tool allows reading, writing, and editing text files in a safe directory. Use this to manipulate files, read configuration, or create/edit documents. File operations are restricted to safe directories.

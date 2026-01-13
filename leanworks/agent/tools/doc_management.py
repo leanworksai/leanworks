@@ -29,7 +29,7 @@ class DocManagementTool:
         
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name)
-            user_id: Optional user ID (not used for attribution - all creations use AI_AGENT_ID)
+            user_id: Optional user ID used for attribution (falls back to AI_AGENT_ID if None)
         """
         self.postgres_client_wrapper = postgres_client_wrapper
         self.user_id = user_id
@@ -63,7 +63,7 @@ class DocManagementTool:
         description = f"""
         Create a new document in the docs table for org `{self.org_slug}`.
         
-        This tool creates documents that are owned by the AI agent 'lean'. All documents created through this tool will have owner_email set to 'lean@leanworks.ai'.
+        This tool creates documents that are owned by the user who created them. Documents will have owner_email set to the user's email address.
         
         Parameters:
         - title (required): Document title
@@ -71,7 +71,6 @@ class DocManagementTool:
         - projectId (optional): Associated project ID
         - teamId (optional): Associated team ID
         - tags (optional): Array of tag strings
-        - isPinned (optional): Boolean (default: false)
         - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
         - visibleToMembers (optional): Array of email addresses
         - metadata (optional): JSON object for additional metadata
@@ -112,10 +111,6 @@ class DocManagementTool:
                         "items": {"type": "string"},
                         "description": "Array of tag strings"
                     },
-                    "isPinned": {
-                        "type": "boolean",
-                        "description": "Whether document is pinned (default: false)"
-                    },
                     "visibility": {
                         "type": "string",
                         "enum": ["all_members", "specific_members"],
@@ -142,7 +137,6 @@ class DocManagementTool:
         projectId: Optional[str] = None,
         teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        isPinned: bool = False,
         visibility: str = "all_members",
         visibleToMembers: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -157,7 +151,6 @@ class DocManagementTool:
             projectId: Associated project ID
             teamId: Associated team ID
             tags: Array of tag strings
-            isPinned: Whether document is pinned
             visibility: Document visibility
             visibleToMembers: Array of email addresses
             metadata: JSON object for additional metadata
@@ -189,122 +182,65 @@ class DocManagementTool:
             # Generate doc ID
             doc_id = secrets.token_hex(16)
             
+            # Determine owner_email: use user_id if available, fallback to AI_AGENT_ID
+            owner_email = self.user_id or AI_AGENT_ID
+            if not self.user_id:
+                logger.warning("user_id is None, falling back to AI_AGENT_ID for document attribution")
+            
             conn = self.pool.getconn()
             with conn.cursor() as cursor:
-                # Try to insert with metadata and is_pinned columns first
+                # Try to insert with metadata column first
                 try:
                     cursor.execute("""
-                        INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, is_pinned, visibility, visible_to_members, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, visibility, visible_to_members, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """, (
                         doc_id,
                         title,
                         tiptap_json_content,
-                        AI_AGENT_ID,  # Always use AI agent ID
+                        owner_email,
                         projectId,
                         teamId,
                         json.dumps(tags) if tags else '[]',
                         json.dumps(metadata) if metadata else '{}',
-                        isPinned,
                         doc_visibility,
                         json.dumps(visible_to_members_array)
                     ))
                 except Exception as e:
                     error_str = str(e).lower()
-                    # If is_pinned column doesn't exist, try without it
-                    if 'is_pinned' in error_str or 'column "is_pinned" does not exist' in error_str:
-                        try:
-                            # Try with metadata but without is_pinned
-                            cursor.execute("""
-                                INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, visibility, visible_to_members, created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            """, (
-                                doc_id,
-                                title,
-                                tiptap_json_content,
-                                AI_AGENT_ID,  # Always use AI agent ID
-                                projectId,
-                                teamId,
-                                json.dumps(tags) if tags else '[]',
-                                json.dumps(metadata) if metadata else '{}',
-                                doc_visibility,
-                                json.dumps(visible_to_members_array)
-                            ))
-                        except Exception as e2:
-                            error_str2 = str(e2).lower()
-                            # If metadata column also doesn't exist, insert without both
-                            if 'metadata' in error_str2 or 'column "metadata" does not exist' in error_str2:
-                                cursor.execute("""
-                                    INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                                """, (
-                                    doc_id,
-                                    title,
-                                    tiptap_json_content,
-                                    AI_AGENT_ID,  # Always use AI agent ID
-                                    projectId,
-                                    teamId,
-                                    json.dumps(tags) if tags else '[]',
-                                    doc_visibility,
-                                    json.dumps(visible_to_members_array)
-                                ))
-                            else:
-                                raise
-                    # If only metadata column doesn't exist
-                    elif 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
-                        try:
-                            # Try with is_pinned but without metadata
-                            cursor.execute("""
-                                INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            """, (
-                                doc_id,
-                                title,
-                                tiptap_json_content,
-                                AI_AGENT_ID,  # Always use AI agent ID
-                                projectId,
-                                teamId,
-                                json.dumps(tags) if tags else '[]',
-                                isPinned,
-                                doc_visibility,
-                                json.dumps(visible_to_members_array)
-                            ))
-                        except Exception as e2:
-                            error_str2 = str(e2).lower()
-                            # If is_pinned also doesn't exist, insert without both
-                            if 'is_pinned' in error_str2 or 'column "is_pinned" does not exist' in error_str2:
-                                cursor.execute("""
-                                    INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                                """, (
-                                    doc_id,
-                                    title,
-                                    tiptap_json_content,
-                                    AI_AGENT_ID,  # Always use AI agent ID
-                                    projectId,
-                                    teamId,
-                                    json.dumps(tags) if tags else '[]',
-                                    doc_visibility,
-                                    json.dumps(visible_to_members_array)
-                                ))
-                            else:
-                                raise
+                    # If metadata column doesn't exist, insert without it
+                    if 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
+                        # Rollback aborted transaction before retrying
+                        conn.rollback()
+                        cursor.execute("""
+                            INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        """, (
+                            doc_id,
+                            title,
+                            tiptap_json_content,
+                            owner_email,
+                            projectId,
+                            teamId,
+                            json.dumps(tags) if tags else '[]',
+                            doc_visibility,
+                            json.dumps(visible_to_members_array)
+                        ))
                     else:
                         raise
                 
                 conn.commit()
             
-            logger.info(f"Document created: id={doc_id}, title={title}, owner_email={AI_AGENT_ID}")
+            logger.info(f"Document created: id={doc_id}, title={title}, owner_email={owner_email}")
             # Return markdown content to agent (not TipTap JSON)
             return {
                 "id": doc_id,
                 "title": title,
                 "content": content,  # Return original markdown, not TipTap JSON
-                "ownerEmail": AI_AGENT_ID,
+                "ownerEmail": owner_email,
                 "projectId": projectId,
                 "teamId": teamId,
                 "tags": tags or [],
-                "isPinned": isPinned,
                 "visibility": doc_visibility,
                 "visibleToMembers": visible_to_members_array
             }
@@ -330,7 +266,6 @@ class DocManagementTool:
         - projectId (optional): Update project association
         - teamId (optional): Update team association
         - tags (optional): Update tags array
-        - isPinned (optional): Update pinned status
         - visibility (optional): Update visibility
         - visibleToMembers (optional): Update visible members
         - metadata (optional): Update metadata
@@ -375,10 +310,6 @@ class DocManagementTool:
                         "items": {"type": "string"},
                         "description": "Update tags array"
                     },
-                    "isPinned": {
-                        "type": "boolean",
-                        "description": "Update pinned status"
-                    },
                     "visibility": {
                         "type": "string",
                         "enum": ["all_members", "specific_members"],
@@ -410,7 +341,7 @@ class DocManagementTool:
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
         
         Returns:
-        - Success: List of document dictionaries with all fields including: id, title, content (markdown format), owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success: List of document dictionaries with all fields including: id, title, content (markdown format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
         - Error: Dictionary with error message
         
         Note: Content is returned as markdown format (converted from TipTap JSON stored in database). Documents are stored in TipTap JSON format internally, but are automatically converted to markdown for the agent.
@@ -468,59 +399,27 @@ class DocManagementTool:
             try:
                 cursor = conn.cursor()
                 # Build query with IN clause for multiple IDs
-                # Try to include is_pinned and metadata, but handle if they don't exist
+                # Try to include metadata, but handle if it doesn't exist
                 placeholders = ','.join(['%s'] * len(docIds))
                 
-                # Try query with is_pinned and metadata first
+                # Try query with metadata first
                 try:
                     query = f"""
                         SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                               is_pinned, visibility, visible_to_members, created_at, updated_at, metadata
+                               visibility, visible_to_members, created_at, updated_at, metadata
                         FROM docs 
                         WHERE id IN ({placeholders})
                     """
                     cursor.execute(query, tuple(docIds))
                 except Exception as e:
                     error_str = str(e).lower()
-                    # Rollback transaction immediately - PostgreSQL aborts transaction on any error
-                    try:
+                    # If metadata column doesn't exist, query without it
+                    if 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
+                        # Rollback aborted transaction before retrying
                         conn.rollback()
-                    except:
-                        pass
-                    
-                    # Try without is_pinned
-                    if 'is_pinned' in error_str or 'column "is_pinned" does not exist' in error_str:
-                        try:
-                            query = f"""
-                                SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                                       visibility, visible_to_members, created_at, updated_at, metadata
-                                FROM docs 
-                                WHERE id IN ({placeholders})
-                            """
-                            cursor.execute(query, tuple(docIds))
-                        except Exception as e2:
-                            error_str2 = str(e2).lower()
-                            # Rollback again if needed
-                            try:
-                                conn.rollback()
-                            except:
-                                pass
-                            # Try without metadata
-                            if 'metadata' in error_str2 or 'column "metadata" does not exist' in error_str2:
-                                query = f"""
-                                    SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                                           visibility, visible_to_members, created_at, updated_at
-                                    FROM docs 
-                                    WHERE id IN ({placeholders})
-                                """
-                                cursor.execute(query, tuple(docIds))
-                            else:
-                                raise
-                    # Try without metadata only
-                    elif 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
                         query = f"""
                             SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                                   is_pinned, visibility, visible_to_members, created_at, updated_at
+                                   visibility, visible_to_members, created_at, updated_at
                             FROM docs 
                             WHERE id IN ({placeholders})
                         """
@@ -536,10 +435,6 @@ class DocManagementTool:
                 for row in rows:
                     doc = dict(row)
                     found_ids.add(doc['id'])
-                    
-                    # Set default for is_pinned if not present
-                    if 'is_pinned' not in doc:
-                        doc['is_pinned'] = False
                     
                     # Convert content from TipTap JSON (or legacy HTML) to markdown
                     if 'content' in doc and doc['content']:
@@ -657,7 +552,6 @@ class DocManagementTool:
         - projectId (optional): Associated project ID
         - teamId (optional): Associated team ID
         - tags (optional): Array of tag strings
-        - isPinned (optional): Boolean (default: false)
         - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
         - visibleToMembers (optional): Array of email addresses
         - metadata (optional): JSON object for additional metadata
@@ -694,10 +588,6 @@ class DocManagementTool:
                         "items": {"type": "string"},
                         "description": "Array of tag strings"
                     },
-                    "isPinned": {
-                        "type": "boolean",
-                        "description": "Whether document is pinned (default: false)"
-                    },
                     "visibility": {
                         "type": "string",
                         "enum": ["all_members", "specific_members"],
@@ -733,7 +623,6 @@ class DocManagementTool:
         - projectId (optional): Update project association
         - teamId (optional): Update team association
         - tags (optional): Update tags array
-        - isPinned (optional): Update pinned status
         - visibility (optional): Update visibility
         - visibleToMembers (optional): Update visible members
         - metadata (optional): Update metadata
@@ -774,10 +663,6 @@ class DocManagementTool:
                         "items": {"type": "string"},
                         "description": "Update tags array"
                     },
-                    "isPinned": {
-                        "type": "boolean",
-                        "description": "Update pinned status"
-                    },
                     "visibility": {
                         "type": "string",
                         "enum": ["all_members", "specific_members"],
@@ -805,7 +690,6 @@ class DocManagementTool:
         projectId: Optional[str] = None,
         teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        isPinned: Optional[bool] = None,
         visibility: Optional[str] = None,
         visibleToMembers: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -821,7 +705,6 @@ class DocManagementTool:
             projectId: Update project association
             teamId: Update team association
             tags: Update tags array
-            isPinned: Update pinned status
             visibility: Update visibility
             visibleToMembers: Update visible members
             metadata: Update metadata
@@ -855,7 +738,6 @@ class DocManagementTool:
                     'content': 'content',
                     'projectId': 'project_id',
                     'teamId': 'team_id',
-                    'isPinned': 'is_pinned',
                 }
                 
                 # Handle visibility separately
@@ -876,16 +758,6 @@ class DocManagementTool:
                         set_clauses.append("visible_to_members = %s::jsonb")
                         values.append(json.dumps([]))
                 
-                # Check if is_pinned column exists
-                is_pinned_exists = False
-                if isPinned is not None:
-                    try:
-                        cursor.execute("SELECT is_pinned FROM docs LIMIT 1")
-                        is_pinned_exists = True
-                    except Exception:
-                        # Column doesn't exist, skip is_pinned updates
-                        is_pinned_exists = False
-                
                 # Handle regular fields
                 updates_dict = {
                     'title': title,
@@ -893,9 +765,6 @@ class DocManagementTool:
                     'projectId': projectId,
                     'teamId': teamId,
                 }
-                # Only add isPinned if column exists
-                if isPinned is not None and is_pinned_exists:
-                    updates_dict['isPinned'] = isPinned
                 
                 for key, db_field in field_map.items():
                     value = updates_dict.get(key)
@@ -1680,7 +1549,6 @@ class DocManagementTool:
         projectId: Optional[str] = None,
         teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        isPinned: bool = False,
         visibility: str = "all_members",
         visibleToMembers: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -1709,7 +1577,6 @@ class DocManagementTool:
                 projectId=projectId,
                 teamId=teamId,
                 tags=tags,
-                isPinned=isPinned,
                 visibility=visibility,
                 visibleToMembers=visibleToMembers,
                 metadata=metadata,
@@ -1887,7 +1754,6 @@ class DocManagementTool:
         - teamId (optional): Filter documents by team ID
         - ownerEmail (optional): Filter documents by owner email
         - tags (optional): Filter documents that contain any of these tags (array of strings)
-        - isPinned (optional): Filter by pinned status (true/false)
         - visibility (optional): Filter by visibility ('all_members' or 'specific_members')
         - searchTitle (optional): Search for documents with title containing this text (case-insensitive)
         - limit (optional): Maximum number of documents to return (default: 50, max: 200)
@@ -1895,7 +1761,7 @@ class DocManagementTool:
         - orderDirection (optional): 'asc' or 'desc' (default: 'desc' for newest first)
         
         Returns:
-        - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, is_pinned, visibility, created_at, updated_at
+        - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, visibility, created_at, updated_at
         - Note: Full content is not included - only a preview. Use get_doc_markdown_path or query_postgres to get full content if needed.
         - Error: Dictionary with error message
         
@@ -1929,10 +1795,6 @@ class DocManagementTool:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Filter documents that contain any of these tags"
-                    },
-                    "isPinned": {
-                        "type": "boolean",
-                        "description": "Filter by pinned status"
                     },
                     "visibility": {
                         "type": "string",
@@ -1969,7 +1831,6 @@ class DocManagementTool:
         teamId: Optional[str] = None,
         ownerEmail: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        isPinned: Optional[bool] = None,
         visibility: Optional[str] = None,
         searchTitle: Optional[str] = None,
         limit: int = 50,
@@ -1985,7 +1846,6 @@ class DocManagementTool:
             teamId: Filter by team ID
             ownerEmail: Filter by owner email
             tags: Filter by tags (documents containing any of these tags)
-            isPinned: Filter by pinned status
             visibility: Filter by visibility
             searchTitle: Search title text (case-insensitive)
             limit: Maximum number of documents (default: 50, max: 200)
@@ -2017,18 +1877,7 @@ class DocManagementTool:
             with conn.cursor() as cursor:
                 # Build query - include content preview (first 200 characters), not full content
                 # Use LEFT() function to get first 200 characters of content
-                # Try to include is_pinned, but handle if column doesn't exist
                 base_query = "SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"
-                include_is_pinned = False
-                
-                # Check if is_pinned column exists by trying a test query
-                try:
-                    cursor.execute("SELECT is_pinned FROM docs LIMIT 1")
-                    include_is_pinned = True
-                    base_query = "SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, is_pinned, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"
-                except Exception:
-                    # Column doesn't exist, use query without is_pinned
-                    include_is_pinned = False
                 
                 query_parts = [base_query]
                 params = []
@@ -2045,10 +1894,6 @@ class DocManagementTool:
                 if ownerEmail:
                     query_parts.append("AND owner_email = %s")
                     params.append(ownerEmail.lower())
-                
-                if isPinned is not None and include_is_pinned:
-                    query_parts.append("AND is_pinned = %s")
-                    params.append(isPinned)
                 
                 if visibility:
                     query_parts.append("AND visibility = %s")
@@ -2083,10 +1928,6 @@ class DocManagementTool:
                 docs = []
                 for row in rows:
                     doc = dict(row)
-                    
-                    # Set default for is_pinned if not present
-                    if 'is_pinned' not in doc:
-                        doc['is_pinned'] = False
                     
                     # Clean up content preview - strip HTML tags and truncate if needed
                     if 'content_preview' in doc and doc['content_preview']:
@@ -2127,7 +1968,7 @@ class DocManagementTool:
                     
                     docs.append(doc)
                 
-                logger.info(f"Listed {len(docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, isPinned={isPinned}, searchTitle={searchTitle}")
+                logger.info(f"Listed {len(docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
                 return docs
                 
         except Exception as e:

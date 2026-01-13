@@ -68,7 +68,6 @@ class PostgresTool:
         'projects',
         'teams',
         'integrations',
-        'docs',
         'project_comments',
         'project_members',
         'task_comments',
@@ -116,11 +115,6 @@ class PostgresTool:
         'integrations': (
             'Stores configuration and connection status for third-party integrations. '
             'Tracks which external tools (GitLab, Jira, Atlassian, etc.) are connected and their settings.'
-        ),
-        'docs': (
-            'Stores documents, notes, and rich text content within the organization. '
-            'Contains document content (HTML), metadata, and associations with projects or teams. '
-            'Documents can be associated with projects or teams via project_id/team_id.'
         ),
         'project_comments': (
             'Stores comments and discussions on projects. '
@@ -284,7 +278,7 @@ class PostgresTool:
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name like 'leanworks.ai')
                                     and optionally `client_name`.
-            user_id: Optional user ID for authorization checks (not used for attribution - all creations use AI_AGENT_ID)
+            user_id: Optional user ID used for attribution (falls back to AI_AGENT_ID if None)
         """
         self.postgres_client_wrapper = postgres_client_wrapper
         self.user_id = user_id
@@ -482,6 +476,16 @@ class PostgresTool:
             if re.search(pattern, sql_lower):
                 return False, f"Forbidden SQL keyword detected: {keyword}. Only read-only queries are allowed."
         
+        # Block queries that reference the docs table (use doc management tool instead)
+        # Check for table references to 'docs' in various SQL patterns:
+        # - FROM docs, FROM public.docs, FROM schema.docs
+        # - JOIN docs, INNER JOIN docs, LEFT JOIN docs, etc.
+        # - UPDATE docs (already blocked by forbidden keywords, but check anyway)
+        # - Table aliases like "FROM docs d" or "JOIN docs AS d"
+        docs_table_pattern = r'\b(?:from|join|inner\s+join|left\s+join|right\s+join|full\s+join|cross\s+join)\s+(?:public\.|[\w_]+\.)?docs(?:\s+as\s+\w+|\s+\w+)?\b'
+        if re.search(docs_table_pattern, sql_lower):
+            return False, "Queries on the 'docs' table are not allowed. Please use the doc management tool (get_doc, create_doc, update_doc, list_docs) instead."
+        
         return True, None
     
     def _execute_sql_query(self, sql: str) -> List[Dict[str, Any]]:
@@ -542,6 +546,8 @@ class PostgresTool:
         This tool is strictly READ-ONLY. It executes SQL SELECT queries and returns results in document format.
         Only SELECT and WITH (CTE) queries are allowed. All write operations (INSERT, UPDATE, DELETE, etc.) are blocked.
         
+        CRITICAL: Do NOT use this tool to query the 'docs' table. For any operations involving documents, notes, or rich text content, you MUST use the Document management tools (get_doc, create_doc, update_doc, list_docs) instead.
+        
         Provide `sql`: A SQL SELECT or WITH query string to execute.
         
         SQL Query Examples:
@@ -575,7 +581,6 @@ class PostgresTool:
         - "projects": Project information, project names, descriptions, collaborators, project metadata
         - "teams": Teams, team members, team leads, team projects
         - "integrations": External integrations (GitLab, Jira, Atlassian, etc.) and their configurations
-        - "docs": Documents, notes, documentation, rich text content, pinned docs
         - "project_comments": Comments on projects, project discussions, project feedback
         - "project_members": Project membership, who is assigned to projects, project collaborators
         - "task_comments": Comments on tasks, task discussions, task feedback
@@ -653,7 +658,7 @@ class PostgresTool:
         description = f"""
         Create a new task in the tasks table for org `{self.org_slug}`.
         
-        This tool creates tasks that are attributed to the AI agent 'lean'. All tasks created through this tool will have created_by set to 'lean@leanworks.ai'.
+        This tool creates tasks that are attributed to the user who created them. Tasks will have created_by set to the user's email address.
         
         Parameters:
         - title (required): Task title
@@ -810,6 +815,11 @@ class PostgresTool:
             # Generate task ID
             task_id = secrets.token_hex(16)
             
+            # Determine created_by: use user_id if available, fallback to AI_AGENT_ID
+            created_by = self.user_id or AI_AGENT_ID
+            if not self.user_id:
+                logger.warning("user_id is None, falling back to AI_AGENT_ID for task attribution")
+            
             # Get current timestamp in milliseconds
             created_at = int(datetime.datetime.now().timestamp() * 1000)
             
@@ -834,7 +844,7 @@ class PostgresTool:
                     status,
                     priority,
                     dueDate,
-                    AI_AGENT_ID,  # Always use AI agent ID
+                    created_by,
                     created_at,
                     json.dumps(tags) if tags else None,
                     estimatedHours,
@@ -843,7 +853,7 @@ class PostgresTool:
                 ))
                 conn.commit()
             
-            logger.info(f"Task created: id={task_id}, title={title}, created_by={AI_AGENT_ID}")
+            logger.info(f"Task created: id={task_id}, title={title}, created_by={created_by}")
             return {
                 "id": task_id,
                 "title": title,
@@ -853,7 +863,7 @@ class PostgresTool:
                 "assigneeName": final_assignee,
                 "status": status,
                 "priority": priority,
-                "created_by": AI_AGENT_ID
+                "created_by": created_by
             }
         except Exception as e:
             if conn:
