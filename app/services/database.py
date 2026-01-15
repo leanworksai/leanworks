@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Global connection pools
 _org_pools: Dict[str, pool.ThreadedConnectionPool] = {}  # org_<slug> -> pool
-_tenant_pools: Dict[str, pool.ThreadedConnectionPool] = {}  # Legacy: domain -> pool (deprecated)
 _shared_pool: Optional[pool.ThreadedConnectionPool] = None  # Shared database pool (for users table)
 _cached_password: Optional[str] = None
 _secret_manager_client: Optional[secretmanager.SecretManagerServiceClient] = None
@@ -549,10 +548,6 @@ def execute_org(org_slug: str, query: str, params: Optional[tuple] = None) -> No
             org_pool.putconn(conn)
 
 
-# ============================================================================
-# LEGACY TENANT POOL (for backward compatibility with user_email based access)
-# ============================================================================
-
 def ensure_database_exists(db_name: str, password: str) -> None:
     """Ensure database exists, create if it doesn't"""
     db_host, db_port = _determine_db_host()
@@ -610,99 +605,6 @@ def ensure_database_exists(db_name: str, password: str) -> None:
         else:
             # Other connection errors
             raise
-
-
-def get_tenant_pool(user_email: str) -> pool.ThreadedConnectionPool:
-    """Get or create connection pool for a specific tenant (domain)"""
-    global _tenant_pools
-    
-    domain = get_domain_from_email(user_email)
-    db_name = domain
-    
-    # Return cached pool if exists
-    if db_name in _tenant_pools:
-        return _tenant_pools[db_name]
-    
-    logger.info(f"🔌 Creating connection pool for tenant: {db_name} (from {user_email})")
-    
-    password = get_postgres_password()
-    db_host, db_port = _determine_db_host()
-    db_user = os.environ.get("DB_USER", "postgres")
-    
-    # Ensure database exists
-    ensure_database_exists(db_name, password)
-    
-    # Create connection pool for this tenant
-    try:
-        # For Unix sockets, pass host as socket path, no port
-        # For TCP connections, pass host and port
-        pool_params = {
-            'minconn': 1,
-            'maxconn': 10,
-            'database': db_name,
-            'user': db_user,
-            'password': password,
-        }
-        if db_host.startswith('/'):
-            # Unix socket connection
-            pool_params['host'] = db_host
-            logger.info(f"🔌 Using Unix socket connection: {db_host}, database: {db_name}")
-        else:
-            # TCP connection
-            pool_params['host'] = db_host
-            pool_params['port'] = db_port
-            logger.info(f"🔌 Using TCP/IP connection: {db_host}:{db_port}, database: {db_name}")
-        
-        connection_pool = pool.ThreadedConnectionPool(**pool_params)
-        
-        # Cache the pool
-        _tenant_pools[db_name] = connection_pool
-        logger.info(f"✅ Connection pool created for tenant: {db_name}")
-        return connection_pool
-    except Exception as e:
-        logger.error(f"❌ Failed to create connection pool for tenant {db_name}: {str(e)}")
-        logger.error(f"   Connection params: host={db_host}, port={db_port if not db_host.startswith('/') else 'N/A (Unix socket)'}, database={db_name}, user={db_user}")
-        raise
-
-
-def get_tenant_connection(user_email: str):
-    """Get a connection from the tenant's pool"""
-    pool = get_tenant_pool(user_email)
-    return pool.getconn()
-
-
-def return_tenant_connection(user_email: str, conn):
-    """Return a connection to the tenant's pool"""
-    pool = get_tenant_pool(user_email)
-    pool.putconn(conn)
-
-
-def query_tenant(user_email: str, query: str, params: Optional[tuple] = None) -> list:
-    """Execute a query for a specific tenant and return results"""
-    conn = None
-    connection_pool = None
-    try:
-        connection_pool = get_tenant_pool(user_email)
-        conn = connection_pool.getconn()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        cursor.close()
-        return [dict(row) for row in results]
-    except Exception as e:
-        logger.error(f"Database query error for tenant {get_domain_from_email(user_email)}: {str(e)}")
-        logger.error(f"Query: {query}")
-        logger.error(f"Params: {params}")
-        raise
-    finally:
-        if conn and connection_pool:
-            connection_pool.putconn(conn)
-
-
-def query_tenant_one(user_email: str, query: str, params: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
-    """Execute a query for a specific tenant and return first row or None"""
-    results = query_tenant(user_email, query, params)
-    return results[0] if results else None
 
 
 # ============================================================================

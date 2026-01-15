@@ -18,20 +18,9 @@ class ConversationManager:
         self.session_id = session_id
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
-        self.slim_conversation = []  # Mirrors conversation - kept for backward compatibility
         
         # Note: Conversation is now loaded from messages collection (source of truth)
         # This is done in ChatAgent.__init__ or ChatAgent.process_message()
-        
-    def load_conversation(self):
-        """DEPRECATED: Load conversation from files collection.
-        
-        This method is deprecated. Conversations are now loaded from messages collection
-        (source of truth) using load_conversation_from_messages().
-        This method is kept for backward compatibility but is a no-op.
-        """
-        logger.warning("load_conversation() is deprecated. Use load_conversation_from_messages() instead.")
-        # No-op: conversations are now loaded from messages collection
     
     def load_conversation_from_messages(self, chat_id: str, limit: int = 10, exclude_last: bool = True, current_message: str = None):
         """
@@ -65,7 +54,6 @@ class ConversationManager:
                 if self.user_id and not chat_id.endswith(f"-{self.user_id}"):
                     logger.warning(f"Access denied: Cannot access another user's AI assistant conversation. chatId: {chat_id}, user_id: {self.user_id}")
                     self.conversation = []
-                    self.slim_conversation = []
                     return
                 if self.user_id:
                     query = query.where(filter=FieldFilter('userId', '==', self.user_id.lower()))
@@ -124,11 +112,9 @@ class ConversationManager:
             # Set conversation (excluding the last message which is the current one being processed)
             if len(conversation_messages) > 0:
                 self.conversation = conversation_messages
-                self.slim_conversation = conversation_messages  # Keep in sync for backward compatibility
                 logger.info(f"Loaded {len(self.conversation)} messages from messages collection for chatId: {chat_id}")
             else:
                 self.conversation = []
-                self.slim_conversation = []
                 logger.info(f"No messages found for chatId: {chat_id}")
                 
         except Exception as e:
@@ -136,7 +122,6 @@ class ConversationManager:
             import traceback
             traceback.print_exc()
             self.conversation = []
-            self.slim_conversation = []
     
     def _execute_firestore_query_with_retry(self, query, max_retries=3):
         """
@@ -191,17 +176,6 @@ class ConversationManager:
                     logger.error(f"Firestore query failed after {attempt + 1} attempts: {error_str}")
                     raise
     
-    def save_conversation(self):
-        """DEPRECATED: Save conversation to files collection.
-        
-        This method is deprecated. Messages are now saved to messages collection by the frontend
-        (source of truth). The agent only needs to save running_summary to files collection
-        (handled by MemoryManager).
-        This method is kept for backward compatibility but is a no-op.
-        """
-        logger.debug("save_conversation() is deprecated. Messages are saved to messages collection by frontend.")
-        # No-op: messages are saved to messages collection by the frontend
-        
     def add_user_message(self, content, include_in_slim=False):
         """Add a user message to the conversation history"""
         user_message = {
@@ -209,9 +183,6 @@ class ConversationManager:
             "content": [{"type": "text", "text": content}]
         }
         self.conversation.append(user_message)
-        
-        if include_in_slim:
-            self.slim_conversation.append(user_message)  # Keep in sync for backward compatibility
     
     def add_user_message_multimodal(self, content_blocks: List[Dict], include_in_slim: bool = False):
         """
@@ -219,16 +190,13 @@ class ConversationManager:
         
         Args:
             content_blocks: List of content blocks (text, image, document)
-            include_in_slim: Whether to include in slim conversation
+            include_in_slim: Whether to include in slim conversation (deprecated, ignored)
         """
         message = {
             "role": "user",
             "content": content_blocks
         }
         self.conversation.append(message)
-        
-        if include_in_slim:
-            self.slim_conversation.append(message)
 
     def add_tool_results(self, tool_results):
         """Add tool results to the conversation history
@@ -259,16 +227,10 @@ class ConversationManager:
             "role": "assistant",
             "content": [{"type": "text", "text": content}]
         })
-        if include_in_slim:
-            self.slim_conversation.append({
-                "role": "assistant",
-                "content": [{"type": "text", "text": content}]
-            })  # Keep in sync for backward compatibility
             
     def clear_conversation(self):
         """Clear the conversation history and start fresh"""
         self.conversation = []
-        self.slim_conversation = []
         
     def reset_for_fresh_attempt(self):
         """Reset the conversation to just the initial user query if problems occur"""

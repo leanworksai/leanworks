@@ -4,58 +4,52 @@ import secrets
 import tempfile
 import os
 from typing import Dict, List, Any, Optional, Union
-from psycopg2.extras import RealDictCursor
 import re
 import markdown
 
-from .postgres import PostgresTool, AI_AGENT_ID
+from .base_api_client import BaseAPIClient
+from .postgres import AI_AGENT_ID
 
 logger = logging.getLogger(__name__)
 
 
-class DocManagementTool:
+class DocManagementTool(BaseAPIClient):
     """
-    Document management tool for creating and updating documents.
+    Document management tool for creating and updating documents via leanworks-hub API.
     
     Documents are worked with in markdown format using Anthropic's text editor tool,
-    then converted to HTML when saving to the database. The AI agent uses the text
+    then converted to TipTap JSON format when saving via the API. The AI agent uses the text
     editor tool directly for formatting, eliminating the need for specific formatting
     helper functions.
     """
     
     def __init__(self, postgres_client_wrapper, user_id: Optional[str] = None):
         """
-        Initialize DocManagementTool with database access.
+        Initialize DocManagementTool with API access.
         
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name)
             user_id: Optional user ID used for attribution (falls back to AI_AGENT_ID if None)
         """
-        self.postgres_client_wrapper = postgres_client_wrapper
-        self.user_id = user_id
-        
         # Get org_slug from wrapper (use client_name as fallback)
-        self.org_slug = getattr(self.postgres_client_wrapper, 'org_slug', None)
-        if not self.org_slug:
+        org_slug = getattr(postgres_client_wrapper, 'org_slug', None)
+        if not org_slug:
             # Fallback: construct org_slug from client_name if available
-            client_name = getattr(self.postgres_client_wrapper, 'client_name', 'unknown')
-            self.org_slug = f"{client_name}.ai" if client_name != 'unknown' else 'leanworks.ai'
-            logger.warning(f"org_slug not provided in wrapper, using fallback: {self.org_slug}")
+            client_name = getattr(postgres_client_wrapper, 'client_name', 'unknown')
+            org_slug = f"{client_name}.ai" if client_name != 'unknown' else 'leanworks.ai'
+            logger.warning(f"org_slug not provided in wrapper, using fallback: {org_slug}")
         
-        # Get database name from org_slug
-        self.database_name = PostgresTool._get_database_name(self.org_slug)
+        # Initialize BaseAPIClient
+        super().__init__(org_slug, user_id)
         
-        # Get credential path
-        credential_path = getattr(self.postgres_client_wrapper, 'credential_path', 'gcp_credential.json')
-        
-        # Reuse PostgresTool's connection pool mechanism
-        self.pool = PostgresTool._get_connection_pool(self.database_name, credential_path)
+        self.postgres_client_wrapper = postgres_client_wrapper
+        self.user_id = user_id or AI_AGENT_ID
         
         # Track temporary markdown files
         self._temp_files: Dict[str, str] = {}  # docId -> file_path
     
     # ============================================================================
-    # Core Document Operations (moved from PostgresTool)
+    # Core Document Operations (via API)
     # ============================================================================
     
     @property
@@ -143,7 +137,7 @@ class DocManagementTool:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Create a new document in the docs table.
+        Create a new document via API.
         
         Args:
             title: Document title (required)
@@ -158,7 +152,6 @@ class DocManagementTool:
         Returns:
             Dictionary with doc id and created fields, or error dictionary
         """
-        conn = None
         try:
             if not title or not content:
                 return {"error": "title and content are required"}
@@ -179,65 +172,31 @@ class DocManagementTool:
                     return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
                 visible_to_members_array = [email.lower() for email in visibleToMembers]
             
-            # Generate doc ID
-            doc_id = secrets.token_hex(16)
+            # Prepare request body for API
+            request_body = {
+                "title": title,
+                "content": tiptap_json_content,  # Send TipTap JSON to API
+                "projectId": projectId,
+                "teamId": teamId,
+                "tags": tags or [],
+                "visibility": doc_visibility,
+                "visibleToMembers": visible_to_members_array
+            }
             
-            # Determine owner_email: use user_id if available, fallback to AI_AGENT_ID
-            owner_email = self.user_id or AI_AGENT_ID
-            if not self.user_id:
-                logger.warning("user_id is None, falling back to AI_AGENT_ID for document attribution")
+            if metadata:
+                request_body["metadata"] = metadata
             
-            conn = self.pool.getconn()
-            with conn.cursor() as cursor:
-                # Try to insert with metadata column first
-                try:
-                    cursor.execute("""
-                        INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, metadata, visibility, visible_to_members, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    """, (
-                        doc_id,
-                        title,
-                        tiptap_json_content,
-                        owner_email,
-                        projectId,
-                        teamId,
-                        json.dumps(tags) if tags else '[]',
-                        json.dumps(metadata) if metadata else '{}',
-                        doc_visibility,
-                        json.dumps(visible_to_members_array)
-                    ))
-                except Exception as e:
-                    error_str = str(e).lower()
-                    # If metadata column doesn't exist, insert without it
-                    if 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
-                        # Rollback aborted transaction before retrying
-                        conn.rollback()
-                        cursor.execute("""
-                            INSERT INTO docs (id, title, content, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        """, (
-                            doc_id,
-                            title,
-                            tiptap_json_content,
-                            owner_email,
-                            projectId,
-                            teamId,
-                            json.dumps(tags) if tags else '[]',
-                            doc_visibility,
-                            json.dumps(visible_to_members_array)
-                        ))
-                    else:
-                        raise
-                
-                conn.commit()
+            # Call API to create document
+            result = self._make_request('POST', '/api/docs', json=request_body)
             
-            logger.info(f"Document created: id={doc_id}, title={title}, owner_email={owner_email}")
+            logger.info(f"Document created via API: id={result.get('id')}, title={title}")
+            
             # Return markdown content to agent (not TipTap JSON)
             return {
-                "id": doc_id,
+                "id": result.get('id'),
                 "title": title,
                 "content": content,  # Return original markdown, not TipTap JSON
-                "ownerEmail": owner_email,
+                "ownerEmail": result.get('ownerEmail'),
                 "projectId": projectId,
                 "teamId": teamId,
                 "tags": tags or [],
@@ -245,14 +204,9 @@ class DocManagementTool:
                 "visibleToMembers": visible_to_members_array
             }
         except Exception as e:
-            if conn:
-                conn.rollback()
             logger.error(f"Error creating document: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-        finally:
-            if conn:
-                self.pool.putconn(conn)
     
     @property
     def update_doc_property(self):
@@ -374,7 +328,7 @@ class DocManagementTool:
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
-        Get one or more documents by their IDs.
+        Get one or more documents by their IDs via API.
         
         Args:
             docIds: List of document IDs to retrieve
@@ -382,7 +336,6 @@ class DocManagementTool:
         Returns:
             List of document dictionaries with full content, or error dictionary
         """
-        conn = None
         try:
             if not docIds:
                 return {"error": "docIds is required and must be a non-empty array"}
@@ -394,113 +347,49 @@ class DocManagementTool:
             if len(docIds) > 50:
                 return {"error": f"Too many document IDs requested. Maximum is 50, got {len(docIds)}"}
             
-            conn = self.pool.getconn()
-            cursor = None
-            try:
-                cursor = conn.cursor()
-                # Build query with IN clause for multiple IDs
-                # Try to include metadata, but handle if it doesn't exist
-                placeholders = ','.join(['%s'] * len(docIds))
-                
-                # Try query with metadata first
+            # Fetch documents one by one (API doesn't support batch GET)
+            docs = []
+            found_ids = set()
+            
+            for doc_id in docIds:
                 try:
-                    query = f"""
-                        SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                               visibility, visible_to_members, created_at, updated_at, metadata
-                        FROM docs 
-                        WHERE id IN ({placeholders})
-                    """
-                    cursor.execute(query, tuple(docIds))
+                    # Call API to get document
+                    doc = self._make_request('GET', f'/api/docs/{doc_id}')
+                    
+                    if doc:
+                        # Convert content from TipTap JSON (or legacy HTML) to markdown
+                        if 'content' in doc and doc['content']:
+                            content = doc['content']
+                            doc['content'] = self._convert_content_to_markdown(content)
+                        
+                        # Normalize field names (API returns camelCase, but we want consistency)
+                        if 'ownerEmail' in doc:
+                            doc['owner_email'] = doc.pop('ownerEmail')
+                        if 'projectId' in doc:
+                            doc['project_id'] = doc.pop('projectId')
+                        if 'teamId' in doc:
+                            doc['team_id'] = doc.pop('teamId')
+                        if 'visibleToMembers' in doc:
+                            doc['visible_to_members'] = doc.pop('visibleToMembers')
+                        if 'createdAt' in doc:
+                            doc['created_at'] = doc.pop('createdAt')
+                        if 'updatedAt' in doc:
+                            doc['updated_at'] = doc.pop('updatedAt')
+                        
+                        found_ids.add(doc['id'])
+                        docs.append(doc)
                 except Exception as e:
-                    error_str = str(e).lower()
-                    # If metadata column doesn't exist, query without it
-                    if 'metadata' in error_str or 'column "metadata" does not exist' in error_str:
-                        # Rollback aborted transaction before retrying
-                        conn.rollback()
-                        query = f"""
-                            SELECT id, title, content, owner_email, project_id, team_id, tags, 
-                                   visibility, visible_to_members, created_at, updated_at
-                            FROM docs 
-                            WHERE id IN ({placeholders})
-                        """
-                        cursor.execute(query, tuple(docIds))
-                    else:
-                        raise
-                
-                rows = cursor.fetchall()
-                
-                # Convert to list of dicts
-                docs = []
-                found_ids = set()
-                for row in rows:
-                    doc = dict(row)
-                    found_ids.add(doc['id'])
-                    
-                    # Convert content from TipTap JSON (or legacy HTML) to markdown
-                    if 'content' in doc and doc['content']:
-                        content = doc['content']
-                        doc['content'] = self._convert_content_to_markdown(content)
-                    
-                    # Parse JSONB fields if they're strings
-                    if 'tags' in doc:
-                        tags_value = doc['tags']
-                        if isinstance(tags_value, str):
-                            try:
-                                tags_value = json.loads(tags_value)
-                            except:
-                                tags_value = []
-                        elif not isinstance(tags_value, list):
-                            tags_value = []
-                        doc['tags'] = tags_value
-                    
-                    if 'visible_to_members' in doc:
-                        visible_to_members = doc['visible_to_members']
-                        if isinstance(visible_to_members, str):
-                            try:
-                                visible_to_members = json.loads(visible_to_members)
-                            except:
-                                visible_to_members = []
-                        elif not isinstance(visible_to_members, list):
-                            visible_to_members = []
-                        doc['visible_to_members'] = visible_to_members
-                    
-                    if 'metadata' in doc:
-                        metadata_value = doc['metadata']
-                        if isinstance(metadata_value, str):
-                            try:
-                                metadata_value = json.loads(metadata_value)
-                            except:
-                                metadata_value = {}
-                        elif not isinstance(metadata_value, dict):
-                            metadata_value = {}
-                        doc['metadata'] = metadata_value
-                    
-                    docs.append(doc)
-                
-                # Check if any requested documents were not found
-                missing_ids = set(docIds) - found_ids
-                if missing_ids:
-                    logger.warning(f"Some document IDs were not found: {missing_ids}")
-                
-                logger.info(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
-                return docs
-                
-            except Exception as e:
-                # Rollback on any error before retrying or returning
-                if conn:
-                    try:
-                        conn.rollback()
-                    except:
-                        pass
-                raise
-            finally:
-                if cursor:
-                    try:
-                        cursor.close()
-                    except:
-                        pass
-                if conn:
-                    self.pool.putconn(conn)
+                    logger.warning(f"Error fetching document {doc_id}: {str(e)}")
+                    # Continue with other documents
+                    continue
+            
+            # Check if any requested documents were not found
+            missing_ids = set(docIds) - found_ids
+            if missing_ids:
+                logger.warning(f"Some document IDs were not found: {missing_ids}")
+            
+            logger.info(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
+            return docs
         except Exception as e:
             logger.error(f"Error getting documents: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
@@ -696,7 +585,7 @@ class DocManagementTool:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Update an existing document.
+        Update an existing document via API.
         
         Args:
             docId: Document ID to update (required)
@@ -712,111 +601,61 @@ class DocManagementTool:
         Returns:
             Dictionary with success status, or error dictionary
         """
-        conn = None
         try:
             if not docId:
                 return {"error": "docId is required"}
             
-            conn = self.pool.getconn()
-            with conn.cursor() as cursor:
-                # Check if doc exists
-                cursor.execute(
-                    "SELECT id FROM docs WHERE id = %s",
-                    (docId,)
-                )
-                doc_check = cursor.fetchone()
-                
-                if not doc_check:
-                    return {"error": "Document not found"}
-                
-                # Build dynamic UPDATE query
-                set_clauses = []
-                values = []
-                
-                field_map = {
-                    'title': 'title',
-                    'content': 'content',
-                    'projectId': 'project_id',
-                    'teamId': 'team_id',
-                }
-                
-                # Handle visibility separately
-                if visibility is not None:
-                    valid_visibility = ['all_members', 'specific_members']
-                    doc_visibility = visibility if visibility in valid_visibility else 'all_members'
-                    set_clauses.append("visibility = %s")
-                    values.append(doc_visibility)
-                    
-                    # Handle visibleToMembers
-                    if doc_visibility == 'specific_members':
-                        if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
-                            return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
-                        visible_to_members_array = [email.lower() for email in visibleToMembers]
-                        set_clauses.append("visible_to_members = %s::jsonb")
-                        values.append(json.dumps(visible_to_members_array))
-                    else:
-                        set_clauses.append("visible_to_members = %s::jsonb")
-                        values.append(json.dumps([]))
-                
-                # Handle regular fields
-                updates_dict = {
-                    'title': title,
-                    'content': content,
-                    'projectId': projectId,
-                    'teamId': teamId,
-                }
-                
-                for key, db_field in field_map.items():
-                    value = updates_dict.get(key)
-                    if value is not None:
-                        # Normalize content to markdown first (handles HTML/TipTap JSON input)
-                        # Then convert to TipTap JSON if content field
-                        if key == 'content':
-                            markdown_content = self._normalize_content_to_markdown(value)
-                            value = self.markdown_to_tiptap_json(markdown_content)
-                        set_clauses.append(f"{db_field} = %s")
-                        values.append(value)
-                
-                # Handle tags
-                if tags is not None:
-                    set_clauses.append("tags = %s::jsonb")
-                    values.append(json.dumps(tags))
-                
-                # Handle metadata - check if column exists first
-                if metadata is not None:
-                    try:
-                        cursor.execute("SELECT metadata FROM docs LIMIT 1")
-                        set_clauses.append("metadata = %s::jsonb")
-                        values.append(json.dumps(metadata))
-                    except Exception:
-                        # Metadata column doesn't exist, skip it
-                        pass
-                
-                if len(set_clauses) == 0:
-                    return {"error": "No fields to update"}
-                
-                # Add updated_at
-                set_clauses.append("updated_at = NOW()")
-                
-                # Add docId to values
-                values.append(docId)
-                
-                # Execute UPDATE
-                query = f"UPDATE docs SET {', '.join(set_clauses)} WHERE id = %s"
-                cursor.execute(query, values)
-                conn.commit()
+            # Build update payload
+            updates = {}
             
-            logger.info(f"Document updated: id={docId}")
-            return {"success": True}
+            if title is not None:
+                updates['title'] = title
+            
+            if content is not None:
+                # Normalize content to markdown first (handles HTML/TipTap JSON input)
+                # Then convert to TipTap JSON if content field
+                markdown_content = self._normalize_content_to_markdown(content)
+                updates['content'] = self.markdown_to_tiptap_json(markdown_content)
+            
+            if projectId is not None:
+                updates['projectId'] = projectId
+            
+            if teamId is not None:
+                updates['teamId'] = teamId
+            
+            if tags is not None:
+                updates['tags'] = tags
+            
+            if visibility is not None:
+                valid_visibility = ['all_members', 'specific_members']
+                doc_visibility = visibility if visibility in valid_visibility else 'all_members'
+                updates['visibility'] = doc_visibility
+                
+                # Handle visibleToMembers
+                if doc_visibility == 'specific_members':
+                    if not visibleToMembers or not isinstance(visibleToMembers, list) or len(visibleToMembers) == 0:
+                        return {"error": "visibleToMembers must be a non-empty array when visibility is specific_members"}
+                    updates['visibleToMembers'] = [email.lower() for email in visibleToMembers]
+                else:
+                    updates['visibleToMembers'] = []
+            elif visibleToMembers is not None:
+                updates['visibleToMembers'] = [email.lower() for email in visibleToMembers] if isinstance(visibleToMembers, list) else []
+            
+            if metadata is not None:
+                updates['metadata'] = metadata
+            
+            if len(updates) == 0:
+                return {"error": "No fields to update"}
+            
+            # Call API to update document
+            result = self._make_request('PATCH', f'/api/docs/{docId}', json=updates)
+            
+            logger.info(f"Document updated via API: id={docId}")
+            return result if result else {"success": True}
         except Exception as e:
-            if conn:
-                conn.rollback()
             logger.error(f"Error updating document: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-        finally:
-            if conn:
-                self.pool.putconn(conn)
     
     # ============================================================================
     # Content Conversion Functions
@@ -1483,25 +1322,18 @@ class DocManagementTool:
         
         try:
             if content is None:
-                # Try to fetch from database and convert HTML to markdown
-                conn = None
+                # Try to fetch from API and convert to markdown
                 try:
-                    conn = self.pool.getconn()
-                    with conn.cursor() as cursor:
-                        cursor.execute("SELECT content FROM docs WHERE id = %s", (docId,))
-                        result = cursor.fetchone()
-                        if result:
-                            db_content = result.get('content', '')
-                            # Convert from TipTap JSON (or legacy HTML) to markdown
-                            content = self._convert_content_to_markdown(db_content)
-                        else:
-                            content = ""
+                    doc = self._make_request('GET', f'/api/docs/{docId}')
+                    if doc and 'content' in doc:
+                        db_content = doc['content']
+                        # Convert from TipTap JSON (or legacy HTML) to markdown
+                        content = self._convert_content_to_markdown(db_content)
+                    else:
+                        content = ""
                 except Exception as e:
                     logger.warning(f"Error fetching document {docId} for markdown file: {str(e)}")
                     content = ""
-                finally:
-                    if conn:
-                        self.pool.putconn(conn)
             
             # Write content to file
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -1839,7 +1671,11 @@ class DocManagementTool:
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
-        List documents from the docs table with optional filtering.
+        List documents via API with optional filtering.
+        
+        Note: The API endpoint returns all documents with visibility filtering.
+        Client-side filtering for projectId, teamId, ownerEmail, tags, and searchTitle
+        is applied after fetching from the API.
         
         Args:
             projectId: Filter by project ID
@@ -1855,7 +1691,6 @@ class DocManagementTool:
         Returns:
             List of document dictionaries, or error dictionary
         """
-        conn = None
         try:
             # Validate limit
             if limit < 1:
@@ -1863,119 +1698,95 @@ class DocManagementTool:
             if limit > 200:
                 limit = 200
             
-            # Validate orderBy
+            # Call API to get all documents (API handles visibility filtering)
+            all_docs = self._make_request('GET', '/api/docs')
+            
+            if not isinstance(all_docs, list):
+                return {"error": "Unexpected response from API"}
+            
+            # Apply client-side filtering
+            filtered_docs = []
+            for doc in all_docs:
+                # Normalize field names
+                doc_project_id = doc.get('projectId') or doc.get('project_id')
+                doc_team_id = doc.get('teamId') or doc.get('team_id')
+                doc_owner_email = doc.get('ownerEmail') or doc.get('owner_email', '').lower()
+                doc_tags = doc.get('tags', [])
+                doc_visibility = doc.get('visibility')
+                doc_title = doc.get('title', '').lower()
+                
+                # Apply filters
+                if projectId and doc_project_id != projectId:
+                    continue
+                if teamId and doc_team_id != teamId:
+                    continue
+                if ownerEmail and doc_owner_email != ownerEmail.lower():
+                    continue
+                if visibility and doc_visibility != visibility:
+                    continue
+                if searchTitle and searchTitle.lower() not in doc_title:
+                    continue
+                if tags:
+                    # Check if any tag matches
+                    doc_tags_lower = [t.lower() if isinstance(t, str) else str(t).lower() for t in doc_tags]
+                    tags_lower = [t.lower() for t in tags]
+                    if not any(tag in doc_tags_lower for tag in tags_lower):
+                        continue
+                
+                # Create content preview from full content
+                content = doc.get('content', '')
+                if content:
+                    # Convert TipTap JSON to markdown first
+                    content_md = self._convert_content_to_markdown(content)
+                    # Strip markdown formatting for preview
+                    content_preview = re.sub(r'[#*_`\[\]()]', '', content_md)
+                    content_preview = ' '.join(content_preview.split())
+                    if len(content_preview) > 200:
+                        content_preview = content_preview[:200] + '...'
+                else:
+                    content_preview = ''
+                
+                # Normalize field names for consistency
+                result_doc = {
+                    'id': doc.get('id'),
+                    'title': doc.get('title'),
+                    'content_preview': content_preview,
+                    'owner_email': doc_owner_email,
+                    'project_id': doc_project_id,
+                    'team_id': doc_team_id,
+                    'tags': doc_tags,
+                    'visibility': doc_visibility,
+                    'visible_to_members': doc.get('visibleToMembers') or doc.get('visible_to_members', []),
+                    'created_at': doc.get('createdAt') or doc.get('created_at'),
+                    'updated_at': doc.get('updatedAt') or doc.get('updated_at')
+                }
+                
+                filtered_docs.append(result_doc)
+            
+            # Apply sorting
             valid_order_by = ['created_at', 'updated_at']
             if orderBy not in valid_order_by:
                 orderBy = 'created_at'
             
-            # Validate orderDirection
             valid_directions = ['asc', 'desc']
             if orderDirection not in valid_directions:
                 orderDirection = 'desc'
             
-            conn = self.pool.getconn()
-            with conn.cursor() as cursor:
-                # Build query - include content preview (first 200 characters), not full content
-                # Use LEFT() function to get first 200 characters of content
-                base_query = "SELECT id, title, LEFT(content, 200) as content_preview, owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at FROM docs WHERE 1=1"
-                
-                query_parts = [base_query]
-                params = []
-                
-                # Add filters
-                if projectId:
-                    query_parts.append("AND project_id = %s")
-                    params.append(projectId)
-                
-                if teamId:
-                    query_parts.append("AND team_id = %s")
-                    params.append(teamId)
-                
-                if ownerEmail:
-                    query_parts.append("AND owner_email = %s")
-                    params.append(ownerEmail.lower())
-                
-                if visibility:
-                    query_parts.append("AND visibility = %s")
-                    params.append(visibility)
-                
-                if searchTitle:
-                    query_parts.append("AND LOWER(title) LIKE %s")
-                    params.append(f"%{searchTitle.lower()}%")
-                
-                if tags:
-                    # Filter documents that contain any of the specified tags
-                    # Use JSONB containment operator @>
-                    tag_conditions = []
-                    for tag in tags:
-                        tag_conditions.append("tags @> %s::jsonb")
-                        params.append(json.dumps([tag]))
-                    if tag_conditions:
-                        query_parts.append(f"AND ({' OR '.join(tag_conditions)})")
-                
-                # Add ordering
-                query_parts.append(f"ORDER BY {orderBy} {orderDirection.upper()}")
-                
-                # Add limit
-                query_parts.append("LIMIT %s")
-                params.append(limit)
-                
-                query = " ".join(query_parts)
-                cursor.execute(query, params)
-                rows = cursor.fetchall()
-                
-                # Convert to list of dicts
-                docs = []
-                for row in rows:
-                    doc = dict(row)
-                    
-                    # Clean up content preview - strip HTML tags and truncate if needed
-                    if 'content_preview' in doc and doc['content_preview']:
-                        content_preview = doc['content_preview']
-                        # Strip HTML tags for a cleaner preview
-                        content_preview = re.sub(r'<[^>]+>', '', content_preview)
-                        # Remove extra whitespace
-                        content_preview = ' '.join(content_preview.split())
-                        # Truncate to 200 characters if longer
-                        if len(content_preview) > 200:
-                            content_preview = content_preview[:200] + '...'
-                        doc['content_preview'] = content_preview
-                    else:
-                        doc['content_preview'] = ''
-                    
-                    # Parse JSONB fields if they're strings
-                    if 'tags' in doc:
-                        tags_value = doc['tags']
-                        if isinstance(tags_value, str):
-                            try:
-                                tags_value = json.loads(tags_value)
-                            except:
-                                tags_value = []
-                        elif not isinstance(tags_value, list):
-                            tags_value = []
-                        doc['tags'] = tags_value
-                    
-                    if 'visible_to_members' in doc:
-                        visible_to_members = doc['visible_to_members']
-                        if isinstance(visible_to_members, str):
-                            try:
-                                visible_to_members = json.loads(visible_to_members)
-                            except:
-                                visible_to_members = []
-                        elif not isinstance(visible_to_members, list):
-                            visible_to_members = []
-                        doc['visible_to_members'] = visible_to_members
-                    
-                    docs.append(doc)
-                
-                logger.info(f"Listed {len(docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
-                return docs
+            # Sort documents
+            reverse = (orderDirection == 'desc')
+            filtered_docs.sort(
+                key=lambda x: x.get(orderBy, ''),
+                reverse=reverse
+            )
+            
+            # Apply limit
+            filtered_docs = filtered_docs[:limit]
+            
+            logger.info(f"Listed {len(filtered_docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
+            return filtered_docs
                 
         except Exception as e:
             logger.error(f"Error listing documents: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-        finally:
-            if conn:
-                self.pool.putconn(conn)
 

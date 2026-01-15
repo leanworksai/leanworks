@@ -19,7 +19,7 @@ from app.services.client import (
     initialize_clients_async, 
     get_cached_storage_client
 )
-from app.services.database import query_tenant_one, get_domain_from_email, save_file_metadata
+from app.services.database import query_org_one, get_domain_from_email, save_file_metadata
 from app.services.anthropic_files import AnthropicFilesService
 from app.utils.cache import clear_cache
 from leanworks.setting import MAX_FILES_PER_REQUEST, MAX_FILE_SIZE_MB
@@ -71,16 +71,18 @@ def get_project_details_from_postgres(user_email: str, project_id: str):
     Get project details from PostgreSQL.
     
     Args:
-        user_email: User email address (to determine tenant database)
+        user_email: User email address (to determine org database)
         project_id: Project ID
         
     Returns:
         dict: Project details with name, or None if not found
     """
     try:
-        # Query projects table in the tenant's database
-        project_data = query_tenant_one(
-            user_email,
+        # Derive org_slug from user email domain
+        org_slug = get_domain_from_email(user_email)
+        # Query projects table in the org's database
+        project_data = query_org_one(
+            org_slug,
             "SELECT name FROM projects WHERE id = %s",
             (project_id,)
         )

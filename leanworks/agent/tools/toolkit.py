@@ -3,13 +3,18 @@ from leanworks.agent.tools.doc_management import DocManagementTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
 from leanworks.agent.tools.duckdb import DuckDBTool
-from leanworks.agent.tools.firestore import FirestoreTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
 from leanworks.agent.tools.notion import NotionTool
 from leanworks.agent.tools.clickup import ClickUpTool
 from leanworks.agent.tools.linear import LinearTool
+# New domain-specific management tools (API-based)
+from leanworks.agent.tools.task_management import TaskManagementTool
+from leanworks.agent.tools.project_management import ProjectManagementTool
+from leanworks.agent.tools.event_management import EventManagementTool
+from leanworks.agent.tools.user_management import UserManagementTool
+from leanworks.agent.tools.chat_management import ChatManagementTool
 from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
 import logging
@@ -61,7 +66,16 @@ class ToolUse:
         self.session_id = session_id
         
         # Internal tools that are always available
-        internal_tools = ['search', 'postgres', 'duckdb', 'firestore', 'doc_management']
+        internal_tools = [
+            'search',
+            'task_management',
+            'project_management',
+            'event_management',
+            'user_management',
+            'chat_management',
+            'doc_management',
+            'duckdb'
+        ]
         
         # Set default tools if not provided
         if tools is None:
@@ -97,28 +111,6 @@ class ToolUse:
     
 
     # Lazy loading properties for individual tools
-    @property
-    def postgres_tool(self):
-        """Lazy-load PostgreSQL tool on first access."""
-        if 'postgres_tool' not in self._tool_cache:
-            if 'postgres' in self.requested_tools and self.postgres_client_wrapper:
-                try:
-                    # Set Secret Manager client for PostgresTool
-                    if self.secret_manager_client:
-                        PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
-                    self._tool_cache['postgres_tool'] = PostgresTool(self.postgres_client_wrapper, user_id=self.user_id)
-                    if 'postgres' not in self.enabled_tools:
-                        self.enabled_tools.append('postgres')
-                    logger.info("PostgresTool initialized successfully (lazy)")
-                except Exception as e:
-                    logger.error(f"Failed to initialize PostgresTool: {str(e)}")
-                    self._tool_cache['postgres_tool'] = None
-            elif 'postgres' in self.requested_tools:
-                logger.warning("PostgresTool not initialized: missing postgres_client_wrapper")
-                self._tool_cache['postgres_tool'] = None
-            else:
-                self._tool_cache['postgres_tool'] = None
-        return self._tool_cache['postgres_tool']
     
     @property
     def doc_management_tool(self):
@@ -215,29 +207,124 @@ class ToolUse:
                 self._tool_cache['outlook_tool'] = None
         return self._tool_cache['outlook_tool']
     
+    # ============================================================================
+    # NEW DOMAIN-SPECIFIC MANAGEMENT TOOLS (API-BASED)
+    # ============================================================================
+    
     @property
-    def firestore_tool(self):
-        """Lazy-load Firestore tool on first access."""
-        if 'firestore_tool' not in self._tool_cache:
-            if 'firestore' in self.requested_tools and self.firestore_client and self.org_slug:
+    def task_management_tool(self):
+        """Lazy-load Task Management tool on first access."""
+        if 'task_management_tool' not in self._tool_cache:
+            if 'task_management' in self.requested_tools and self.org_slug:
                 try:
-                    self._tool_cache['firestore_tool'] = FirestoreTool(
-                        self.firestore_client,
-                        self.org_slug,
+                    self._tool_cache['task_management_tool'] = TaskManagementTool(
+                        org_slug=self.org_slug,
                         user_id=self.user_id
                     )
-                    if 'firestore' not in self.enabled_tools:
-                        self.enabled_tools.append('firestore')
-                    logger.info("FirestoreTool initialized successfully (lazy)")
+                    if 'task_management' not in self.enabled_tools:
+                        self.enabled_tools.append('task_management')
+                    logger.info("TaskManagementTool initialized successfully (lazy)")
                 except Exception as e:
-                    logger.error(f"Failed to initialize FirestoreTool: {str(e)}")
-                    self._tool_cache['firestore_tool'] = None
-            elif 'firestore' in self.requested_tools:
-                logger.warning("FirestoreTool not initialized: missing firestore_client or org_slug")
-                self._tool_cache['firestore_tool'] = None
+                    logger.error(f"Failed to initialize TaskManagementTool: {str(e)}")
+                    self._tool_cache['task_management_tool'] = None
+            elif 'task_management' in self.requested_tools:
+                logger.warning("TaskManagementTool not initialized: missing org_slug")
+                self._tool_cache['task_management_tool'] = None
             else:
-                self._tool_cache['firestore_tool'] = None
-        return self._tool_cache['firestore_tool']
+                self._tool_cache['task_management_tool'] = None
+        return self._tool_cache['task_management_tool']
+    
+    @property
+    def project_management_tool(self):
+        """Lazy-load Project Management tool on first access."""
+        if 'project_management_tool' not in self._tool_cache:
+            if 'project_management' in self.requested_tools and self.org_slug:
+                try:
+                    self._tool_cache['project_management_tool'] = ProjectManagementTool(
+                        org_slug=self.org_slug,
+                        user_id=self.user_id
+                    )
+                    if 'project_management' not in self.enabled_tools:
+                        self.enabled_tools.append('project_management')
+                    logger.info("ProjectManagementTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize ProjectManagementTool: {str(e)}")
+                    self._tool_cache['project_management_tool'] = None
+            elif 'project_management' in self.requested_tools:
+                logger.warning("ProjectManagementTool not initialized: missing org_slug")
+                self._tool_cache['project_management_tool'] = None
+            else:
+                self._tool_cache['project_management_tool'] = None
+        return self._tool_cache['project_management_tool']
+    
+    @property
+    def event_management_tool(self):
+        """Lazy-load Event Management tool on first access."""
+        if 'event_management_tool' not in self._tool_cache:
+            if 'event_management' in self.requested_tools and self.org_slug:
+                try:
+                    self._tool_cache['event_management_tool'] = EventManagementTool(
+                        org_slug=self.org_slug,
+                        user_id=self.user_id
+                    )
+                    if 'event_management' not in self.enabled_tools:
+                        self.enabled_tools.append('event_management')
+                    logger.info("EventManagementTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize EventManagementTool: {str(e)}")
+                    self._tool_cache['event_management_tool'] = None
+            elif 'event_management' in self.requested_tools:
+                logger.warning("EventManagementTool not initialized: missing org_slug")
+                self._tool_cache['event_management_tool'] = None
+            else:
+                self._tool_cache['event_management_tool'] = None
+        return self._tool_cache['event_management_tool']
+    
+    @property
+    def user_management_tool(self):
+        """Lazy-load User Management tool on first access."""
+        if 'user_management_tool' not in self._tool_cache:
+            if 'user_management' in self.requested_tools and self.org_slug:
+                try:
+                    self._tool_cache['user_management_tool'] = UserManagementTool(
+                        org_slug=self.org_slug,
+                        user_id=self.user_id
+                    )
+                    if 'user_management' not in self.enabled_tools:
+                        self.enabled_tools.append('user_management')
+                    logger.info("UserManagementTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize UserManagementTool: {str(e)}")
+                    self._tool_cache['user_management_tool'] = None
+            elif 'user_management' in self.requested_tools:
+                logger.warning("UserManagementTool not initialized: missing org_slug")
+                self._tool_cache['user_management_tool'] = None
+            else:
+                self._tool_cache['user_management_tool'] = None
+        return self._tool_cache['user_management_tool']
+    
+    @property
+    def chat_management_tool(self):
+        """Lazy-load Chat Management tool on first access."""
+        if 'chat_management_tool' not in self._tool_cache:
+            if 'chat_management' in self.requested_tools and self.org_slug:
+                try:
+                    self._tool_cache['chat_management_tool'] = ChatManagementTool(
+                        org_slug=self.org_slug,
+                        user_id=self.user_id
+                    )
+                    if 'chat_management' not in self.enabled_tools:
+                        self.enabled_tools.append('chat_management')
+                    logger.info("ChatManagementTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize ChatManagementTool: {str(e)}")
+                    self._tool_cache['chat_management_tool'] = None
+            elif 'chat_management' in self.requested_tools:
+                logger.warning("ChatManagementTool not initialized: missing org_slug")
+                self._tool_cache['chat_management_tool'] = None
+            else:
+                self._tool_cache['chat_management_tool'] = None
+        return self._tool_cache['chat_management_tool']
     
     @property
     def cloud_storage_tool(self):
@@ -1112,16 +1199,6 @@ class ToolUse:
         if self._tools_cache is None:
             self._tools_cache = []
             
-            # Add PostgreSQL tools if available
-            if self.postgres_tool:
-                self._tools_cache.extend([
-                    self.postgres_tool.query_postgres_property,
-                    self.postgres_tool.create_task_property,
-                    self.postgres_tool.update_task_property,
-                    self.postgres_tool.list_events_property,
-                ])
-                logger.info("PostgreSQL tools added to tools list (lazy)")
-            
             # Add Doc Management tools if available
             if self.doc_management_tool:
                 self._tools_cache.extend([
@@ -1139,7 +1216,39 @@ class ToolUse:
             if self.search_tool:
                 self._tools_cache.append(self.search_tool.search_documents_property)
                 logger.info("search_documents tool added to tools list (lazy)")
-                
+            
+            # Add NEW Domain-Specific Management Tools (API-based)
+            if self.task_management_tool:
+                self._tools_cache.extend([
+                    self.task_management_tool.query_tasks_property,
+                    self.task_management_tool.create_task_property,
+                    self.task_management_tool.update_task_property,
+                ])
+                logger.info("TaskManagementTool tools added to tools list (lazy)")
+            
+            if self.project_management_tool:
+                self._tools_cache.extend([
+                    self.project_management_tool.query_projects_property,
+                ])
+                logger.info("ProjectManagementTool tools added to tools list (lazy)")
+            
+            if self.event_management_tool:
+                self._tools_cache.extend([
+                    self.event_management_tool.query_events_property,
+                ])
+                logger.info("EventManagementTool tools added to tools list (lazy)")
+            
+            if self.user_management_tool:
+                self._tools_cache.extend([
+                    self.user_management_tool.query_users_property,
+                ])
+                logger.info("UserManagementTool tools added to tools list (lazy)")
+            
+            if self.chat_management_tool:
+                self._tools_cache.extend([
+                    self.chat_management_tool.query_messages_property,
+                ])
+                logger.info("ChatManagementTool tools added to tools list (lazy)")
                 
             # Add Outlook tools if available
             if self.outlook_tool:
@@ -1148,13 +1257,6 @@ class ToolUse:
                     self.outlook_tool.find_available_slots_property
                 ])
                 logger.info("Outlook tools added to tools list (lazy)")
-
-            # Add Firestore tools if available
-            if self.firestore_tool:
-                self._tools_cache.extend([
-                    self.firestore_tool.query_messages_property,
-                ])
-                logger.info("Firestore tools added to tools list (lazy)")
 
             # Add Cloud Storage tools if available
             if self.cloud_storage_tool:
@@ -1266,16 +1368,6 @@ class ToolUse:
         if self._function_map_cache is None:
             self._function_map_cache = {}
             
-            # Add PostgreSQL functions if available
-            if self.postgres_tool:
-                self._function_map_cache.update({
-                    "query_postgres": self.postgres_tool.query_postgres,
-                    "create_task": self.postgres_tool.create_task,
-                    "update_task": self.postgres_tool.update_task,
-                    "list_events": self.postgres_tool.list_events,
-                })
-                logger.info("PostgreSQL functions added to function_map (lazy)")
-            
             # Add Doc Management functions if available
             if self.doc_management_tool:
                 self._function_map_cache.update({
@@ -1293,7 +1385,39 @@ class ToolUse:
             if self.search_tool:
                 self._function_map_cache["search_documents"] = self.search_tool.search_documents
                 logger.info("search_documents function added to function_map (lazy)")
-                
+            
+            # Add NEW Domain-Specific Management Tool functions (API-based)
+            if self.task_management_tool:
+                self._function_map_cache.update({
+                    "query_tasks": self.task_management_tool.query_tasks,
+                    "create_task": self.task_management_tool.create_task,
+                    "update_task": self.task_management_tool.update_task,
+                })
+                logger.info("TaskManagementTool functions added to function_map (lazy)")
+            
+            if self.project_management_tool:
+                self._function_map_cache.update({
+                    "query_projects": self.project_management_tool.query_projects,
+                })
+                logger.info("ProjectManagementTool functions added to function_map (lazy)")
+            
+            if self.event_management_tool:
+                self._function_map_cache.update({
+                    "query_events": self.event_management_tool.query_events,
+                })
+                logger.info("EventManagementTool functions added to function_map (lazy)")
+            
+            if self.user_management_tool:
+                self._function_map_cache.update({
+                    "query_users": self.user_management_tool.query_users,
+                })
+                logger.info("UserManagementTool functions added to function_map (lazy)")
+            
+            if self.chat_management_tool:
+                self._function_map_cache.update({
+                    "query_messages": self.chat_management_tool.query_messages,
+                })
+                logger.info("ChatManagementTool functions added to function_map (lazy)")
                 
             # Add Outlook functions if available
             if self.outlook_tool:
@@ -1302,13 +1426,6 @@ class ToolUse:
                     "find_available_slots": self.outlook_tool.find_available_slots
                 })
                 logger.info("Outlook functions added to function_map (lazy)")
-
-            # Add Firestore functions if available
-            if self.firestore_tool:
-                self._function_map_cache.update({
-                    "query_messages": self.firestore_tool.query_messages,
-                })
-                logger.info("Firestore functions added to function_map (lazy)")
 
             # Add Cloud Storage functions if available
             if self.cloud_storage_tool:

@@ -793,43 +793,7 @@ class ChatAgent:
                 unique_sources.append(source)
                 seen.add(source)
 
-        # Always add last response to slim_conversation (if not already added)
-        if response_text:
-            # Check if last message in conversation is already an assistant message
-            if self.conversation.conversation and self.conversation.conversation[-1].get("role") == "assistant":
-                # Message already in conversation, extract text and add to slim_conversation only
-                last_msg = self.conversation.conversation[-1]
-                # Extract text from the message
-                text_content = None
-                if isinstance(last_msg.get("content"), list):
-                    # Find text block in content
-                    for block in last_msg["content"]:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_content = block.get("text", "")
-                            break
-                elif isinstance(last_msg.get("content"), str):
-                    text_content = last_msg.get("content", "")
-                
-                # Use response_text if we couldn't extract from last message
-                if not text_content:
-                    text_content = response_text
-                
-                # Only add to slim_conversation if not already there
-                if not self.conversation.slim_conversation or \
-                   self.conversation.slim_conversation[-1].get("role") != "assistant" or \
-                   (isinstance(self.conversation.slim_conversation[-1].get("content"), list) and
-                    len(self.conversation.slim_conversation[-1]["content"]) > 0 and
-                    self.conversation.slim_conversation[-1]["content"][0].get("text") != text_content):
-                    self.conversation.slim_conversation.append({
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": text_content}]
-                    })
-            else:
-                # No assistant message yet, add it normally to both conversation and slim_conversation
-                self.conversation.add_assistant_message(response_text, include_in_slim=True)
-        
         # Note: Messages are saved to messages collection by the frontend (source of truth)
-        # We no longer save slim_conversation to files collection
         # Only log full response if not streaming (to avoid duplicate output)
         if not streaming:
             logger.info(f"Final answer: {response_text}")
