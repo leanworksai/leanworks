@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: ask-api
-        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260112-181245
+        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260115-124044
         command: ["hypercorn"]
         args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
         ports:
@@ -47,6 +47,8 @@ spec:
         env:
         - name: VERIFY_API_KEY
           value: "true"
+        - name: LEANWORKS_HUB_URL
+          value: "http://leanworks-hub-service"  # Kubernetes service DNS name for leanworks-hub
         - name: DB_HOST
           value: "cloud-sql-proxy-service"  # Kubernetes service DNS name for shared Cloud SQL Proxy
         - name: DB_PORT
