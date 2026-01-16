@@ -227,6 +227,19 @@ async def ask():
                 tools = None
         else:
             tools = None
+        
+        # Log API payload
+        payload = {
+            "user_id": user_id,
+            "org_slug": org_slug,
+            "session_id": session_id,
+            "query": query,
+            "cited_context": cited_context,
+            "tools": tools
+        }
+        if uploaded_files:
+            payload["files"] = [{"filename": f.filename, "content_type": f.content_type} for f in uploaded_files]
+        logger.info(f"Ask API payload: {json.dumps(payload, default=str)}")
             
         logger.info(f"Request from user_id: {user_id}, org_slug: {org_slug}, session_id: {session_id}")
         if uploaded_files:
@@ -337,6 +350,9 @@ async def ask():
                 filtered_tools = tools
         else:
             filtered_tools = None
+        
+        # Log tools being used
+        logger.info(f"Ask API - Tools being used: {json.dumps(filtered_tools if filtered_tools else available_tools, default=str)}")
         print(f"Filtered tools: {filtered_tools}")
         
         # Performance optimization: Initialize Agent with pre-initialized clients (using keyword arguments like test file)
@@ -402,6 +418,15 @@ async def ask():
         
         total_time = time.time() - request_start_time
         logger.info(f"Total request processing time: {total_time:.3f}s")
+        
+        # Log final response
+        response_log = {
+            "content": response.get("content", "")[:500] + "..." if len(response.get("content", "")) > 500 else response.get("content", ""),
+            "has_files": "files" in response,
+            "file_count": len(response.get("files", [])) if "files" in response else 0
+        }
+        logger.info(f"Ask API final response: {json.dumps(response_log, default=str)}")
+        
         logger.info("Successfully generated and returned response")
         return response
     except Exception as e:

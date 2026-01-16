@@ -71,7 +71,7 @@ class ChatAgent:
         self.read_document_ids = set()
         
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
+        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
         
 
         

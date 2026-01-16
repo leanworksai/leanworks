@@ -3,6 +3,8 @@ import re
 import copy
 import logging
 import time
+import tempfile
+import os
 from typing import List, Dict, Any, Optional
 from google.cloud import firestore
 
@@ -264,6 +266,9 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
+                        # Log tool call with parameters
+                        logger.info(f"Tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)}")
+                        
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         
@@ -341,7 +346,7 @@ class ConversationManager:
             response: Claude API response object
             function_map: Dictionary mapping tool names to functions
             data_sources: List to append data source information
-            rag_storage: Optional RAGStorageTool for storing unstructured large responses
+            rag_storage: Optional RAGStorageTool (deprecated - unstructured responses now stored as text files)
         """
         tool_results = []
         
@@ -369,7 +374,7 @@ class ConversationManager:
                     # Server tools are executed by Anthropic's servers automatically
                     # Results are already included in the response - we don't need to process them
                     # Just track the data source and skip adding tool_result
-                    logger.info(f"Server tool {tool_name} called - results already in response from Anthropic")
+                    logger.info(f"Server tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)} - results already in response from Anthropic")
                     # Track data source for web_search
                     if tool_name == "web_search":
                         data_sources.append("Web search results")
@@ -400,7 +405,15 @@ class ConversationManager:
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
                             logger.info(f"Large response detected for {tool_name}: type={response_type.value}, size={LargeResponseHandler.estimate_tokens(result)} tokens")
                             
-                            # Handle based on response type
+                            # Check if this is a doc management tool - always use text files (never DuckDB)
+                            if self._is_doc_management_tool(tool_name):
+                                formatted_result = self._handle_large_doc_response(
+                                    result, tool_name, tool_input, tool_use_id, data_sources, function_map
+                                )
+                                tool_results.append(formatted_result)
+                                continue
+                            
+                            # For other tools, use existing logic (DuckDB for structured, RAG for unstructured)
                             if response_type == ResponseType.STRUCTURED:
                                 # Store in DuckDB
                                 formatted_result = self._handle_large_structured_response(
@@ -410,9 +423,9 @@ class ConversationManager:
                                 continue
                             
                             elif response_type == ResponseType.UNSTRUCTURED:
-                                # Store in RAG
+                                # Store as text file
                                 formatted_result = self._handle_large_unstructured_response(
-                                    result, tool_name, tool_input, tool_use_id, data_sources, rag_storage
+                                    result, tool_name, tool_input, tool_use_id, data_sources
                                 )
                                 tool_results.append(formatted_result)
                                 continue
@@ -429,19 +442,11 @@ class ConversationManager:
                                     tool_results.append(formatted_result)
                                 
                                 # Handle unstructured part
-                                if unstructured_part and rag_storage:
+                                if unstructured_part:
+                                    # Store as text file
                                     formatted_result = self._handle_large_unstructured_response(
-                                        unstructured_part, tool_name, tool_input, tool_use_id, data_sources, rag_storage
+                                        unstructured_part, tool_name, tool_input, tool_use_id, data_sources
                                     )
-                                    tool_results.append(formatted_result)
-                                elif unstructured_part:
-                                    # Fallback to truncation if RAG not available
-                                    logger.warning(f"RAG storage not available, truncating unstructured part")
-                                    formatted_result = {
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_use_id,
-                                        "content": f"[Large unstructured response truncated. First 2000 chars: {unstructured_part[:2000]}...]"
-                                    }
                                     tool_results.append(formatted_result)
                                 continue
                         
@@ -627,43 +632,196 @@ class ConversationManager:
         tool_name: str,
         tool_input: Dict[str, Any],
         tool_use_id: str,
-        data_sources: List[str],
-        rag_storage
+        data_sources: List[str]
     ) -> Dict[str, Any]:
-        """Store large unstructured response in RAG and return summary"""
+        """Store large unstructured response as text file and return summary"""
         
-        if not rag_storage:
-            # Fallback to truncation if RAG not available
-            logger.warning(f"RAG storage not available for {tool_name}, truncating response")
-            return self._truncate_response(content, tool_use_id)
+        # Use text file storage instead of RAG
+        return self._handle_large_unstructured_response_as_file(
+            content=content,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            data_sources=data_sources
+        )
+    
+    def _handle_large_unstructured_response_as_file(
+        self,
+        content: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Save large unstructured response as text file (similar to doc responses).
         
+        Args:
+            content: The unstructured text content to save
+            tool_name: Name of the tool that generated this
+            tool_input: Input parameters to the tool
+            tool_use_id: Tool use ID for tracking
+            data_sources: List to append data source info
+            
+        Returns:
+            Formatted result with file path for text editor tool access
+        """
         try:
-            # Store in RAG
-            document_id = rag_storage.store_tool_response(
-                content=content,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                metadata={
-                    "session_id": self.session_id,
-                    "user_id": self.user_id
+            # Create temporary file with appropriate naming
+            # Use tool name (sanitized) and short identifier
+            tool_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', tool_name)[:30]  # Sanitize and limit length
+            fd, file_path = tempfile.mkstemp(
+                suffix='.txt',
+                prefix=f'tool_response_{tool_name_safe}_',
+                text=True
+            )
+            
+            try:
+                # Write content to file
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                # Generate a short summary for the response
+                summary = self._generate_text_summary(content)
+                
+                # Format response similar to doc response format
+                summary_lines = [
+                    "Large unstructured response stored in temporary text file.",
+                    "",
+                    f"File saved: {file_path}",
+                    "",
+                    f"Summary: {summary}",
+                    "",
+                    f'Use text editor tool with path="{file_path}" to view.',
+                    "For large files, use grep (via bash tool) to locate specific sections before viewing."
+                ]
+                
+                formatted_result = "\n".join(summary_lines)
+                
+                # Track data source
+                data_sources.append(f"Text file: {file_path}")
+                
+                logger.info(f"Stored large unstructured response in text file: {file_path}")
+                
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": formatted_result
                 }
-            )
+            except Exception as e:
+                # Close file descriptor if write failed
+                os.close(fd)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                raise
+        except Exception as e:
+            logger.error(f"Failed to store large unstructured response in text file: {e}")
+            # Fallback to truncation
+            return self._truncate_response(content, tool_use_id)
+    
+    def _handle_large_doc_response(
+        self,
+        result: Any,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str],
+        function_map: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle large doc management tool responses by creating temp markdown files.
+        
+        Uses existing DocManagementTool.get_doc_markdown_path() or create_temp_markdown_file()
+        to create temporary files that can be accessed via text editor tool.
+        """
+        try:
+            # Extract DocManagementTool instance from function_map
+            doc_tool = None
+            if 'get_doc' in function_map:
+                doc_tool = getattr(function_map['get_doc'], '__self__', None)
+            elif 'get_doc_markdown_path' in function_map:
+                doc_tool = getattr(function_map['get_doc_markdown_path'], '__self__', None)
             
-            # Generate summary
-            summary = self._generate_text_summary(content)
+            if not doc_tool:
+                logger.warning(f"DocManagementTool not available in function_map for {tool_name}, truncating response")
+                return self._truncate_response(result, tool_use_id)
             
-            # Format summary
-            formatted_result = self._format_large_unstructured_summary(
-                summary=summary,
-                document_id=document_id,
-                tool_name=tool_name,
-                content=content
-            )
+            # Handle different result types
+            file_paths = []
+            doc_info = []
+            
+            if isinstance(result, list):
+                # List of documents (get_doc, list_docs)
+                for doc in result:
+                    if isinstance(doc, dict) and 'id' in doc:
+                        doc_id = doc.get('id')
+                        doc_title = doc.get('title', 'Untitled')
+                        doc_content = doc.get('content', '')
+                        
+                        try:
+                            # Create temp markdown file with content
+                            file_path = doc_tool.create_temp_markdown_file(doc_id, doc_content)
+                            file_paths.append(file_path)
+                            doc_info.append({
+                                'title': doc_title,
+                                'id': doc_id,
+                                'file_path': file_path
+                            })
+                            logger.info(f"Created temp file for doc {doc_id}: {file_path}")
+                        except Exception as e:
+                            logger.error(f"Failed to create temp file for doc {doc_id}: {e}")
+                            # Continue with other documents
+                            continue
+            elif isinstance(result, dict):
+                # Single document or error
+                if 'error' in result:
+                    # Error response, return as-is
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": str(result.get('error', 'Unknown error'))
+                    }
+                
+                # Single document dict
+                if 'id' in result:
+                    doc_id = result.get('id')
+                    doc_title = result.get('title', 'Untitled')
+                    doc_content = result.get('content', '')
+                    
+                    try:
+                        file_path = doc_tool.create_temp_markdown_file(doc_id, doc_content)
+                        file_paths.append(file_path)
+                        doc_info.append({
+                            'title': doc_title,
+                            'id': doc_id,
+                            'file_path': file_path
+                        })
+                        logger.info(f"Created temp file for doc {doc_id}: {file_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to create temp file for doc {doc_id}: {e}")
+                        return self._truncate_response(result, tool_use_id)
+            
+            if not file_paths:
+                # No files created, fallback to truncation
+                logger.warning(f"No files created for {tool_name}, truncating response")
+                return self._truncate_response(result, tool_use_id)
+            
+            # Format summary with title, ID, and file path
+            summary_lines = ["Large document response stored in temporary markdown files.\n\nDocuments saved:"]
+            for info in doc_info:
+                summary_lines.append(f'- "{info["title"]}" (ID: {info["id"]}) → {info["file_path"]}')
+            
+            if len(doc_info) == 1:
+                summary_lines.append(f'\nUse text editor tool with path="{doc_info[0]["file_path"]}" to view.')
+            else:
+                summary_lines.append(f'\nUse text editor tool with path="<file_path>" to view any document.')
+            
+            formatted_result = "\n".join(summary_lines)
             
             # Track data source
-            data_sources.append(f"RAG vector database: {document_id}")
+            data_sources.append(f"Document files: {', '.join(file_paths)}")
             
-            logger.info(f"Stored large unstructured response in RAG: {document_id}")
+            logger.info(f"Stored large doc response in temp files: {len(file_paths)} files created")
             
             return {
                 "type": "tool_result",
@@ -671,9 +829,23 @@ class ConversationManager:
                 "content": formatted_result
             }
         except Exception as e:
-            logger.error(f"Failed to store large unstructured response in RAG: {e}")
+            logger.error(f"Failed to store large doc response in temp files: {e}")
             # Fallback to truncation
-            return self._truncate_response(content, tool_use_id)
+            return self._truncate_response(result, tool_use_id)
+    
+    def _is_doc_management_tool(self, tool_name: str) -> bool:
+        """Check if tool is a doc management tool"""
+        doc_tools = [
+            'get_doc', 'list_docs', 'create_doc', 'update_doc',
+            'get_doc_markdown_path', 'create_doc_from_markdown_file', 
+            'update_doc_from_markdown_file',
+            'create_doc_with_workflow', 'update_doc_with_workflow',
+            'generate_toc', 'create_toc_file', 'prepare_section_context',
+            'upsert_section_to_file', 'draft_document_iteratively',
+            'run_quality_passes', 'edit_doc_section', 'search_large_doc',
+            'finalize_doc_update', 'generate_impact_map', 'update_section_with_rag'
+        ]
+        return tool_name in doc_tools
     
     def _get_table_name_for_tool(self, tool_name: str, tool_input: Dict) -> str:
         """Generate appropriate table name based on tool and query"""

@@ -30,11 +30,12 @@ import threading
 import time
 import re
 from pathlib import Path
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
         """
         Initialize ToolUse with various client connections using lazy loading.
         
@@ -42,6 +43,7 @@ class ToolUse:
             org_slug: Organization name (e.g., 'leanworks.ai') extracted from user_id. Used to determine database and client_name.
             firestore_client: Firestore client
             secret_manager_client: Secret Manager client
+            model_client: Anthropic model client for token counting and other operations
             read_document_ids: Set of document IDs already read for deduplication
             tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
                    External tools (e.g., 'outlook') should be explicitly provided in this list.
@@ -59,6 +61,7 @@ class ToolUse:
             self.postgres_client_wrapper = None
         self.firestore_client = firestore_client
         self.secret_manager_client = secret_manager_client
+        self.model_client = model_client
         self.credential_path = credential_path
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
@@ -121,9 +124,20 @@ class ToolUse:
                     # Set Secret Manager client for PostgresTool (needed for connection pool)
                     if self.secret_manager_client:
                         PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
+                    
+                    # Import config from settings for workflow features
+                    from leanworks.setting import DOC_WORKFLOW_CONFIG
+                    
+                    # Pass workflow dependencies if available
                     self._tool_cache['doc_management_tool'] = DocManagementTool(
                         self.postgres_client_wrapper,
-                        user_id=self.user_id
+                        user_id=self.user_id,
+                        rag_storage_tool=self.rag_storage_tool,
+                        search_tool=self.search_tool,
+                        bash_tool=self.bash,
+                        text_editor_tool=self.text_editor,
+                        model_client=self.model_client,
+                        config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')
@@ -991,6 +1005,94 @@ class ToolUse:
         else:
             return str(result)
     
+    def _is_large_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Check if a file is considered large and return metadata.
+        
+        Args:
+            file_path: Path to the file to check
+            
+        Returns:
+            Dict with 'is_large', 'size_bytes', 'size_mb', 'line_count', 'estimated'
+        """
+        try:
+            if not os.path.exists(file_path):
+                return {
+                    "is_large": False,
+                    "size_bytes": 0,
+                    "size_mb": 0.0,
+                    "line_count": 0,
+                    "estimated": False
+                }
+            
+            # Get file size
+            size_bytes = os.path.getsize(file_path)
+            size_mb = size_bytes / (1024 * 1024)
+            
+            # Import config
+            from leanworks.setting import TEXT_EDITOR_CONFIG
+            large_size_threshold = TEXT_EDITOR_CONFIG.get("large_file_size_bytes", 100000)
+            large_lines_threshold = TEXT_EDITOR_CONFIG.get("large_file_lines", 1000)
+            
+            # Quick check: if file is small by size, it's definitely not large
+            if size_bytes < large_size_threshold:
+                # Still count lines for metadata, but use efficient method
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        line_count = sum(1 for _ in f)
+                except Exception:
+                    line_count = 0
+                
+                return {
+                    "is_large": False,
+                    "size_bytes": size_bytes,
+                    "size_mb": round(size_mb, 2),
+                    "line_count": line_count,
+                    "estimated": False
+                }
+            
+            # File is large by size, now check line count
+            # For large files, use efficient line counting
+            line_count = 0
+            estimated = False
+            
+            try:
+                # Try to count lines efficiently
+                # For very large files, we can estimate or use wc -l
+                if size_bytes > 10 * 1024 * 1024:  # > 10MB, estimate
+                    # Estimate: average line length ~100 chars
+                    line_count = int(size_bytes / 100)
+                    estimated = True
+                else:
+                    # Count actual lines
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        line_count = sum(1 for _ in f)
+            except Exception as e:
+                logger.warning(f"Error counting lines for {file_path}: {e}")
+                # Fallback estimation
+                line_count = int(size_bytes / 100)
+                estimated = True
+            
+            # Determine if large based on both size and line count
+            is_large = size_bytes >= large_size_threshold or line_count >= large_lines_threshold
+            
+            return {
+                "is_large": is_large,
+                "size_bytes": size_bytes,
+                "size_mb": round(size_mb, 2),
+                "line_count": line_count,
+                "estimated": estimated
+            }
+        except Exception as e:
+            logger.error(f"Error checking file size for {file_path}: {e}")
+            return {
+                "is_large": False,
+                "size_bytes": 0,
+                "size_mb": 0.0,
+                "line_count": 0,
+                "estimated": False
+            }
+    
     def _handle_text_editor_from_kwargs(self, **kwargs) -> dict:
         """
         Handle text editor operations from Claude's tool call parameters.
@@ -1170,9 +1272,40 @@ class ToolUse:
             if not os.path.exists(full_path):
                 return {"error": f"File not found: {path}"}
             
-            # Read file content
+            # Check if file is large
+            file_metadata = self._is_large_file(full_path)
+            is_large = file_metadata.get("is_large", False)
+            
+            # For large files, enforce restrictions
+            if is_large:
+                # Check if view_range or max_characters is provided
+                has_view_range = view_range and len(view_range) == 2
+                has_max_chars = max_characters is not None
+                
+                if not has_view_range and not has_max_chars:
+                    # Large file without limits - return error with grep suggestions
+                    from leanworks.setting import TEXT_EDITOR_CONFIG
+                    return {
+                        "error": "Cannot view entire large file. File is too large.",
+                        "file_size_bytes": file_metadata.get("size_bytes", 0),
+                        "file_size_mb": file_metadata.get("size_mb", 0.0),
+                        "estimated_lines": file_metadata.get("line_count", 0),
+                        "line_count_estimated": file_metadata.get("estimated", False),
+                        "suggestion": "Use grep to locate relevant sections first, then view specific line ranges.",
+                        "example_commands": [
+                            f"Use bash tool: grep -n 'search_term' {path}",
+                            f"Or with context: grep -n -A 5 -B 5 'search_term' {path}",
+                            "Then use view with view_range: [start_line, end_line]",
+                            f"Or use view with max_characters: {TEXT_EDITOR_CONFIG.get('max_view_chars_default', 50000)}"
+                        ],
+                        "instructions": "For large files, you must first use grep (via bash tool) to locate the area of interest, then use view with view_range or max_characters to view only that specific section."
+                    }
+            
+            # Read file content (with limits if large)
             with open(full_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
+            
+            total_lines = len(lines)
             
             # Apply view_range if specified
             if view_range and len(view_range) == 2:
@@ -1188,7 +1321,30 @@ class ToolUse:
             if max_characters and len(content) > max_characters:
                 content = content[:max_characters] + "\n... [truncated]"
             
-            return {"content": content, "file_path": path}
+            # For large files with only one limit, apply additional safety limit
+            if is_large:
+                from leanworks.setting import TEXT_EDITOR_CONFIG
+                if view_range and not max_characters:
+                    # Apply character limit as safety even if view_range is provided
+                    max_chars = TEXT_EDITOR_CONFIG.get("max_view_chars_default", 50000)
+                    if len(content) > max_chars:
+                        content = content[:max_chars] + "\n... [truncated]"
+                elif max_characters and not view_range:
+                    # Apply line limit as safety
+                    max_lines = TEXT_EDITOR_CONFIG.get("max_view_lines_default", 500)
+                    if total_lines > max_lines:
+                        # Truncate to first max_lines
+                        content = ''.join(lines[:max_lines]) + "\n... [truncated (file has more lines)]"
+            
+            # Return content with file metadata
+            return {
+                "content": content,
+                "file_path": path,
+                "file_size_bytes": file_metadata.get("size_bytes", 0),
+                "file_size_mb": file_metadata.get("size_mb", 0.0),
+                "total_lines": total_lines,
+                "line_count_estimated": file_metadata.get("estimated", False)
+            }
         
         # If no recognized command, return error
         return {"error": "Unknown text editor command. Supported commands: view (path), create (path, file_text), str_replace (path, old_str, new_str), insert (path, insert_line, new_str)"}
@@ -1202,6 +1358,7 @@ class ToolUse:
             # Add Doc Management tools if available
             if self.doc_management_tool:
                 self._tools_cache.extend([
+                    # Basic doc management tools
                     self.doc_management_tool.create_doc_property,
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
@@ -1209,8 +1366,22 @@ class ToolUse:
                     self.doc_management_tool.get_doc_markdown_path_property,
                     self.doc_management_tool.create_doc_from_markdown_file_property,
                     self.doc_management_tool.update_doc_from_markdown_file_property,
+                    # Workflow tools (now part of DocManagementTool)
+                    self.doc_management_tool.create_doc_with_workflow_property,
+                    self.doc_management_tool.update_doc_with_workflow_property,
+                    self.doc_management_tool.generate_toc_property,
+                    self.doc_management_tool.create_toc_file_property,
+                    self.doc_management_tool.prepare_section_context_property,
+                    self.doc_management_tool.upsert_section_to_file_property,
+                    self.doc_management_tool.draft_document_iteratively_property,
+                    self.doc_management_tool.run_quality_passes_property,
+                    self.doc_management_tool.edit_doc_section_property,
+                    self.doc_management_tool.search_large_doc_property,
+                    self.doc_management_tool.finalize_doc_update_property,
+                    self.doc_management_tool.generate_impact_map_property,
+                    self.doc_management_tool.update_section_with_rag_property,
                 ])
-                logger.info("Doc Management tools added to tools list (lazy)")
+                logger.info("Doc Management tools (including workflow) added to tools list (lazy)")
             
             # Add Search tools if available
             if self.search_tool:
@@ -1371,6 +1542,7 @@ class ToolUse:
             # Add Doc Management functions if available
             if self.doc_management_tool:
                 self._function_map_cache.update({
+                    # Basic doc management functions
                     "create_doc": self.doc_management_tool.create_doc,
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
@@ -1378,8 +1550,22 @@ class ToolUse:
                     "get_doc_markdown_path": self.doc_management_tool.get_doc_markdown_path,
                     "create_doc_from_markdown_file": self.doc_management_tool.create_doc_from_markdown_file,
                     "update_doc_from_markdown_file": self.doc_management_tool.update_doc_from_markdown_file,
+                    # Workflow functions (now part of DocManagementTool)
+                    "create_doc_with_workflow": self.doc_management_tool.create_doc_with_workflow,
+                    "update_doc_with_workflow": self.doc_management_tool.update_doc_with_workflow,
+                    "generate_toc": self.doc_management_tool.generate_toc,
+                    "create_toc_file": self.doc_management_tool.create_toc_file,
+                    "prepare_section_context": self.doc_management_tool.prepare_section_context,
+                    "upsert_section_to_file": self.doc_management_tool.upsert_section_to_file,
+                    "draft_document_iteratively": self.doc_management_tool.draft_document_iteratively,
+                    "run_quality_passes": self.doc_management_tool.run_quality_passes,
+                    "edit_doc_section": self.doc_management_tool.edit_doc_section,
+                    "search_large_doc": self.doc_management_tool.search_large_doc,
+                    "finalize_doc_update": self.doc_management_tool.finalize_doc_update,
+                    "generate_impact_map": self.doc_management_tool.generate_impact_map,
+                    "update_section_with_rag": self.doc_management_tool.update_section_with_rag,
                 })
-                logger.info("Doc Management functions added to function_map (lazy)")
+                logger.info("Doc Management functions (including workflow) added to function_map (lazy)")
             
             # Add search function if available
             if self.search_tool:
@@ -1542,7 +1728,8 @@ class ToolUse:
         if 'duckdb' in self.requested_tools:
             self.enabled_tools.append('duckdb')
     
-    def _get_rag_storage_tool(self):
+    @property
+    def rag_storage_tool(self):
         """
         Lazy initialize RAG storage tool for storing unstructured large responses.
         Reuses existing SearchTool's vector DB client if available.
@@ -1581,7 +1768,16 @@ class ToolUse:
                 self._rag_storage = False  # Mark as unavailable
         
         return self._rag_storage if self._rag_storage else None
-        logger.info("Tool cache cleared - tools will be reinitialized on next access")
+    
+    def _get_rag_storage_tool(self):
+        """
+        Deprecated: Use rag_storage_tool property instead.
+        Kept for backward compatibility.
+        
+        Returns:
+            RAGStorageTool instance or None if not available
+        """
+        return self.rag_storage_tool
     
     def cleanup_bash_session(self):
         """Clean up Docker container for bash session."""

@@ -6,6 +6,8 @@ import os
 from typing import Dict, List, Any, Optional, Union
 import re
 import markdown
+import anthropic
+from datetime import datetime, timezone
 
 from .base_api_client import BaseAPIClient
 from .postgres import AI_AGENT_ID
@@ -23,13 +25,30 @@ class DocManagementTool(BaseAPIClient):
     helper functions.
     """
     
-    def __init__(self, postgres_client_wrapper, user_id: Optional[str] = None):
+    def __init__(
+        self, 
+        postgres_client_wrapper, 
+        user_id: Optional[str] = None,
+        # Optional dependencies for workflow features
+        rag_storage_tool=None,
+        search_tool=None,
+        bash_tool=None,
+        text_editor_tool=None,
+        model_client: Optional[anthropic.Anthropic] = None,
+        config: Optional[Dict[str, Any]] = None
+    ):
         """
         Initialize DocManagementTool with API access.
         
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name)
             user_id: Optional user ID used for attribution (falls back to AI_AGENT_ID if None)
+            rag_storage_tool: Optional RAGStorageTool instance for storing large docs
+            search_tool: Optional SearchTool instance for RAG retrieval
+            bash_tool: Optional bash tool function for file operations
+            text_editor_tool: Optional text editor tool function for file editing
+            model_client: Optional Anthropic client for token counting API
+            config: Optional workflow configuration (uses defaults from DOC_WORKFLOW_CONFIG if not provided)
         """
         # Get org_slug from wrapper (use client_name as fallback)
         org_slug = getattr(postgres_client_wrapper, 'org_slug', None)
@@ -47,6 +66,40 @@ class DocManagementTool(BaseAPIClient):
         
         # Track temporary markdown files
         self._temp_files: Dict[str, str] = {}  # docId -> file_path
+        self._workflow_temp_files: List[str] = []  # List of temp file paths for workflow operations
+        
+        # Store workflow dependencies
+        self.rag_storage = rag_storage_tool
+        self.search_tool = search_tool
+        self.bash_tool = bash_tool
+        self.text_editor = text_editor_tool
+        self.model_client = model_client
+        self.org_slug = org_slug
+        
+        # Load workflow configuration
+        if config is None:
+            from leanworks.setting import DOC_WORKFLOW_CONFIG
+            self.config = DOC_WORKFLOW_CONFIG.copy()
+        else:
+            # Default configuration
+            default_config = {
+                "max_context_tokens": 30000,
+                "context_sandwich_tokens": 300,
+                "large_doc_threshold": 50000,
+                "max_heading_depth": 3,
+                "bridge_sentences": (1, 3),
+                "chunk_by_headings": True,
+                "heading_chunk_overlap": 75,
+                "paragraph_chunk_overlap": 128,
+                "run_continuity_pass": True,
+                "run_formatting_pass": True,
+                "run_compression_pass_threshold": 50000,
+                "enable_impact_map": True,
+                "require_user_confirmation": False,
+                "enable_post_update_validation": True,
+            }
+            default_config.update(config)
+            self.config = default_config
     
     # ============================================================================
     # Core Document Operations (via API)
@@ -1789,4 +1842,2402 @@ class DocManagementTool(BaseAPIClient):
             logger.error(f"Error listing documents: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
+    
+    # ============================================================================
+    # Document Workflow Tools (merged from DocumentWorkflowOrchestrator)
+    # ============================================================================
+    
+    # Token Estimation Utilities
+    def estimate_tokens(self, text: str, use_api: bool = True) -> int:
+        """
+        Estimate token count for text using Claude's token counting API.
+        Falls back to character-based approximation if API is unavailable.
+        
+        Reference: https://platform.claude.com/docs/en/build-with-claude/token-counting
+        
+        Args:
+            text: Text to estimate tokens for
+            use_api: Whether to use the API (default True). Set False for fallback.
+            
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+        
+        # Try using Claude's token counting API for accurate counts
+        if use_api and self.model_client:
+            try:
+                response = self.model_client.messages.count_tokens(
+                    model="claude-sonnet-4-5",
+                    messages=[{
+                        "role": "user",
+                        "content": text
+                    }]
+                )
+                return response.input_tokens
+            except Exception as e:
+                logger.warning(f"Token counting API failed, using fallback: {str(e)}")
+                # Fall through to character-based estimation
+        
+        # Fallback: character-based approximation (~4 characters per token)
+        return len(text) // 4
+    
+    def fits_in_context(self, text: str, max_tokens: Optional[int] = None) -> bool:
+        """
+        Check if text fits within context window.
+        
+        Args:
+            text: Text to check
+            max_tokens: Maximum tokens (uses config default if not provided)
+            
+        Returns:
+            True if text fits in context window
+        """
+        if max_tokens is None:
+            max_tokens = self.config.get("max_context_tokens", 30000)
+        
+        estimated = self.estimate_tokens(text)
+        return estimated < max_tokens
+    
+    def extract_last_n_tokens(self, text: str, n_tokens: int) -> str:
+        """
+        Extract approximately the last N tokens from text.
+        
+        Args:
+            text: Source text
+            n_tokens: Number of tokens to extract
+            
+        Returns:
+            Last ~N tokens of text
+        """
+        if not text:
+            return ""
+        
+        # Convert tokens to approximate character count
+        n_chars = n_tokens * 4
+        
+        if len(text) <= n_chars:
+            return text
+        
+        # Extract from the end, try to break at paragraph boundary
+        excerpt = text[-n_chars:]
+        
+        # Try to start at a paragraph break
+        paragraph_break = excerpt.find('\n\n')
+        if paragraph_break > 0 and paragraph_break < len(excerpt) // 2:
+            excerpt = excerpt[paragraph_break + 2:]
+        
+        return excerpt
+    
+    def extract_first_n_tokens(self, text: str, n_tokens: int) -> str:
+        """
+        Extract approximately the first N tokens from text.
+        
+        Args:
+            text: Source text
+            n_tokens: Number of tokens to extract
+            
+        Returns:
+            First ~N tokens of text
+        """
+        if not text:
+            return ""
+        
+        # Convert tokens to approximate character count
+        n_chars = n_tokens * 4
+        
+        if len(text) <= n_chars:
+            return text
+        
+        # Extract from the beginning, try to break at paragraph boundary
+        excerpt = text[:n_chars]
+        
+        # Try to end at a paragraph break
+        paragraph_break = excerpt.rfind('\n\n')
+        if paragraph_break > len(excerpt) // 2:
+            excerpt = excerpt[:paragraph_break]
+        
+        return excerpt
+    
+    # Tool Property Definitions (for Claude API)
+    @property
+    def create_doc_with_workflow_property(self):
+        """Property definition for create_doc_with_workflow tool."""
+        return {
+            "type": "custom",
+            "name": "create_doc_with_workflow",
+            "description": f"""Create a new document using TOC-first workflow for org `{self.org_slug}`.
+            
+This initiates an intelligent document creation workflow:
+1. Analyzes requirements (clear vs exploratory)
+2. Generates Table of Contents with Document Contract
+3. Guides section-by-section drafting with context sandwiches
+4. Runs quality passes (continuity, formatting, compression)
 
+Use this for complex documents that need structured, token-safe creation.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Document title"},
+                    "requirements": {"type": "string", "description": "User requirements/description for the document"},
+                    "projectId": {"type": "string", "description": "Optional project ID"},
+                    "teamId": {"type": "string", "description": "Optional team ID"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
+                    "visibility": {"type": "string", "enum": ["all_members", "specific_members"], "description": "Document visibility"},
+                    "visibleToMembers": {"type": "array", "items": {"type": "string"}, "description": "Optional list of email addresses"},
+                    "metadata": {"type": "object", "description": "Optional metadata"}
+                },
+                "required": ["title", "requirements"]
+            }
+        }
+    
+    @property
+    def update_doc_with_workflow_property(self):
+        """Property definition for update_doc_with_workflow tool."""
+        return {
+            "type": "custom",
+            "name": "update_doc_with_workflow",
+            "description": f"""Update an existing document using intelligent workflow for org `{self.org_slug}`.
+            
+Automatically detects the best update strategy based on doc size and request type:
+- Direct update (< 30K tokens)
+- Targeted edit (specific location in large doc)
+- Broad update (general changes in large doc)
+- RAG fallback (unknown location in large doc)
+
+Returns strategy recommendation and next steps.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {"type": "string", "description": "Document ID to update"},
+                    "update_request": {"type": "string", "description": "Description of what to update"}
+                },
+                "required": ["docId", "update_request"]
+            }
+        }
+    
+    @property
+    def generate_toc_property(self):
+        """Property definition for generate_toc tool."""
+        return {
+            "type": "custom",
+            "name": "generate_toc",
+            "description": f"""Generate Table of Contents with document contract for org `{self.org_slug}`.
+            
+Analyzes requirements to determine if they're clear or exploratory, then creates:
+- Document Contract (purpose, audience, scope, non-goals, evidence rule)
+- TOC structure with max 3 heading levels
+- Section descriptions
+
+Returns TOC template for user confirmation before drafting.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Document title"},
+                    "requirements": {"type": "string", "description": "User requirements/description"},
+                    "max_depth": {"type": "integer", "description": "Maximum heading depth (default: 3)"}
+                },
+                "required": ["title", "requirements"]
+            }
+        }
+    
+    @property
+    def create_toc_file_property(self):
+        """Property definition for create_toc_file tool."""
+        return {
+            "type": "custom",
+            "name": "create_toc_file",
+            "description": f"""Create a temporary markdown file with TOC structure for org `{self.org_slug}`.
+            
+Converts TOC dictionary to markdown format and saves to temp file for editing.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "toc_structure": {"type": "object", "description": "TOC dictionary structure"}
+                },
+                "required": ["toc_structure"]
+            }
+        }
+    
+    @property
+    def prepare_section_context_property(self):
+        """Property definition for prepare_section_context tool."""
+        return {
+            "type": "custom",
+            "name": "prepare_section_context",
+            "description": f"""Prepare context sandwich for drafting a section for org `{self.org_slug}`.
+            
+Creates drafting context including:
+- Last ~300 tokens from previous section (context above)
+- Current section info (heading, description, outline)
+- Next section heading (context below)
+- Drafting prompt with required output format
+
+This ensures fluent transitions between sections.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "section_info": {"type": "object", "description": "Section information (heading, description, level)"},
+                    "previous_content": {"type": "string", "description": "Previously drafted content"},
+                    "next_section_heading": {"type": "string", "description": "Heading of next section (optional)"}
+                },
+                "required": ["section_info", "previous_content"]
+            }
+        }
+    
+    @property
+    def upsert_section_to_file_property(self):
+        """Property definition for upsert_section_to_file tool."""
+        return {
+            "type": "custom",
+            "name": "upsert_section_to_file",
+            "description": f"""Upsert section content to document file for org `{self.org_slug}`.
+            
+Appends drafted section content to the working document file.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to document file"},
+                    "section_content": {"type": "string", "description": "Section content to add"},
+                    "section_id": {"type": "string", "description": "Section identifier (e.g., '2.3')"}
+                },
+                "required": ["file_path", "section_content", "section_id"]
+            }
+        }
+    
+    @property
+    def draft_document_iteratively_property(self):
+        """Property definition for draft_document_iteratively tool."""
+        return {
+            "type": "custom",
+            "name": "draft_document_iteratively",
+            "description": f"""Get instructions for drafting document section by section for org `{self.org_slug}`.
+            
+Returns section list and instructions for iterative drafting workflow.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "toc": {"type": "object", "description": "Table of Contents structure"},
+                    "output_file": {"type": "string", "description": "Path to output file"}
+                },
+                "required": ["toc", "output_file"]
+            }
+        }
+    
+    @property
+    def run_quality_passes_property(self):
+        """Property definition for run_quality_passes tool."""
+        return {
+            "type": "custom",
+            "name": "run_quality_passes",
+            "description": f"""Run quality validation passes on document content for org `{self.org_slug}`.
+            
+Runs enabled passes:
+- Continuity: term consistency, broken references, unclear pronouns
+- Formatting: heading levels, list consistency, duplicate content
+- Compression: suggestions for large docs (> 50K tokens)
+
+Returns quality report with issues and suggestions.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Document content to validate"},
+                    "passes": {"type": "array", "items": {"type": "string"}, "description": "Optional list of passes to run"}
+                },
+                "required": ["content"]
+            }
+        }
+    
+    @property
+    def edit_doc_section_property(self):
+        """Property definition for edit_doc_section tool (consolidated)."""
+        return {
+            "type": "custom",
+            "name": "edit_doc_section",
+            "description": f"""Edit a specific section in a document (end-to-end workflow) for org `{self.org_slug}`.
+            
+This consolidated tool handles the complete targeted edit workflow:
+1. Exports doc to temp file
+2. Searches for target area (exact → fuzzy → RAG fallback)
+3. Applies diff-first edit (OLD_BLOCK → NEW_BLOCK)
+4. Merges changes back to document
+
+Use this instead of calling export → search → edit → merge separately.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {"type": "string", "description": "Document ID"},
+                    "search_target": {"type": "string", "description": "Text to search for to locate the section"},
+                    "old_block": {"type": "string", "description": "Exact text to replace"},
+                    "new_block": {"type": "string", "description": "Replacement text"},
+                    "context_lines": {"type": "integer", "description": "Lines of context to show (default: 10)"}
+                },
+                "required": ["docId", "search_target", "old_block", "new_block"]
+            }
+        }
+    
+    @property
+    def search_large_doc_property(self):
+        """Property definition for search_large_doc tool (consolidated)."""
+        return {
+            "type": "custom",
+            "name": "search_large_doc",
+            "description": f"""Search in a large document using RAG (auto-chunks if needed) for org `{self.org_slug}`.
+            
+This consolidated tool:
+1. Checks if document needs chunking
+2. Chunks document by headings with overlap if needed
+3. Provides retrieval instructions for RAG search
+
+Use this instead of calling chunk → retrieve separately.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {"type": "string", "description": "Document ID"},
+                    "query": {"type": "string", "description": "Search query"},
+                    "top_k": {"type": "integer", "description": "Number of chunks to retrieve (default: 5)"}
+                },
+                "required": ["docId", "query"]
+            }
+        }
+    
+    @property
+    def finalize_doc_update_property(self):
+        """Property definition for finalize_doc_update tool (consolidated)."""
+        return {
+            "type": "custom",
+            "name": "finalize_doc_update",
+            "description": f"""Finalize document update with validation and change log for org `{self.org_slug}`.
+            
+This consolidated tool:
+1. Validates the update (continuity, references, contradictions)
+2. Creates change log entry with timestamp
+3. Returns consolidated validation report
+
+Use this instead of calling validate → change_log separately.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {"type": "string", "description": "Document ID"},
+                    "original_content": {"type": "string", "description": "Original content before update"},
+                    "updated_content": {"type": "string", "description": "Updated content"},
+                    "change_description": {"type": "string", "description": "Description of what changed"},
+                    "changed_sections": {"type": "array", "items": {"type": "string"}, "description": "Optional list of section names that changed"},
+                    "source": {"type": "string", "description": "Optional source of the update"}
+                },
+                "required": ["docId", "original_content", "updated_content", "change_description"]
+            }
+        }
+    
+    @property
+    def generate_impact_map_property(self):
+        """Property definition for generate_impact_map tool."""
+        return {
+            "type": "custom",
+            "name": "generate_impact_map",
+            "description": f"""Generate impact map for broad document updates for org `{self.org_slug}`.
+            
+Returns template and instructions for agent to analyze which sections need updates based on new information.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "doc_structure": {"type": "string", "description": "Document structure (headings, sections)"},
+                    "update_inputs": {"type": "string", "description": "New information/requirements"}
+                },
+                "required": ["doc_structure", "update_inputs"]
+            }
+        }
+    
+    @property
+    def update_section_with_rag_property(self):
+        """Property definition for update_section_with_rag tool."""
+        return {
+            "type": "custom",
+            "name": "update_section_with_rag",
+            "description": f"""Update a specific section using RAG retrieval for org `{self.org_slug}`.
+            
+Returns instructions for retrieving section content via search_documents and incorporating updates.""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {"type": "string", "description": "Document ID"},
+                    "section_id": {"type": "string", "description": "Section identifier"},
+                    "section_heading": {"type": "string", "description": "Section heading to search for"},
+                    "update_info": {"type": "string", "description": "New information to incorporate"}
+                },
+                "required": ["doc_id", "section_id", "section_heading", "update_info"]
+            }
+        }
+
+    def create_doc_with_workflow(
+        self,
+        title: str,
+        requirements: str,
+        projectId: Optional[str] = None,
+        teamId: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        visibility: str = "all_members",
+        visibleToMembers: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Create a new document using TOC-first workflow.
+        
+        This method orchestrates the complete document creation process:
+        1. Generate TOC with document contract
+        2. Draft sections iteratively with context sandwiches
+        3. Run quality passes
+        4. Create final document
+        
+        Args:
+            title: Document title
+            requirements: User requirements/description for the document
+            projectId: Optional project association
+            teamId: Optional team association
+            tags: Optional tags
+            visibility: Document visibility
+            visibleToMembers: Optional list of emails for specific visibility
+            metadata: Optional metadata
+            **kwargs: Additional arguments
+            
+        Returns:
+            Dictionary with created document info or error
+        """
+        try:
+            logger.info(f"Starting TOC-first document creation: {title}")
+            
+            # This is a placeholder that will return instructions for the agent
+            # The actual workflow will be driven by agent interactions
+            return {
+                "workflow_initiated": True,
+                "title": title,
+                "next_step": "generate_toc",
+                "instructions": """Document creation workflow initiated.
+
+Next steps:
+1. Analyze the requirements to determine if they provide clear structure or just a topic
+2. Generate a Table of Contents including:
+   - Document Contract (purpose, audience, scope, non-goals, evidence rule)
+   - Major sections (H1) with subsections (H2, optionally H3)
+   - Max 3 heading levels
+3. Show the TOC for confirmation before drafting content
+4. Once confirmed, draft sections iteratively with context sandwiches
+5. Run quality passes after all sections are complete
+6. Create the final document
+
+Please proceed with generating the TOC based on these requirements.""",
+                "requirements": requirements
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in create_doc_with_workflow: {str(e)}")
+            return {"error": str(e)}
+    
+    def update_doc_with_workflow(
+        self,
+        docId: str,
+        update_request: str,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Update an existing document using intelligent workflow.
+        
+        This method:
+        1. Loads the document and checks size
+        2. Determines update strategy (direct/targeted/broad/RAG)
+        3. Executes appropriate update workflow
+        4. Runs post-update validation
+        
+        Args:
+            docId: Document ID to update
+            update_request: Description of what to update
+            **kwargs: Additional update parameters
+            
+        Returns:
+            Dictionary with update status or error
+        """
+        try:
+            logger.info(f"Starting intelligent document update: {docId}")
+            
+            # Load document
+            doc_result = self.get_doc(docId)
+            if "error" in doc_result:
+                return doc_result
+            
+            content = doc_result.get("content", "")
+            
+            # Detect strategy
+            strategy = self._detect_update_strategy(content, update_request)
+            
+            return {
+                "workflow_initiated": True,
+                "docId": docId,
+                "strategy": strategy["strategy"],
+                "doc_size_tokens": strategy["doc_size_tokens"],
+                "fits_in_context": strategy["fits_in_context"],
+                "has_specific_target": strategy["has_specific_target"],
+                "instructions": self._get_update_instructions(strategy),
+                "current_content": content if strategy["fits_in_context"] else None,
+                "update_request": update_request
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in update_doc_with_workflow: {str(e)}")
+            return {"error": str(e)}
+    
+    # ============================================================================
+    # TOC Generation and Document Structure
+    # ============================================================================
+    
+    def generate_toc(
+        self,
+        title: str,
+        requirements: str,
+        max_depth: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate Table of Contents with document contract.
+        
+        This is an agent-assisted method that returns structure for the agent
+        to populate with actual content based on requirements analysis.
+        
+        Args:
+            title: Document title
+            requirements: User requirements/description
+            max_depth: Maximum heading depth (default from config)
+            
+        Returns:
+            TOC structure template and instructions
+        """
+        if max_depth is None:
+            max_depth = self.config["max_heading_depth"]
+        
+        # Analyze if requirements are clear or exploratory
+        is_clear_structure = self._analyze_requirements_clarity(requirements)
+        
+        toc_template = {
+            "title": title,
+            "requirements_clarity": "clear" if is_clear_structure else "exploratory",
+            "contract": {
+                "purpose": "[What this document achieves]",
+                "audience": "[Who reads this document]",
+                "scope": "[What's covered]",
+                "non_goals": "[What's explicitly excluded]",
+                "evidence_rule": "Claims must be sourced or marked with TODO/ASSUMPTION tags"
+            },
+            "sections": [],
+            "max_depth": max_depth,
+            "instructions": None
+        }
+        
+        if is_clear_structure:
+            toc_template["instructions"] = """Requirements are clear. Generate TOC directly:
+1. Fill in the Document Contract (purpose, audience, scope, non-goals)
+2. Create major sections (H1) based on requirements
+3. Add subsections (H2, optionally H3) as needed
+4. Keep to max {} heading levels
+5. Provide 1-2 sentence description for each section
+6. Present TOC for user confirmation before drafting""".format(max_depth)
+        else:
+            toc_template["instructions"] = """Requirements are exploratory. Use discovery approach:
+1. Generate a "Discovery TOC" with 3-5 key questions to explore
+2. Present these to user for confirmation
+3. Once confirmed, expand into full TOC with:
+   - Document Contract
+   - Major sections (H1) addressing each question
+   - Subsections (H2, H3) for details
+4. Keep to max {} heading levels""".format(max_depth)
+        
+        return toc_template
+    
+    def _analyze_requirements_clarity(self, requirements: str) -> bool:
+        """
+        Analyze if requirements provide clear structure or are exploratory.
+        
+        Args:
+            requirements: User requirements text
+            
+        Returns:
+            True if requirements are clear/structured, False if exploratory
+        """
+        # Indicators of clear structure
+        clear_indicators = [
+            r'\d+\.',  # Numbered lists
+            r'-\s+\w',  # Bullet points
+            r'section',
+            r'chapter',
+            r'include',
+            r'cover',
+            r'must have',
+            r'should have',
+            r'outline',
+            r'structure',
+        ]
+        
+        # Count clear indicators
+        clear_count = 0
+        for pattern in clear_indicators:
+            if re.search(pattern, requirements, re.IGNORECASE):
+                clear_count += 1
+        
+        # If requirements are detailed (>200 words) and have multiple indicators
+        word_count = len(requirements.split())
+        
+        if word_count > 200 and clear_count >= 3:
+            return True
+        elif clear_count >= 5:
+            return True
+        
+        return False
+    
+    def create_toc_file(self, toc_structure: Dict[str, Any]) -> str:
+        """
+        Create a temporary markdown file with TOC structure.
+        
+        Args:
+            toc_structure: TOC dictionary structure
+            
+        Returns:
+            Path to temporary TOC file
+        """
+        # Generate markdown TOC content
+        md_content = self._toc_to_markdown(toc_structure)
+        
+        # Create temp file
+        temp_file = tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.md',
+            prefix='toc_',
+            delete=False
+        )
+        temp_file.write(md_content)
+        temp_file.close()
+        
+        self._workflow_temp_files.append(temp_file.name)
+        logger.info(f"Created TOC file: {temp_file.name}")
+        
+        return temp_file.name
+    
+    def _toc_to_markdown(self, toc: Dict[str, Any]) -> str:
+        """
+        Convert TOC structure to markdown format.
+        
+        Args:
+            toc: TOC dictionary
+            
+        Returns:
+            Markdown formatted TOC
+        """
+        lines = []
+        
+        # Title
+        lines.append(f"# {toc['title']}\n")
+        
+        # Document Contract
+        lines.append("## Document Contract\n")
+        contract = toc.get('contract', {})
+        lines.append(f"- **Purpose**: {contract.get('purpose', 'TBD')}")
+        lines.append(f"- **Audience**: {contract.get('audience', 'TBD')}")
+        lines.append(f"- **Scope**: {contract.get('scope', 'TBD')}")
+        lines.append(f"- **Non-goals**: {contract.get('non_goals', 'TBD')}")
+        lines.append(f"- **Evidence Rule**: {contract.get('evidence_rule', 'TBD')}\n")
+        
+        # Table of Contents
+        lines.append("## Table of Contents\n")
+        
+        sections = toc.get('sections', [])
+        if sections:
+            for section in sections:
+                self._format_section_toc(section, lines, level=1)
+        else:
+            lines.append("_Sections to be defined_\n")
+        
+        return '\n'.join(lines)
+    
+    def _format_section_toc(
+        self,
+        section: Dict[str, Any],
+        lines: List[str],
+        level: int
+    ):
+        """
+        Format a section for TOC display (recursive for subsections).
+        
+        Args:
+            section: Section dictionary
+            lines: List to append formatted lines to
+            level: Current heading level
+        """
+        indent = "  " * (level - 1)
+        heading = section.get('heading', 'Untitled')
+        description = section.get('description', '')
+        
+        lines.append(f"{indent}- **{heading}**")
+        if description:
+            lines.append(f"{indent}  _{description}_")
+        
+        # Recursively format subsections
+        subsections = section.get('subsections', [])
+        for subsection in subsections:
+            self._format_section_toc(subsection, lines, level + 1)
+    
+    # ============================================================================
+    # Section Drafting with Context Sandwiches
+    # ============================================================================
+    
+    def prepare_section_context(
+        self,
+        section_info: Dict[str, Any],
+        previous_content: str,
+        next_section_heading: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Prepare context sandwich for drafting a section.
+        
+        Args:
+            section_info: Section information (heading, description, level)
+            previous_content: Previously drafted content
+            next_section_heading: Heading of next section (if any)
+            
+        Returns:
+            Context package for agent
+        """
+        context_tokens = self.config["context_sandwich_tokens"]
+        
+        # Extract context above (last ~300 tokens from previous content)
+        context_above = self.extract_last_n_tokens(previous_content, context_tokens)
+        
+        # Prepare drafting prompt
+        prompt_parts = []
+        
+        if context_above:
+            prompt_parts.append("### Context from Previous Section\n")
+            prompt_parts.append(context_above)
+            prompt_parts.append("\n")
+        
+        prompt_parts.append(f"### Section to Draft\n")
+        prompt_parts.append(f"**Heading**: {section_info.get('heading', 'Untitled')}\n")
+        
+        if section_info.get('description'):
+            prompt_parts.append(f"**Description**: {section_info['description']}\n")
+        
+        if section_info.get('outline'):
+            prompt_parts.append(f"**Outline**: {section_info['outline']}\n")
+        
+        if next_section_heading:
+            prompt_parts.append(f"\n**Next Section**: {next_section_heading}\n")
+        
+        prompt_parts.append("\n### Required Output Format\n")
+        prompt_parts.append("1. **Bridge-in** (1-3 sentences connecting from previous section)\n")
+        prompt_parts.append("2. **Section content** (follow the outline and description)\n")
+        prompt_parts.append("3. **Bridge-out** (1-3 sentences leading to next section)\n")
+        prompt_parts.append("4. **Change log**: Brief note on what was added\n")
+        prompt_parts.append("\n**Evidence Rule**: Use TODO or ASSUMPTION tags for unsourced claims\n")
+        
+        return {
+            "section_info": section_info,
+            "context_above": context_above,
+            "next_section_heading": next_section_heading,
+            "drafting_prompt": ''.join(prompt_parts)
+        }
+    
+    def upsert_section_to_file(
+        self,
+        file_path: str,
+        section_content: str,
+        section_id: str
+    ) -> Dict[str, Any]:
+        """
+        Upsert section content to a document file.
+        
+        Args:
+            file_path: Path to document file
+            section_content: Content to add/update
+            section_id: Section identifier for tracking
+            
+        Returns:
+            Status dictionary
+        """
+        try:
+            # Read current content
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    current_content = f.read()
+            else:
+                current_content = ""
+            
+            # Append new section
+            updated_content = current_content + "\n\n" + section_content
+            
+            # Write updated content
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            
+            logger.info(f"Upserted section {section_id} to {file_path}")
+            
+            return {
+                "success": True,
+                "section_id": section_id,
+                "file_path": file_path,
+                "current_size_tokens": self.estimate_tokens(updated_content)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error upserting section: {str(e)}")
+            return {"error": str(e)}
+    
+    def get_section_list_from_toc(self, toc: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Extract flat list of sections from TOC structure.
+        
+        Args:
+            toc: TOC dictionary with nested sections
+            
+        Returns:
+            Flat list of sections in order
+        """
+        sections = []
+        
+        def traverse(section_list, parent_id=""):
+            for idx, section in enumerate(section_list):
+                section_id = f"{parent_id}.{idx + 1}" if parent_id else str(idx + 1)
+                
+                section_item = {
+                    "id": section_id,
+                    "heading": section.get("heading", ""),
+                    "description": section.get("description", ""),
+                    "outline": section.get("outline", ""),
+                    "level": len(section_id.split('.'))
+                }
+                sections.append(section_item)
+                
+                # Recursively traverse subsections
+                if "subsections" in section:
+                    traverse(section["subsections"], section_id)
+        
+        traverse(toc.get("sections", []))
+        return sections
+    
+    def draft_document_iteratively(
+        self,
+        toc: Dict[str, Any],
+        output_file: str
+    ) -> Dict[str, Any]:
+        """
+        Draft document section by section with context sandwiches.
+        
+        This returns instructions for the agent to follow, as the actual
+        drafting requires agent interaction.
+        
+        Args:
+            toc: Table of Contents structure
+            output_file: Path to output file for iterative writing
+            
+        Returns:
+            Instructions and section list for agent
+        """
+        sections = self.get_section_list_from_toc(toc)
+        
+        return {
+            "workflow": "iterative_drafting",
+            "output_file": output_file,
+            "total_sections": len(sections),
+            "sections": sections,
+            "instructions": """Draft each section iteratively:
+
+For each section:
+1. Call prepare_section_context() to get context sandwich
+2. Draft the section content with:
+   - Bridge-in (1-3 sentences from previous section)
+   - Main content (follow outline and description)
+   - Bridge-out (1-3 sentences to next section)
+   - Change log entry
+3. Call upsert_section_to_file() to append to document
+4. Move to next section
+
+After all sections are drafted:
+- Run quality passes (continuity, formatting, compression if needed)
+- Create final document via create_doc()"""
+        }
+    
+    # ============================================================================
+    # Quality Passes
+    # ============================================================================
+    
+    def run_quality_passes(
+        self,
+        content: str,
+        passes: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Run quality validation passes on document content.
+        
+        Args:
+            content: Document content to validate
+            passes: List of passes to run (default: all enabled in config)
+            
+        Returns:
+            Quality report with issues and suggestions
+        """
+        if passes is None:
+            passes = []
+            if self.config["run_continuity_pass"]:
+                passes.append("continuity")
+            if self.config["run_formatting_pass"]:
+                passes.append("formatting")
+            
+            # Only run compression if doc is large
+            doc_size = self.estimate_tokens(content)
+            if doc_size > self.config["run_compression_pass_threshold"]:
+                passes.append("compression")
+        
+        results = {
+            "passes_run": passes,
+            "total_issues": 0,
+            "issues_by_pass": {},
+            "suggestions": []
+        }
+        
+        if "continuity" in passes:
+            continuity_result = self._run_continuity_pass(content)
+            results["issues_by_pass"]["continuity"] = continuity_result
+            results["total_issues"] += len(continuity_result["issues"])
+            results["suggestions"].extend(continuity_result.get("suggestions", []))
+        
+        if "formatting" in passes:
+            formatting_result = self._run_formatting_pass(content)
+            results["issues_by_pass"]["formatting"] = formatting_result
+            results["total_issues"] += len(formatting_result["issues"])
+            results["suggestions"].extend(formatting_result.get("suggestions", []))
+        
+        if "compression" in passes:
+            compression_result = self._run_compression_pass(content)
+            results["issues_by_pass"]["compression"] = compression_result
+            results["suggestions"].extend(compression_result.get("suggestions", []))
+        
+        return results
+    
+    def _run_continuity_pass(self, content: str) -> Dict[str, Any]:
+        """
+        Check document continuity: term consistency, references, transitions.
+        
+        Args:
+            content: Document content
+            
+        Returns:
+            Continuity check results
+        """
+        issues = []
+        suggestions = []
+        
+        # Check for common term inconsistencies
+        term_variations = self._find_term_variations(content)
+        if term_variations:
+            issues.append({
+                "type": "term_inconsistency",
+                "count": len(term_variations),
+                "details": term_variations
+            })
+            suggestions.append("Standardize terminology across document")
+        
+        # Check for broken internal references
+        broken_refs = self._find_broken_references(content)
+        if broken_refs:
+            issues.append({
+                "type": "broken_reference",
+                "count": len(broken_refs),
+                "details": broken_refs
+            })
+            suggestions.append("Fix or remove broken section references")
+        
+        # Check for unclear pronouns
+        unclear_pronouns = self._find_unclear_pronouns(content)
+        if unclear_pronouns:
+            issues.append({
+                "type": "unclear_pronoun",
+                "count": len(unclear_pronouns),
+                "details": unclear_pronouns
+            })
+            suggestions.append("Replace ambiguous pronouns with specific nouns")
+        
+        return {
+            "pass": "continuity",
+            "issues": issues,
+            "suggestions": suggestions
+        }
+    
+    def _run_formatting_pass(self, content: str) -> Dict[str, Any]:
+        """
+        Check document formatting: heading levels, lists, tables.
+        
+        Args:
+            content: Document content
+            
+        Returns:
+            Formatting check results
+        """
+        issues = []
+        suggestions = []
+        
+        # Check heading levels (should not skip levels)
+        heading_issues = self._check_heading_levels(content)
+        if heading_issues:
+            issues.append({
+                "type": "heading_level_skip",
+                "count": len(heading_issues),
+                "details": heading_issues
+            })
+            suggestions.append("Fix heading level hierarchy (H1 → H2 → H3, no skipping)")
+        
+        # Check for inconsistent list styles
+        list_inconsistencies = self._check_list_consistency(content)
+        if list_inconsistencies:
+            issues.append({
+                "type": "list_inconsistency",
+                "count": len(list_inconsistencies),
+                "details": list_inconsistencies
+            })
+            suggestions.append("Standardize list formatting (bullets vs numbered)")
+        
+        # Check for duplicated content
+        duplicates = self._find_duplicate_content(content)
+        if duplicates:
+            issues.append({
+                "type": "duplicate_content",
+                "count": len(duplicates),
+                "details": duplicates
+            })
+            suggestions.append("Remove or consolidate duplicate sections")
+        
+        return {
+            "pass": "formatting",
+            "issues": issues,
+            "suggestions": suggestions
+        }
+    
+    def _run_compression_pass(self, content: str) -> Dict[str, Any]:
+        """
+        Suggest compression opportunities for large documents.
+        
+        Args:
+            content: Document content
+            
+        Returns:
+            Compression suggestions
+        """
+        suggestions = []
+        
+        doc_size = self.estimate_tokens(content)
+        
+        # Find repetitive paragraphs that could be bullets
+        repetitive_sections = self._find_repetitive_sections(content)
+        if repetitive_sections:
+            suggestions.append({
+                "type": "convert_to_bullets",
+                "count": len(repetitive_sections),
+                "details": repetitive_sections,
+                "description": "Replace repetitive paragraphs with bullet points"
+            })
+        
+        # Suggest moving detailed content to appendices
+        detailed_sections = self._find_overly_detailed_sections(content)
+        if detailed_sections:
+            suggestions.append({
+                "type": "move_to_appendix",
+                "count": len(detailed_sections),
+                "details": detailed_sections,
+                "description": "Move deep technical details to appendices"
+            })
+        
+        suggestions.append({
+            "type": "overall_size",
+            "current_tokens": doc_size,
+            "threshold": self.config["run_compression_pass_threshold"],
+            "description": f"Document is {doc_size} tokens (threshold: {self.config['run_compression_pass_threshold']})"
+        })
+        
+        return {
+            "pass": "compression",
+            "issues": [],
+            "suggestions": suggestions
+        }
+    
+    def _find_term_variations(self, content: str) -> List[Dict[str, Any]]:
+        """Find variations of the same term that should be standardized."""
+        # Common patterns to check
+        patterns = [
+            (r'\bAPI\b', r'\bapi\b', r'\bApi\b'),
+            (r'\bID\b', r'\bId\b', r'\bid\b'),
+            (r'\bURL\b', r'\bUrl\b', r'\burl\b'),
+            (r'\bJSON\b', r'\bJson\b', r'\bjson\b'),
+        ]
+        
+        variations = []
+        for pattern_group in patterns:
+            found_variants = []
+            for pattern in pattern_group:
+                if re.search(pattern, content):
+                    found_variants.append(pattern)
+            
+            if len(found_variants) > 1:
+                variations.append({
+                    "term": pattern_group[0],
+                    "variants_found": found_variants,
+                    "suggestion": f"Standardize to {pattern_group[0]}"
+                })
+        
+        return variations
+    
+    def _find_broken_references(self, content: str) -> List[str]:
+        """Find references to sections that don't exist."""
+        # Find section references like "Section X" or "Chapter Y"
+        ref_pattern = r'(?:Section|Chapter|Part)\s+(\d+(?:\.\d+)*)'
+        references = re.findall(ref_pattern, content, re.IGNORECASE)
+        
+        # Find actual sections
+        heading_pattern = r'^#{1,6}\s+(.+)$'
+        headings = re.findall(heading_pattern, content, re.MULTILINE)
+        
+        broken = []
+        for ref in set(references):
+            # Check if this section number exists in headings
+            found = False
+            for heading in headings:
+                if ref in heading:
+                    found = True
+                    break
+            if not found:
+                broken.append(f"Section {ref}")
+        
+        return broken
+    
+    def _find_unclear_pronouns(self, content: str) -> List[str]:
+        """Find potentially unclear pronoun usage."""
+        # Look for sentences starting with pronouns that might be ambiguous
+        pronoun_starts = re.findall(
+            r'(?:^|\.\s+)((?:This|That|It|These|Those)\s+[^.]+\.)',
+            content,
+            re.MULTILINE
+        )
+        
+        # Return first few examples (not all)
+        return pronoun_starts[:5] if len(pronoun_starts) > 5 else pronoun_starts
+    
+    def _check_heading_levels(self, content: str) -> List[str]:
+        """Check for skipped heading levels."""
+        heading_pattern = r'^(#{1,6})\s+(.+)$'
+        headings = re.findall(heading_pattern, content, re.MULTILINE)
+        
+        issues = []
+        prev_level = 0
+        
+        for hash_marks, heading_text in headings:
+            current_level = len(hash_marks)
+            
+            if current_level > prev_level + 1:
+                issues.append(f"Skipped level before: {hash_marks} {heading_text}")
+            
+            prev_level = current_level
+        
+        return issues
+    
+    def _check_list_consistency(self, content: str) -> List[str]:
+        """Check for inconsistent list formatting."""
+        # This is a simplified check - could be more sophisticated
+        bullet_lists = len(re.findall(r'^\s*[-*+]\s', content, re.MULTILINE))
+        numbered_lists = len(re.findall(r'^\s*\d+\.\s', content, re.MULTILINE))
+        
+        issues = []
+        if bullet_lists > 0 and numbered_lists > 0:
+            issues.append(f"Mixed list styles: {bullet_lists} bullet lists, {numbered_lists} numbered lists")
+        
+        return issues
+    
+    def _find_duplicate_content(self, content: str) -> List[str]:
+        """Find potentially duplicate paragraphs."""
+        paragraphs = content.split('\n\n')
+        
+        seen = {}
+        duplicates = []
+        
+        for para in paragraphs:
+            para = para.strip()
+            if len(para) < 50:  # Skip short paragraphs
+                continue
+            
+            # Use first 100 chars as key
+            key = para[:100]
+            if key in seen:
+                duplicates.append(para[:100] + "...")
+            else:
+                seen[key] = True
+        
+        return duplicates
+    
+    def _find_repetitive_sections(self, content: str) -> List[str]:
+        """Find sections with repetitive structure that could be compressed."""
+        # Look for paragraphs starting with similar patterns
+        paragraphs = content.split('\n\n')
+        
+        repetitive = []
+        pattern_counts = {}
+        
+        for para in paragraphs:
+            if len(para) < 50:
+                continue
+            
+            # Extract pattern (first few words)
+            words = para.split()[:5]
+            pattern = ' '.join(words)
+            
+            pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+        
+        for pattern, count in pattern_counts.items():
+            if count >= 3:
+                repetitive.append(f"Pattern '{pattern}...' appears {count} times")
+        
+        return repetitive
+    
+    def _find_overly_detailed_sections(self, content: str) -> List[str]:
+        """Find sections that are very long and might benefit from appendices."""
+        # Split by main headings
+        sections = re.split(r'^##\s+(.+)$', content, flags=re.MULTILINE)
+        
+        detailed = []
+        for i in range(1, len(sections), 2):
+            if i + 1 < len(sections):
+                heading = sections[i]
+                section_content = sections[i + 1]
+                
+                tokens = self.estimate_tokens(section_content)
+                if tokens > 2000:  # Very large section
+                    detailed.append(f"Section '{heading}' is {tokens} tokens")
+        
+        return detailed
+    
+    # ============================================================================
+    # Consolidated Workflows (Deterministic Sequences)
+    # ============================================================================
+    
+    def edit_doc_section(
+        self,
+        docId: str,
+        search_target: str,
+        old_block: str,
+        new_block: str,
+        context_lines: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Edit a specific section in a document (end-to-end workflow).
+        
+        This consolidated method handles the complete targeted edit workflow:
+        1. Export doc to temp file
+        2. Search for target area (exact → fuzzy → RAG)
+        3. Apply diff-first edit
+        4. Merge changes back to document
+        
+        Args:
+            docId: Document ID
+            search_target: Text to search for (helps locate the section)
+            old_block: Exact text to replace
+            new_block: Replacement text
+            context_lines: Lines of context to show (default: 10)
+            
+        Returns:
+            Dictionary with edit status and details
+        """
+        try:
+            logger.info(f"Starting consolidated edit workflow for doc {docId}")
+            
+            # Step 1: Load document
+            doc_result = self.get_doc(docId)
+            if "error" in doc_result:
+                return doc_result
+            
+            content = doc_result.get("content", "")
+            
+            # Step 2: Export to temp file
+            export_result = self._export_doc_to_temp_file_internal(docId, content)
+            if "error" in export_result:
+                return export_result
+            
+            temp_file = export_result["file_path"]
+            
+            try:
+                # Step 3: Search for target area
+                search_result = self._search_in_doc_internal(
+                    temp_file, 
+                    search_target, 
+                    context_lines
+                )
+                
+                if not search_result.get("found"):
+                    return {
+                        "error": f"Could not locate target area: {search_target}",
+                        "suggestion": search_result.get("suggestion", "Try RAG search or provide more specific target")
+                    }
+                
+                # Step 4: Apply diff edit
+                edit_result = self._apply_diff_edit_internal(temp_file, old_block, new_block)
+                if "error" in edit_result:
+                    return edit_result
+                
+                # Step 5: Merge back to document
+                merge_result = self._merge_temp_file_to_doc_internal(docId, temp_file)
+                if "error" in merge_result:
+                    return merge_result
+                
+                logger.info(f"Successfully completed edit workflow for doc {docId}")
+                
+                return {
+                    "success": True,
+                    "docId": docId,
+                    "search_result": {
+                        "found": True,
+                        "match_type": search_result.get("match_type"),
+                        "line_number": search_result.get("line_number")
+                    },
+                    "edit_applied": True,
+                    "tokens_before": export_result["size_tokens"],
+                    "tokens_after": merge_result.get("updated_tokens"),
+                    "message": "Document section updated successfully"
+                }
+                
+            finally:
+                # Cleanup temp file
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    
+        except Exception as e:
+            logger.error(f"Error in edit_doc_section: {str(e)}")
+            return {"error": str(e)}
+    
+    def search_large_doc(
+        self,
+        docId: str,
+        query: str,
+        top_k: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Search in a large document using RAG (auto-chunks if needed).
+        
+        This consolidated method:
+        1. Checks if document needs chunking
+        2. Chunks document by headings (with overlap) if needed
+        3. Retrieves relevant chunks via RAG
+        
+        Args:
+            docId: Document ID
+            query: Search query
+            top_k: Number of chunks to retrieve
+            
+        Returns:
+            Retrieved chunks with context
+        """
+        try:
+            logger.info(f"Searching large doc {docId} with query: {query}")
+            
+            # Load document to check if chunking needed
+            doc_result = self.get_doc(docId)
+            if "error" in doc_result:
+                return doc_result
+            
+            content = doc_result.get("content", "")
+            doc_size = self.estimate_tokens(content)
+            
+            # If doc is small enough, just return relevant excerpt
+            if doc_size < self.config["max_context_tokens"]:
+                return {
+                    "success": True,
+                    "docId": docId,
+                    "needs_chunking": False,
+                    "doc_size_tokens": doc_size,
+                    "message": "Document is small enough to process directly",
+                    "content": content
+                }
+            
+            # Document is large, chunk and search
+            # Step 1: Chunk document
+            chunk_result = self._chunk_document_for_rag_internal(docId, content)
+            if "error" in chunk_result:
+                return chunk_result
+            
+            # Step 2: Retrieve chunks
+            retrieval_instructions = {
+                "workflow": "rag_chunk_retrieval",
+                "docId": docId,
+                "query": query,
+                "rag_document_id": chunk_result["rag_document_id"],
+                "chunk_count": chunk_result["chunk_count"],
+                "instructions": f"""Use search_documents to retrieve relevant chunks:
+
+1. Query: "{query}"
+2. Namespace: {self.org_slug}_tool_responses
+3. Filter by metadata: doc_id = {docId}
+4. Request top {top_k} chunks
+5. Chunks include neighbor context for continuity
+
+The document has been chunked into {chunk_result['chunk_count']} chunks by {chunk_result['chunk_method']}.""",
+                "namespace": f"{self.org_slug}_tool_responses",
+                "top_k": top_k
+            }
+            
+            return {
+                "success": True,
+                "docId": docId,
+                "needs_chunking": True,
+                "doc_size_tokens": doc_size,
+                "chunked": True,
+                "chunk_info": chunk_result,
+                "retrieval_instructions": retrieval_instructions
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in search_large_doc: {str(e)}")
+            return {"error": str(e)}
+    
+    def finalize_doc_update(
+        self,
+        docId: str,
+        original_content: str,
+        updated_content: str,
+        change_description: str,
+        changed_sections: Optional[List[str]] = None,
+        source: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Finalize document update with validation and change log.
+        
+        This consolidated method:
+        1. Validates the update (continuity, references, contradictions)
+        2. Creates change log entry
+        3. Returns consolidated report
+        
+        Args:
+            docId: Document ID
+            original_content: Original content before update
+            updated_content: Updated content
+            change_description: Description of what changed
+            changed_sections: Optional list of section names that changed
+            source: Optional source of the update (e.g., "API v2.0 spec")
+            
+        Returns:
+            Validation report with change log entry
+        """
+        try:
+            logger.info(f"Finalizing update for doc {docId}")
+            
+            # Step 1: Validate update
+            if self.config["enable_post_update_validation"]:
+                validation = self.validate_document_update(
+                    docId,
+                    original_content,
+                    updated_content,
+                    change_description
+                )
+            else:
+                validation = {
+                    "valid": True,
+                    "checks": {},
+                    "issues": [],
+                    "suggestions": []
+                }
+            
+            # Step 2: Create change log entry
+            change_entry = {
+                "changed_sections": changed_sections or ["Content updated"],
+                "reason": change_description,
+                "source": source or "Manual update",
+                "issues": "None detected" if validation["valid"] else f"{len(validation['issues'])} issues found"
+            }
+            
+            change_log = self.update_change_log(docId, change_entry)
+            
+            # Step 3: Return consolidated result
+            return {
+                "success": True,
+                "docId": docId,
+                "validation": validation,
+                "change_log_entry": change_log.get("log_entry"),
+                "summary": {
+                    "valid": validation["valid"],
+                    "issues_count": len(validation.get("issues", [])),
+                    "suggestions_count": len(validation.get("suggestions", [])),
+                    "change_logged": change_log.get("success", False)
+                },
+                "instructions": change_log.get("instructions") if not validation["valid"] else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in finalize_doc_update: {str(e)}")
+            return {"error": str(e)}
+    
+    # ============================================================================
+    # Internal Methods (used by consolidated workflows)
+    # ============================================================================
+    
+    def _export_doc_to_temp_file_internal(
+        self,
+        doc_id: str,
+        content: str
+    ) -> Dict[str, Any]:
+        """
+        Export document content to temporary file for editing.
+        
+        Args:
+            doc_id: Document ID
+            content: Document content
+            
+        Returns:
+            Dictionary with file path and status
+        """
+        try:
+            # Create temp file
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.md',
+                prefix=f'doc_{doc_id}_',
+                delete=False
+            )
+            temp_file.write(content)
+            temp_file.close()
+            
+            self._workflow_temp_files.append(temp_file.name)
+            logger.info(f"Exported doc {doc_id} to {temp_file.name}")
+            
+            return {
+                "success": True,
+                "file_path": temp_file.name,
+                "doc_id": doc_id,
+                "size_tokens": self.estimate_tokens(content)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error exporting doc to temp file: {str(e)}")
+            return {"error": str(e)}
+    
+    def _search_in_doc_internal(
+        self,
+        file_path: str,
+        search_target: str,
+        context_lines: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search for target text in document and extract context window.
+        
+        Args:
+            file_path: Path to document file
+            search_target: Text to search for
+            context_lines: Number of lines before/after to include
+            
+        Returns:
+            Search results with context window
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Try exact match first
+            matches = []
+            for i, line in enumerate(lines):
+                if search_target in line:
+                    matches.append({
+                        "line_number": i + 1,
+                        "match_type": "exact",
+                        "line": line.strip()
+                    })
+            
+            # If no exact match, try fuzzy match
+            if not matches:
+                matches = self._fuzzy_search(lines, search_target)
+            
+            if not matches:
+                return {
+                    "found": False,
+                    "message": "Target not found with exact or fuzzy search",
+                    "suggestion": "Use RAG fallback for semantic search"
+                }
+            
+            # Extract context window for first match
+            match = matches[0]
+            line_idx = match["line_number"] - 1
+            
+            start_idx = max(0, line_idx - context_lines)
+            end_idx = min(len(lines), line_idx + context_lines + 1)
+            
+            context_window = ''.join(lines[start_idx:end_idx])
+            
+            return {
+                "found": True,
+                "match_type": match["match_type"],
+                "line_number": match["line_number"],
+                "total_matches": len(matches),
+                "context_window": context_window,
+                "context_range": {
+                    "start_line": start_idx + 1,
+                    "end_line": end_idx
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error searching in doc: {str(e)}")
+            return {"error": str(e)}
+    
+    def _fuzzy_search(
+        self,
+        lines: List[str],
+        search_target: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform fuzzy search for target text.
+        
+        Args:
+            lines: Document lines
+            search_target: Text to search for
+            
+        Returns:
+            List of fuzzy matches
+        """
+        matches = []
+        search_words = set(search_target.lower().split())
+        
+        for i, line in enumerate(lines):
+            line_words = set(line.lower().split())
+            
+            # Calculate overlap
+            overlap = len(search_words & line_words)
+            if overlap >= len(search_words) * 0.6:  # 60% match threshold
+                matches.append({
+                    "line_number": i + 1,
+                    "match_type": "fuzzy",
+                    "line": line.strip(),
+                    "confidence": overlap / len(search_words)
+                })
+        
+        # Sort by confidence
+        matches.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+        return matches[:5]  # Return top 5 matches
+    
+    def _apply_diff_edit_internal(
+        self,
+        file_path: str,
+        old_block: str,
+        new_block: str
+    ) -> Dict[str, Any]:
+        """
+        Apply diff-first edit to document file.
+        
+        Args:
+            file_path: Path to document file
+            old_block: Text to replace (must match exactly)
+            new_block: Replacement text
+            
+        Returns:
+            Status of edit operation
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Check if old_block exists
+            if old_block not in content:
+                return {
+                    "error": "Old block not found in document",
+                    "suggestion": "Verify the exact text to replace"
+                }
+            
+            # Check if old_block appears multiple times
+            occurrences = content.count(old_block)
+            if occurrences > 1:
+                return {
+                    "error": f"Old block appears {occurrences} times",
+                    "suggestion": "Provide more context to make the block unique"
+                }
+            
+            # Perform replacement
+            updated_content = content.replace(old_block, new_block, 1)
+            
+            # Write back
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            
+            logger.info(f"Applied diff edit to {file_path}")
+            
+            return {
+                "success": True,
+                "file_path": file_path,
+                "old_size_tokens": self.estimate_tokens(content),
+                "new_size_tokens": self.estimate_tokens(updated_content)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error applying diff edit: {str(e)}")
+            return {"error": str(e)}
+    
+    def _merge_temp_file_to_doc_internal(
+        self,
+        doc_id: str,
+        file_path: str
+    ) -> Dict[str, Any]:
+        """
+        Merge edited temp file back to document.
+        
+        Args:
+            doc_id: Document ID
+            file_path: Path to edited temp file
+            
+        Returns:
+            Status of merge operation
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                updated_content = f.read()
+            
+            # Update document via doc_tool
+            result = self.update_doc(
+                docId=doc_id,
+                content=updated_content
+            )
+            
+            if "error" in result:
+                return result
+            
+            logger.info(f"Merged temp file to doc {doc_id}")
+            
+            return {
+                "success": True,
+                "doc_id": doc_id,
+                "updated_tokens": self.estimate_tokens(updated_content)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error merging temp file to doc: {str(e)}")
+            return {"error": str(e)}
+    
+    # ============================================================================
+    # Broad Update Workflow
+    # ============================================================================
+    
+    def generate_impact_map(
+        self,
+        doc_structure: str,
+        update_inputs: str
+    ) -> Dict[str, Any]:
+        """
+        Generate impact map for broad document updates.
+        
+        This returns a template for the agent to populate based on analysis.
+        
+        Args:
+            doc_structure: Document structure (headings, sections)
+            update_inputs: New information/requirements
+            
+        Returns:
+            Impact map template for agent
+        """
+        return {
+            "workflow": "impact_map_generation",
+            "instructions": """Analyze the document structure and update inputs to determine:
+
+1. Which sections are impacted by the new information?
+2. What is the reasoning for each impact?
+3. What information is missing or unclear?
+4. Are there new sections needed?
+
+Output format:
+{
+    "impacted_sections": ["Section ID 1", "Section ID 2", ...],
+    "reasoning": "Explanation of why these sections need updates",
+    "missing_info": ["What info is needed", "What needs clarification"],
+    "new_sections": ["New section to add", ...]
+}""",
+            "doc_structure": doc_structure,
+            "update_inputs": update_inputs
+        }
+    
+    def update_section_with_rag(
+        self,
+        doc_id: str,
+        section_id: str,
+        section_heading: str,
+        update_info: str
+    ) -> Dict[str, Any]:
+        """
+        Update a specific section using RAG retrieval.
+        
+        Args:
+            doc_id: Document ID
+            section_id: Section identifier
+            section_heading: Section heading to search for
+            update_info: New information to incorporate
+            
+        Returns:
+            Instructions for section update
+        """
+        return {
+            "workflow": "rag_section_update",
+            "section_id": section_id,
+            "section_heading": section_heading,
+            "instructions": f"""Update section '{section_heading}':
+
+1. Use search_documents to retrieve the section content
+2. Review the current section content
+3. Incorporate the new information: {update_info}
+4. Maintain the section structure and style
+5. Add bridge sentences if needed to maintain flow
+6. Mark any assumptions or TODOs
+7. Provide the updated section content for merging""",
+            "doc_id": doc_id,
+            "update_info": update_info
+        }
+    
+    # ============================================================================
+    # RAG Fallback for Large Documents
+    # ============================================================================
+    
+    def _chunk_document_for_rag_internal(
+        self,
+        doc_id: str,
+        content: str,
+        chunk_by_headings: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """
+        Chunk document and store in RAG for semantic search.
+        
+        Args:
+            doc_id: Document ID
+            content: Document content
+            chunk_by_headings: Whether to chunk by headings (default from config)
+            
+        Returns:
+            Chunking status and document_id for retrieval
+        """
+        if chunk_by_headings is None:
+            chunk_by_headings = self.config["chunk_by_headings"]
+        
+        try:
+            if chunk_by_headings:
+                chunks = self._chunk_by_headings(content)
+            else:
+                chunks = self._chunk_by_paragraphs(content)
+            
+            # Store in RAG using existing RAGStorageTool
+            rag_doc_id = self.rag_storage.store_tool_response(
+                content=content,
+                tool_name="doc_management",
+                tool_input={"doc_id": doc_id, "action": "chunk_for_editing"},
+                metadata={
+                    "doc_id": doc_id,
+                    "chunk_count": len(chunks),
+                    "chunk_method": "headings" if chunk_by_headings else "paragraphs"
+                }
+            )
+            
+            logger.info(f"Chunked doc {doc_id} into {len(chunks)} chunks, stored as {rag_doc_id}")
+            
+            return {
+                "success": True,
+                "doc_id": doc_id,
+                "rag_document_id": rag_doc_id,
+                "chunk_count": len(chunks),
+                "chunk_method": "headings" if chunk_by_headings else "paragraphs"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error chunking document for RAG: {str(e)}")
+            return {"error": str(e)}
+    
+    def _chunk_by_headings(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Chunk document by heading boundaries, preserving structure.
+        
+        Args:
+            content: Document content
+            
+        Returns:
+            List of chunks with metadata
+        """
+        chunks = []
+        
+        # Split by headings
+        heading_pattern = r'^(#{1,6})\s+(.+)$'
+        lines = content.split('\n')
+        
+        current_chunk = []
+        current_heading = None
+        current_level = 0
+        heading_ancestry = []
+        
+        for line in lines:
+            heading_match = re.match(heading_pattern, line)
+            
+            if heading_match:
+                # Save previous chunk if exists
+                if current_chunk:
+                    chunk_text = '\n'.join(current_chunk)
+                    chunks.append({
+                        "text": chunk_text,
+                        "heading": current_heading,
+                        "level": current_level,
+                        "heading_ancestry": ' > '.join(heading_ancestry),
+                        "tokens": self.estimate_tokens(chunk_text)
+                    })
+                
+                # Start new chunk
+                level = len(heading_match.group(1))
+                heading = heading_match.group(2)
+                
+                # Update ancestry
+                if level == 1:
+                    heading_ancestry = [heading]
+                elif level <= len(heading_ancestry):
+                    heading_ancestry = heading_ancestry[:level-1] + [heading]
+                else:
+                    heading_ancestry.append(heading)
+                
+                current_chunk = [line]
+                current_heading = heading
+                current_level = level
+            else:
+                current_chunk.append(line)
+        
+        # Add final chunk
+        if current_chunk:
+            chunk_text = '\n'.join(current_chunk)
+            chunks.append({
+                "text": chunk_text,
+                "heading": current_heading,
+                "level": current_level,
+                "heading_ancestry": ' > '.join(heading_ancestry),
+                "tokens": self.estimate_tokens(chunk_text)
+            })
+        
+        # Add overlap between chunks
+        chunks = self._add_chunk_overlap(
+            chunks,
+            self.config["heading_chunk_overlap"]
+        )
+        
+        return chunks
+    
+    def _chunk_by_paragraphs(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Chunk document by paragraphs with overlap.
+        
+        Args:
+            content: Document content
+            
+        Returns:
+            List of chunks with metadata
+        """
+        paragraphs = content.split('\n\n')
+        chunks = []
+        
+        chunk_size_tokens = 512  # Target chunk size
+        overlap_tokens = self.config["paragraph_chunk_overlap"]
+        
+        current_chunk = []
+        current_tokens = 0
+        
+        for para in paragraphs:
+            para_tokens = self.estimate_tokens(para)
+            
+            if current_tokens + para_tokens > chunk_size_tokens and current_chunk:
+                # Save current chunk
+                chunk_text = '\n\n'.join(current_chunk)
+                chunks.append({
+                    "text": chunk_text,
+                    "tokens": current_tokens,
+                    "paragraph_count": len(current_chunk)
+                })
+                
+                # Start new chunk with overlap
+                # Keep last paragraph(s) for overlap
+                overlap_content = []
+                overlap_token_count = 0
+                for prev_para in reversed(current_chunk):
+                    para_tok = self.estimate_tokens(prev_para)
+                    if overlap_token_count + para_tok <= overlap_tokens:
+                        overlap_content.insert(0, prev_para)
+                        overlap_token_count += para_tok
+                    else:
+                        break
+                
+                current_chunk = overlap_content + [para]
+                current_tokens = overlap_token_count + para_tokens
+            else:
+                current_chunk.append(para)
+                current_tokens += para_tokens
+        
+        # Add final chunk
+        if current_chunk:
+            chunk_text = '\n\n'.join(current_chunk)
+            chunks.append({
+                "text": chunk_text,
+                "tokens": current_tokens,
+                "paragraph_count": len(current_chunk)
+            })
+        
+        return chunks
+    
+    def _add_chunk_overlap(
+        self,
+        chunks: List[Dict[str, Any]],
+        overlap_tokens: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Add overlap between heading-based chunks.
+        
+        Args:
+            chunks: List of chunks
+            overlap_tokens: Number of tokens to overlap
+            
+        Returns:
+            Chunks with overlap added
+        """
+        if len(chunks) <= 1:
+            return chunks
+        
+        overlapped_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            chunk_text = chunk["text"]
+            
+            # Add content from previous chunk (end)
+            if i > 0:
+                prev_text = chunks[i-1]["text"]
+                prev_excerpt = self.extract_last_n_tokens(prev_text, overlap_tokens)
+                chunk_text = prev_excerpt + "\n\n" + chunk_text
+            
+            # Add content from next chunk (beginning)
+            if i < len(chunks) - 1:
+                next_text = chunks[i+1]["text"]
+                next_excerpt = self.extract_first_n_tokens(next_text, overlap_tokens)
+                chunk_text = chunk_text + "\n\n" + next_excerpt
+            
+            overlapped_chunk = chunk.copy()
+            overlapped_chunk["text"] = chunk_text
+            overlapped_chunk["tokens"] = self.estimate_tokens(chunk_text)
+            overlapped_chunks.append(overlapped_chunk)
+        
+        return overlapped_chunks
+    
+    def retrieve_chunks_for_update(
+        self,
+        doc_id: str,
+        query: str,
+        top_k: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Retrieve relevant chunks from RAG for document update.
+        
+        Args:
+            doc_id: Document ID
+            query: Search query
+            top_k: Number of chunks to retrieve
+            
+        Returns:
+            Retrieved chunks with context
+        """
+        return {
+            "workflow": "rag_chunk_retrieval",
+            "doc_id": doc_id,
+            "query": query,
+            "instructions": f"""Retrieve relevant chunks for updating:
+
+1. Use search_documents with query: "{query}"
+2. Specify namespace: {self.org_slug}_tool_responses
+3. Filter by metadata: doc_id = {doc_id}
+4. Request top {top_k} chunks
+5. Review chunks and their neighbor context
+6. Identify which chunks need updating
+7. Apply edits to relevant chunks
+8. Merge updated chunks back to document
+
+The chunks include overlap with neighbors for continuity.""",
+            "namespace": f"{self.org_slug}_tool_responses",
+            "top_k": top_k
+        }
+    
+    # ============================================================================
+    # Post-Update Validation
+    # ============================================================================
+    
+    def validate_document_update(
+        self,
+        doc_id: str,
+        original_content: str,
+        updated_content: str,
+        change_description: str
+    ) -> Dict[str, Any]:
+        """
+        Validate document after update.
+        
+        Args:
+            doc_id: Document ID
+            original_content: Original content before update
+            updated_content: Updated content
+            change_description: Description of changes made
+            
+        Returns:
+            Validation report
+        """
+        validation_report = {
+            "doc_id": doc_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "change_description": change_description,
+            "checks": {},
+            "issues": [],
+            "suggestions": [],
+            "valid": True
+        }
+        
+        # Run continuity checks on updated content
+        if self.config["enable_post_update_validation"]:
+            continuity = self._run_continuity_pass(updated_content)
+            validation_report["checks"]["continuity"] = continuity
+            
+            if continuity["issues"]:
+                validation_report["issues"].extend([
+                    f"Continuity: {issue['type']}" for issue in continuity["issues"]
+                ])
+                validation_report["valid"] = False
+            
+            validation_report["suggestions"].extend(continuity["suggestions"])
+            
+            # Check for contradictions introduced
+            contradictions = self._check_for_contradictions(
+                original_content,
+                updated_content
+            )
+            if contradictions:
+                validation_report["checks"]["contradictions"] = contradictions
+                validation_report["issues"].append(f"Found {len(contradictions)} potential contradictions")
+                validation_report["suggestions"].append("Review and resolve contradictions")
+        
+        return validation_report
+    
+    def _check_for_contradictions(
+        self,
+        original: str,
+        updated: str
+    ) -> List[str]:
+        """
+        Check for potential contradictions between original and updated content.
+        
+        This is a basic implementation that could be enhanced with LLM-based checking.
+        
+        Args:
+            original: Original content
+            updated: Updated content
+            
+        Returns:
+            List of potential contradictions
+        """
+        contradictions = []
+        
+        # Look for statements that were reversed
+        # e.g., "X is true" changed to "X is false"
+        # This is a simplified heuristic
+        
+        original_sentences = re.split(r'[.!?]+', original)
+        updated_sentences = re.split(r'[.!?]+', updated)
+        
+        # Look for negation flips
+        negation_words = ['not', 'no', 'never', 'none', 'cannot', 'shouldn\'t', 'won\'t']
+        
+        for orig_sent in original_sentences:
+            orig_sent = orig_sent.strip()
+            if len(orig_sent) < 20:
+                continue
+            
+            # Extract key terms
+            orig_words = set(orig_sent.lower().split())
+            has_negation_orig = any(neg in orig_words for neg in negation_words)
+            
+            for upd_sent in updated_sentences:
+                upd_sent = upd_sent.strip()
+                if len(upd_sent) < 20:
+                    continue
+                
+                upd_words = set(upd_sent.lower().split())
+                has_negation_upd = any(neg in upd_words for neg in negation_words)
+                
+                # Check for similar sentences with flipped negation
+                overlap = len(orig_words & upd_words)
+                if overlap > len(orig_words) * 0.5:  # 50% word overlap
+                    if has_negation_orig != has_negation_upd:
+                        contradictions.append(f"Original: {orig_sent[:100]}... | Updated: {upd_sent[:100]}...")
+        
+        return contradictions[:5]  # Return first 5 potential contradictions
+    
+    def update_change_log(
+        self,
+        doc_id: str,
+        change_entry: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Add entry to document change log.
+        
+        Args:
+            doc_id: Document ID
+            change_entry: Change log entry with timestamp, changes, reason, source
+            
+        Returns:
+            Status of change log update
+        """
+        timestamp = change_entry.get("timestamp") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+        changed_sections = change_entry.get("changed_sections", [])
+        reason = change_entry.get("reason", "")
+        source = change_entry.get("source", "")
+        issues = change_entry.get("issues", "None detected")
+        
+        # Format change log entry
+        log_entry = f"""
+### {timestamp}
+- **Changed**: {', '.join(changed_sections) if changed_sections else 'Multiple sections'}
+- **Reason**: {reason}
+- **Source**: {source}
+- **Issues**: {issues}
+"""
+        
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "log_entry": log_entry,
+            "instructions": """Append this change log entry to the document:
+
+1. Check if document has a '## Change Log' section
+2. If not, add one at the end of the document
+3. Append the new entry under the Change Log heading
+4. Update the document via update_doc()"""
+        }
+    
+    # ============================================================================
+    # Internal Helper Methods
+    # ============================================================================
+    
+    def _detect_update_strategy(
+        self,
+        content: str,
+        update_request: str
+    ) -> Dict[str, Any]:
+        """
+        Detect appropriate update strategy based on document size and request.
+        
+        Args:
+            content: Current document content
+            update_request: User's update request
+            
+        Returns:
+            Strategy information dictionary
+        """
+        doc_size_tokens = self.estimate_tokens(content)
+        fits_in_context = doc_size_tokens < self.config["max_context_tokens"]
+        
+        # Check if request has specific target (section name, quote, line number)
+        has_specific_target = self._has_specific_target(update_request)
+        
+        if fits_in_context:
+            strategy = "direct"
+        elif has_specific_target:
+            strategy = "targeted"
+        else:
+            strategy = "broad"
+        
+        return {
+            "strategy": strategy,
+            "fits_in_context": fits_in_context,
+            "doc_size_tokens": doc_size_tokens,
+            "has_specific_target": has_specific_target
+        }
+    
+    def _has_specific_target(self, update_request: str) -> bool:
+        """
+        Check if update request specifies a specific target location.
+        
+        Args:
+            update_request: User's update request
+            
+        Returns:
+            True if request has specific target indicators
+        """
+        # Look for section references
+        section_patterns = [
+            r'section\s+\d+',
+            r'heading\s+"[^"]+"',
+            r'paragraph\s+about',
+            r'line\s+\d+',
+            r'in\s+the\s+.+\s+section',
+        ]
+        
+        for pattern in section_patterns:
+            if re.search(pattern, update_request, re.IGNORECASE):
+                return True
+        
+        # Look for quoted text (likely a specific target)
+        if '"' in update_request or "'" in update_request:
+            return True
+        
+        return False
+    
+    def _get_update_instructions(self, strategy: Dict[str, Any]) -> str:
+        """
+        Generate instructions for the agent based on update strategy.
+        
+        Args:
+            strategy: Strategy information from _detect_update_strategy
+            
+        Returns:
+            Instructions string for the agent
+        """
+        strategy_type = strategy["strategy"]
+        
+        if strategy_type == "direct":
+            return """The document fits in context. You can update it directly:
+1. Review the current content
+2. Apply the requested updates
+3. Use update_doc() to save changes
+4. Run post-update validation if enabled"""
+        
+        elif strategy_type == "targeted":
+            return """The document is large but you have a specific target. Use targeted edit workflow:
+1. Export the document to a temp file
+2. Search for the target area (exact match, then fuzzy if needed)
+3. Extract a local window (context before + target + context after)
+4. Apply diff-first edit (OLD_BLOCK → NEW_BLOCK)
+5. Merge changes back using update_doc()
+6. Run post-update validation"""
+        
+        else:  # broad
+            return """The document is large and requires broad updates. Use structure-first workflow:
+1. Generate an impact map (which sections need updates)
+2. Optionally confirm with user
+3. For each impacted section:
+   - Retrieve section using RAG search
+   - Update with new information
+   - Upsert back to document
+4. Run post-update validation
+5. Update change log"""
+    
+    # ============================================================================
+    # Cleanup
+    # ============================================================================
+    
+    def cleanup_temp_files(self):
+        """Clean up any temporary files created during workflows."""
+        for temp_file in self._workflow_temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logger.debug(f"Removed temp file: {temp_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove temp file {temp_file}: {e}")
+        
+        self._workflow_temp_files.clear()
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.cleanup_temp_files()
