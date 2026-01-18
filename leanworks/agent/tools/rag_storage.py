@@ -3,6 +3,8 @@ import uuid
 import json
 import logging
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from leanworks.rag.vectordb import UPSERT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -84,20 +86,53 @@ class RAGStorageTool:
                 chunks, chunk_metadata_list
             )
             
-            # Store in Pinecone with special namespace for tool responses
-            # Upsert dense vectors
-            if dense_vectors:
-                self.vectordb_client.dense_index.upsert(
-                    vectors=dense_vectors,
-                    namespace=self.namespace
-                )
+            # Batch and upsert vectors in parallel for better performance
+            def upsert_dense_batch(batch_vectors):
+                """Upsert a batch of dense vectors."""
+                if batch_vectors:
+                    self.vectordb_client.dense_index.upsert(
+                        vectors=batch_vectors,
+                        namespace=self.namespace
+                    )
             
-            # Upsert sparse vectors
-            if sparse_vectors:
-                self.vectordb_client.sparse_index.upsert(
-                    vectors=sparse_vectors,
-                    namespace=self.namespace
-                )
+            def upsert_sparse_batch(batch_vectors):
+                """Upsert a batch of sparse vectors."""
+                if batch_vectors:
+                    self.vectordb_client.sparse_index.upsert(
+                        vectors=batch_vectors,
+                        namespace=self.namespace
+                    )
+            
+            # Split vectors into batches
+            dense_batches = [
+                dense_vectors[i:i + UPSERT_BATCH_SIZE] 
+                for i in range(0, len(dense_vectors), UPSERT_BATCH_SIZE)
+            ]
+            sparse_batches = [
+                sparse_vectors[i:i + UPSERT_BATCH_SIZE] 
+                for i in range(0, len(sparse_vectors), UPSERT_BATCH_SIZE)
+            ]
+            
+            # Upsert dense and sparse vectors in parallel
+            logger.info(f"Upserting {len(dense_vectors)} dense and {len(sparse_vectors)} sparse vectors in batches...")
+            
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = []
+                
+                # Submit all batch upserts
+                for batch in dense_batches:
+                    futures.append(executor.submit(upsert_dense_batch, batch))
+                
+                for batch in sparse_batches:
+                    futures.append(executor.submit(upsert_sparse_batch, batch))
+                
+                # Wait for all upserts to complete
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Error during batch upsert: {e}")
+                        raise
             
             logger.info(f"Stored tool response in RAG: {document_id} ({len(chunks)} chunks, namespace: {self.namespace})")
         except Exception as e:

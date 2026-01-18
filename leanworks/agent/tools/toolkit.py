@@ -959,6 +959,7 @@ class ToolUse:
         
         if not command:
             return "Error: command is required unless restart is true"
+
         
         # Use persistent session if available, otherwise create one
         if not hasattr(self, '_bash_session') or self._bash_session is None:
@@ -1098,6 +1099,9 @@ class ToolUse:
         Handle text editor operations from Claude's tool call parameters.
         The text_editor_20250728 tool uses specific command names: view, create, str_replace, insert
         """
+        old_str = kwargs.get("old_str")
+        new_str = kwargs.get("new_str")
+        file_text = kwargs.get("file_text")
         # Check which command is present in kwargs
         # The text_editor_20250728 tool uses command names directly, not an "action" parameter
         # Priority: create > str_replace > insert > view (check for specific params first)
@@ -1306,6 +1310,36 @@ class ToolUse:
                 lines = f.readlines()
             
             total_lines = len(lines)
+
+            if not view_range and max_characters is None:
+                doc_id = None
+                base_name = os.path.basename(full_path)
+                match = re.match(r"^doc_([^_]+)_", base_name)
+                if match:
+                    doc_id = match.group(1)
+                if doc_id and self.doc_management_tool:
+                    positions = self.doc_management_tool.get_selected_text_positions(doc_id)
+                else:
+                    positions = None
+                if positions:
+                    def line_for_offset(all_lines, offset):
+                        running = 0
+                        for idx, line in enumerate(all_lines, start=1):
+                            running += len(line)
+                            if offset < running:
+                                return idx
+                        return len(all_lines) if all_lines else 1
+
+                    html_from = positions.get("html_from")
+                    html_to = positions.get("html_to")
+                    if isinstance(html_from, int) and isinstance(html_to, int):
+                        start_line = line_for_offset(lines, max(0, html_from))
+                        end_line = line_for_offset(lines, max(0, html_to))
+                        context_lines = 5
+                        view_range = [
+                            max(1, start_line - context_lines),
+                            min(total_lines, end_line + context_lines)
+                        ]
             
             # Apply view_range if specified
             if view_range and len(view_range) == 2:
@@ -1363,9 +1397,10 @@ class ToolUse:
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
                     self.doc_management_tool.list_docs_property,
-                    self.doc_management_tool.get_doc_markdown_path_property,
-                    self.doc_management_tool.create_doc_from_markdown_file_property,
-                    self.doc_management_tool.update_doc_from_markdown_file_property,
+                    # HTML-based doc management tools
+                    self.doc_management_tool.get_doc_html_path_property,
+                    self.doc_management_tool.create_doc_from_html_file_property,
+                    self.doc_management_tool.update_doc_from_html_file_property,
                     # Workflow tools (now part of DocManagementTool)
                     self.doc_management_tool.create_doc_with_workflow_property,
                     self.doc_management_tool.update_doc_with_workflow_property,
@@ -1380,6 +1415,7 @@ class ToolUse:
                     self.doc_management_tool.finalize_doc_update_property,
                     self.doc_management_tool.generate_impact_map_property,
                     self.doc_management_tool.update_section_with_rag_property,
+                    self.doc_management_tool.extract_text_at_html_positions_property,
                 ])
                 logger.info("Doc Management tools (including workflow) added to tools list (lazy)")
             
@@ -1547,9 +1583,10 @@ class ToolUse:
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
                     "list_docs": self.doc_management_tool.list_docs,
-                    "get_doc_markdown_path": self.doc_management_tool.get_doc_markdown_path,
-                    "create_doc_from_markdown_file": self.doc_management_tool.create_doc_from_markdown_file,
-                    "update_doc_from_markdown_file": self.doc_management_tool.update_doc_from_markdown_file,
+                    # HTML-based doc management functions
+                    "get_doc_html_path": self.doc_management_tool.get_doc_html_path,
+                    "create_doc_from_html_file": self.doc_management_tool.create_doc_from_html_file,
+                    "update_doc_from_html_file": self.doc_management_tool.update_doc_from_html_file,
                     # Workflow functions (now part of DocManagementTool)
                     "create_doc_with_workflow": self.doc_management_tool.create_doc_with_workflow,
                     "update_doc_with_workflow": self.doc_management_tool.update_doc_with_workflow,
@@ -1564,6 +1601,7 @@ class ToolUse:
                     "finalize_doc_update": self.doc_management_tool.finalize_doc_update,
                     "generate_impact_map": self.doc_management_tool.generate_impact_map,
                     "update_section_with_rag": self.doc_management_tool.update_section_with_rag,
+                    "extract_text_at_html_positions": self.doc_management_tool.extract_text_at_html_positions,
                 })
                 logger.info("Doc Management functions (including workflow) added to function_map (lazy)")
             

@@ -19,10 +19,10 @@ class DocManagementTool(BaseAPIClient):
     """
     Document management tool for creating and updating documents via leanworks-hub API.
     
-    Documents are worked with in markdown format using Anthropic's text editor tool,
-    then converted to TipTap JSON format when saving via the API. The AI agent uses the text
+    Documents are worked with in HTML format using Anthropic's text editor tool,
+    then converted directly to TipTap JSON format when saving via the API. The AI agent uses the text
     editor tool directly for formatting, eliminating the need for specific formatting
-    helper functions.
+    helper functions. This avoids structure loss from multiple format conversions.
     """
     
     def __init__(
@@ -67,6 +67,7 @@ class DocManagementTool(BaseAPIClient):
         # Track temporary markdown files
         self._temp_files: Dict[str, str] = {}  # docId -> file_path
         self._workflow_temp_files: List[str] = []  # List of temp file paths for workflow operations
+        self._selected_text_positions: Dict[str, Dict[str, int]] = {}  # docId -> {"html_from": int, "html_to": int}
         
         # Store workflow dependencies
         self.rag_storage = rag_storage_tool
@@ -143,7 +144,7 @@ class DocManagementTool(BaseAPIClient):
                     },
                     "content": {
                         "type": "string",
-                        "description": "Document content in markdown format (required). Will be converted to TipTap JSON format for storage."
+                        "description": "Document content in HTML format (required). Will be converted to TipTap JSON format for storage."
                     },
                     "projectId": {
                         "type": "string",
@@ -194,7 +195,7 @@ class DocManagementTool(BaseAPIClient):
         
         Args:
             title: Document title (required)
-            content: Document content (markdown or HTML) (required)
+            content: Document content in HTML format (required)
             projectId: Associated project ID
             teamId: Associated team ID
             tags: Array of tag strings
@@ -209,10 +210,10 @@ class DocManagementTool(BaseAPIClient):
             if not title or not content:
                 return {"error": "title and content are required"}
             
-            # Normalize content to markdown first (handles HTML/TipTap JSON input)
-            # Then convert to TipTap JSON format for storage
-            markdown_content = self._normalize_content_to_markdown(content)
-            tiptap_json_content = self.markdown_to_tiptap_json(markdown_content)
+            # Normalize content to HTML (handles TipTap JSON, HTML, or markdown input)
+            # Then convert directly to TipTap JSON format for storage
+            html_content = self._normalize_content_to_html(content)
+            tiptap_json_content = self._html_to_tiptap_json(html_content)
             
             # Validate visibility
             valid_visibility = ['all_members', 'specific_members']
@@ -244,11 +245,11 @@ class DocManagementTool(BaseAPIClient):
             
             logger.info(f"Document created via API: id={result.get('id')}, title={title}")
             
-            # Return markdown content to agent (not TipTap JSON)
+            # Return HTML content to agent (not TipTap JSON)
             return {
                 "id": result.get('id'),
                 "title": title,
-                "content": content,  # Return original markdown, not TipTap JSON
+                "content": html_content,  # Return HTML, not TipTap JSON
                 "ownerEmail": result.get('ownerEmail'),
                 "projectId": projectId,
                 "teamId": teamId,
@@ -269,7 +270,7 @@ class DocManagementTool(BaseAPIClient):
         Parameters:
         - docId (required): Document ID to update
         - title (optional): Update title
-        - content (optional): Update content in markdown format
+        - content (optional): Update content in HTML format
         - projectId (optional): Update project association
         - teamId (optional): Update team association
         - tags (optional): Update tags array
@@ -278,7 +279,7 @@ class DocManagementTool(BaseAPIClient):
         - metadata (optional): Update metadata
         
         Content Format:
-        - Input: Markdown format
+        - Input: HTML format
         - Output: Success status (content is converted to TipTap JSON format for storage)
         
         Returns:
@@ -302,7 +303,7 @@ class DocManagementTool(BaseAPIClient):
                     },
                     "content": {
                         "type": "string",
-                        "description": "Update content in markdown format. Will be converted to TipTap JSON format for storage."
+                        "description": "Update content in HTML format. Will be converted to TipTap JSON format for storage."
                     },
                     "projectId": {
                         "type": "string",
@@ -348,10 +349,10 @@ class DocManagementTool(BaseAPIClient):
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
         
         Returns:
-        - Success: List of document dictionaries with all fields including: id, title, content (markdown format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success: List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
         - Error: Dictionary with error message
         
-        Note: Content is returned as markdown format (converted from TipTap JSON stored in database). Documents are stored in TipTap JSON format internally, but are automatically converted to markdown for the agent.
+        Note: Content is returned as HTML format (converted from TipTap JSON stored in database). Documents are stored in TipTap JSON format internally, but are automatically converted to HTML for the agent.
         
         Example Use Cases:
         - Read a specific document's full content
@@ -410,10 +411,10 @@ class DocManagementTool(BaseAPIClient):
                     doc = self._make_request('GET', f'/api/docs/{doc_id}')
                     
                     if doc:
-                        # Convert content from TipTap JSON (or legacy HTML) to markdown
+                        # Convert content from TipTap JSON (or legacy HTML) to HTML
                         if 'content' in doc and doc['content']:
                             content = doc['content']
-                            doc['content'] = self._convert_content_to_markdown(content)
+                            doc['content'] = self._convert_content_to_html(content)
                         
                         # Normalize field names (API returns camelCase, but we want consistency)
                         if 'ownerEmail' in doc:
@@ -449,23 +450,23 @@ class DocManagementTool(BaseAPIClient):
             return {"error": error_msg}
     
     @property
-    def get_doc_markdown_path_property(self):
+    def get_doc_html_path_property(self):
         description = f"""
-        Get or create a temporary markdown file path for a document in org `{self.org_slug}`.
+        Get or create a temporary HTML file path for a document in org `{self.org_slug}`.
         
         This allows the AI agent to use the text editor tool to view and edit document content
-        in markdown format. The file is temporary and will be cleaned up after operations.
+        in HTML format. The file is temporary and will be cleaned up after operations.
         
         Parameters:
         - docId (required): Document ID
         
         Returns:
-        - Success: Path to temporary markdown file
+        - Success: Path to temporary HTML file
         - Error: Dictionary with error message
         """
         return {
             "type": "custom",
-            "name": "get_doc_markdown_path",
+            "name": "get_doc_html_path",
             "description": description,
             "input_schema": {
                 "type": "object",
@@ -480,16 +481,16 @@ class DocManagementTool(BaseAPIClient):
         }
     
     @property
-    def create_doc_from_markdown_file_property(self):
+    def create_doc_from_html_file_property(self):
         description = f"""
-        Create a new document from a markdown file in org `{self.org_slug}`.
+        Create a new document from an HTML file in org `{self.org_slug}`.
         
-        This tool reads a markdown file (typically created/edited with the text editor tool),
-        converts it to TipTap JSON format, and saves it to the database. The temporary file is cleaned up
-        after the operation. Content is stored as TipTap JSON internally but returned as markdown to the agent.
+        This tool reads an HTML file (typically created/edited with the text editor tool),
+        converts it directly to TipTap JSON format, and saves it to the database. The temporary file is cleaned up
+        after the operation. Content is stored as TipTap JSON internally but returned as HTML to the agent.
         
         Parameters:
-        - file_path (required): Path to markdown file
+        - file_path (required): Path to HTML file
         - title (required): Document title
         - projectId (optional): Associated project ID
         - teamId (optional): Associated team ID
@@ -504,14 +505,14 @@ class DocManagementTool(BaseAPIClient):
         """
         return {
             "type": "custom",
-            "name": "create_doc_from_markdown_file",
+            "name": "create_doc_from_html_file",
             "description": description,
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to markdown file (required)"
+                        "description": "Path to HTML file (required)"
                     },
                     "title": {
                         "type": "string",
@@ -550,17 +551,17 @@ class DocManagementTool(BaseAPIClient):
         }
     
     @property
-    def update_doc_from_markdown_file_property(self):
+    def update_doc_from_html_file_property(self):
         description = f"""
-        Update an existing document from a markdown file in org `{self.org_slug}`.
+        Update an existing document from an HTML file in org `{self.org_slug}`.
         
-        This tool reads a markdown file (typically created/edited with the text editor tool),
-        converts it to TipTap JSON format, and updates the document in the database. The temporary file is
-        cleaned up after the operation. Content is stored as TipTap JSON internally but returned as markdown to the agent.
+        This tool reads an HTML file (typically created/edited with the text editor tool),
+        converts it directly to TipTap JSON format, and updates the document in the database. The temporary file is
+        cleaned up after the operation. Content is stored as TipTap JSON internally but returned as HTML to the agent.
         
         Parameters:
         - docId (required): Document ID to update
-        - file_path (required): Path to markdown file
+        - file_path (required): Path to HTML file
         - title (optional): Update title
         - projectId (optional): Update project association
         - teamId (optional): Update team association
@@ -575,7 +576,7 @@ class DocManagementTool(BaseAPIClient):
         """
         return {
             "type": "custom",
-            "name": "update_doc_from_markdown_file",
+            "name": "update_doc_from_html_file",
             "description": description,
             "input_schema": {
                 "type": "object",
@@ -586,7 +587,7 @@ class DocManagementTool(BaseAPIClient):
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Path to markdown file (required)"
+                        "description": "Path to HTML file (required)"
                     },
                     "title": {
                         "type": "string",
@@ -643,7 +644,7 @@ class DocManagementTool(BaseAPIClient):
         Args:
             docId: Document ID to update (required)
             title: Update title
-            content: Update content (markdown or HTML)
+            content: Update content in HTML format
             projectId: Update project association
             teamId: Update team association
             tags: Update tags array
@@ -665,10 +666,11 @@ class DocManagementTool(BaseAPIClient):
                 updates['title'] = title
             
             if content is not None:
-                # Normalize content to markdown first (handles HTML/TipTap JSON input)
-                # Then convert to TipTap JSON if content field
-                markdown_content = self._normalize_content_to_markdown(content)
-                updates['content'] = self.markdown_to_tiptap_json(markdown_content)
+                # Normalize content to HTML (handles TipTap JSON, HTML, or markdown input)
+                # Then convert directly to TipTap JSON
+                html_content = self._normalize_content_to_html(content)
+                tiptap_json = self._html_to_tiptap_json(html_content)
+                updates['content'] = tiptap_json
             
             if projectId is not None:
                 updates['projectId'] = projectId
@@ -1010,6 +1012,185 @@ class DocManagementTool(BaseAPIClient):
         markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
         return markdown_text.strip()
     
+    def tiptap_json_to_html(self, tiptap_json: Union[str, dict]) -> str:
+        """
+        Convert TipTap JSON format to HTML.
+        
+        TipTap JSON structure:
+        {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Hello"}]},
+                {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Title"}]}
+            ]
+        }
+        
+        Args:
+            tiptap_json: TipTap JSON as string or dict
+            
+        Returns:
+            HTML string
+        """
+        if not tiptap_json:
+            return ""
+        
+        # Parse JSON string if needed
+        if isinstance(tiptap_json, str):
+            try:
+                doc = json.loads(tiptap_json)
+            except json.JSONDecodeError:
+                # If not valid JSON, might be HTML or plain text - return as is
+                return tiptap_json
+        else:
+            doc = tiptap_json
+        
+        # Validate TipTap JSON structure
+        if not isinstance(doc, dict) or doc.get("type") != "doc":
+            # Not TipTap JSON format, return as string
+            if isinstance(tiptap_json, str):
+                return tiptap_json
+            return json.dumps(tiptap_json)
+        
+        content = doc.get("content", [])
+        if not content:
+            return ""
+        
+        html_parts = []
+        
+        def process_node(node: dict, list_context: Optional[dict] = None) -> str:
+            """Process a TipTap node and return HTML representation."""
+            node_type = node.get("type", "")
+            attrs = node.get("attrs", {})
+            node_content = node.get("content", [])
+            
+            if node_type == "text":
+                text = self._escape_html(node.get("text", ""))
+                marks = node.get("marks", [])
+                
+                # Apply marks (bold, italic, etc.) as HTML tags
+                for mark in marks:
+                    mark_type = mark.get("type", "")
+                    if mark_type == "bold":
+                        text = f"<strong>{text}</strong>"
+                    elif mark_type == "italic":
+                        text = f"<em>{text}</em>"
+                    elif mark_type == "strike":
+                        text = f"<s>{text}</s>"
+                    elif mark_type == "code":
+                        text = f"<code>{text}</code>"
+                    elif mark_type == "link":
+                        href = mark.get("attrs", {}).get("href", "")
+                        href_escaped = self._escape_html(href)
+                        text = f'<a href="{href_escaped}" class="text-primary underline">{text}</a>'
+                
+                return text
+            
+            elif node_type == "paragraph":
+                if not node_content:
+                    return "<p></p>"
+                inner_html = "".join(process_node(child) for child in node_content)
+                return f"<p>{inner_html}</p>"
+            
+            elif node_type == "heading":
+                level = attrs.get("level", 1)
+                inner_html = "".join(process_node(child) for child in node_content)
+                return f"<h{level}>{inner_html}</h{level}>"
+            
+            elif node_type == "bulletList":
+                items = []
+                for child in node_content:
+                    if child.get("type") == "listItem":
+                        item_html = process_list_item(child)
+                        items.append(f"<li>{item_html}</li>")
+                return f"<ul>{''.join(items)}</ul>"
+            
+            elif node_type == "orderedList":
+                items = []
+                for child in node_content:
+                    if child.get("type") == "listItem":
+                        item_html = process_list_item(child)
+                        items.append(f"<li>{item_html}</li>")
+                return f"<ol>{''.join(items)}</ol>"
+            
+            elif node_type == "listItem":
+                # Handled by parent list
+                return ""
+            
+            elif node_type == "codeBlock":
+                language = attrs.get("language", "")
+                code = "".join(process_node(child) for child in node_content)
+                code_escaped = self._escape_html(code)
+                lang_attr = f' class="language-{language}"' if language else ""
+                return f"<pre><code{lang_attr}>{code_escaped}</code></pre>"
+            
+            elif node_type == "blockquote":
+                quote_html = "".join(process_node(child) for child in node_content)
+                return f"<blockquote>{quote_html}</blockquote>"
+            
+            elif node_type == "horizontalRule":
+                return "<hr>"
+            
+            elif node_type == "hardBreak":
+                return "<br>"
+            
+            elif node_type == "image":
+                src = attrs.get("src", "")
+                alt = attrs.get("alt", "")
+                title = attrs.get("title", "")
+                src_escaped = self._escape_html(src)
+                alt_escaped = self._escape_html(alt)
+                title_attr = f' title="{self._escape_html(title)}"' if title else ""
+                return f'<img src="{src_escaped}" alt="{alt_escaped}"{title_attr}>'
+            
+            elif node_type == "table":
+                # Process table
+                rows = []
+                for child in node_content:
+                    if child.get("type") == "tableRow":
+                        cells = []
+                        for cell_node in child.get("content", []):
+                            if cell_node.get("type") == "tableHeader":
+                                cell_html = "".join(process_node(c) for c in cell_node.get("content", []))
+                                cells.append(f"<th>{cell_html}</th>")
+                            elif cell_node.get("type") == "tableCell":
+                                cell_html = "".join(process_node(c) for c in cell_node.get("content", []))
+                                cells.append(f"<td>{cell_html}</td>")
+                        if cells:
+                            rows.append(f"<tr>{''.join(cells)}</tr>")
+                
+                if rows:
+                    return f"<table>{''.join(rows)}</table>"
+                return ""
+            
+            else:
+                # Unknown node type - try to process content
+                if node_content:
+                    return "".join(process_node(child) for child in node_content)
+                return ""
+        
+        def process_list_item(item_node: dict) -> str:
+            """Process a list item node."""
+            html_parts = []
+            for child in item_node.get("content", []):
+                if child.get("type") == "paragraph":
+                    html_parts.append(process_node(child))
+                elif child.get("type") in ["bulletList", "orderedList"]:
+                    # Nested list
+                    html_parts.append(process_node(child))
+                else:
+                    html_parts.append(process_node(child))
+            return "".join(html_parts)
+        
+        # Process all top-level content nodes
+        for node in content:
+            result = process_node(node)
+            if result:
+                html_parts.append(result)
+        
+        # Join HTML parts
+        html = "".join(html_parts)
+        return html
+    
     def markdown_to_tiptap_json(self, markdown_text: str) -> str:
         """
         Convert markdown to TipTap JSON format.
@@ -1196,7 +1377,8 @@ class DocManagementTool(BaseAPIClient):
         if len(nodes) == 0:
             nodes = self._text_with_marks_to_nodes(html)
         
-        return nodes if nodes else [{"type": "text", "text": self._extract_text_from_html(html)}]
+        nodes = [node for node in nodes if node.get("text", "").strip() != ""]
+        return nodes
     
     def _text_with_marks_to_nodes(self, text: str, marks: Optional[List[dict]] = None) -> List[dict]:
         """Convert text with markdown-style formatting to TipTap nodes."""
@@ -1206,6 +1388,8 @@ class DocManagementTool(BaseAPIClient):
         # Simple approach: extract text and apply marks
         # For more complex formatting, parse markdown syntax
         text = self._extract_text_from_html(text)
+        if not text.strip():
+            return []
         
         # Check for markdown-style formatting
         # Bold: **text** or __text__
@@ -1254,7 +1438,7 @@ class DocManagementTool(BaseAPIClient):
     
     def _text_to_tiptap_nodes(self, text: str) -> List[dict]:
         """Convert plain text to TipTap text nodes."""
-        if not text:
+        if not text or not text.strip():
             return []
         return [{"type": "text", "text": text}]
     
@@ -1338,54 +1522,130 @@ class DocManagementTool(BaseAPIClient):
         # Otherwise, assume it's already markdown
         return content
     
+    def _convert_content_to_html(self, content: str) -> str:
+        """
+        Convert content from database (TipTap JSON or legacy HTML) to HTML.
+        Handles backward compatibility with HTML content.
+        
+        Args:
+            content: Content from database (TipTap JSON string or HTML string)
+            
+        Returns:
+            HTML string
+        """
+        if not content:
+            return ""
+        
+        # Check if content is TipTap JSON format
+        if isinstance(content, str):
+            # Try to detect TipTap JSON
+            content_stripped = content.strip()
+            if content_stripped.startswith('{') and '"type":"doc"' in content_stripped.replace(' ', ''):
+                try:
+                    # It's TipTap JSON
+                    return self.tiptap_json_to_html(content)
+                except Exception as e:
+                    logger.warning(f"Failed to parse TipTap JSON, treating as HTML: {str(e)}")
+                    # Fall through to HTML sanitization
+        
+        # Check if it's already a dict (TipTap JSON object)
+        if isinstance(content, dict):
+            return self.tiptap_json_to_html(content)
+        
+        # Otherwise, treat as HTML (legacy format) and sanitize
+        return self._sanitize_html(content)
+    
+    def _normalize_content_to_html(self, content: str) -> str:
+        """
+        Normalize content to HTML format.
+        Handles TipTap JSON, HTML, or markdown input.
+        
+        Args:
+            content: Content in any format (TipTap JSON, HTML, or markdown)
+            
+        Returns:
+            HTML string
+        """
+        if not content:
+            return ""
+        
+        # Check if it's TipTap JSON
+        if self._is_tiptap_json(content):
+            return self.tiptap_json_to_html(content)
+        
+        # Check if it's HTML (contains HTML tags)
+        if isinstance(content, str) and '<' in content and '>' in content:
+            # Check for common HTML patterns
+            html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
+            if any(pattern in content for pattern in html_patterns):
+                return self._sanitize_html(content)
+        
+        # Otherwise, assume it's markdown and convert to HTML
+        return self.markdown_to_html(content)
+    
     # ============================================================================
     # Temporary File Management
     # ============================================================================
     
-    def get_doc_markdown_path(self, docId: str) -> str:
+    def get_doc_html_path(self, docId: str) -> str:
         """
-        Get or create temporary markdown file path for a document.
+        Get or create temporary HTML file path for a document.
         
         Args:
             docId: Document ID
             
         Returns:
-            Path to temporary markdown file
+            Path to temporary HTML file
         """
         if docId in self._temp_files:
             return self._temp_files[docId]
         
         # Create new temporary file
-        file_path = self.create_temp_markdown_file(docId)
+        file_path = self.create_temp_html_file(docId)
         return file_path
     
-    def create_temp_markdown_file(self, docId: str, content: str = None) -> str:
+    def create_temp_html_file(self, docId: str, content: str = None) -> str:
         """
-        Create a temporary markdown file for a document.
+        Create a temporary HTML file for a document.
         
         Args:
             docId: Document ID
             content: Optional initial content (if None, will fetch from DB)
             
         Returns:
-            Path to temporary markdown file
+            Path to temporary HTML file
         """
+        existing_path = self._temp_files.get(docId)
+        if existing_path and os.path.exists(existing_path):
+            if content is not None:
+                try:
+                    with open(existing_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    logger.info(f"Reused temporary HTML file (updated): {existing_path} for doc {docId}")
+                except Exception as e:
+                    logger.warning(f"Failed to update cached temp file {existing_path} for doc {docId}: {str(e)}")
+            else:
+                logger.info(f"Reused temporary HTML file: {existing_path} for doc {docId}")
+            return existing_path
+        if existing_path and not os.path.exists(existing_path):
+            del self._temp_files[docId]
+
         # Create temporary file
-        fd, file_path = tempfile.mkstemp(suffix='.md', prefix=f'doc_{docId}_', text=True)
+        fd, file_path = tempfile.mkstemp(suffix='.html', prefix=f'doc_{docId}_', text=True)
         
         try:
             if content is None:
-                # Try to fetch from API and convert to markdown
+                # Try to fetch from API and convert to HTML
                 try:
                     doc = self._make_request('GET', f'/api/docs/{docId}')
                     if doc and 'content' in doc:
                         db_content = doc['content']
-                        # Convert from TipTap JSON (or legacy HTML) to markdown
-                        content = self._convert_content_to_markdown(db_content)
+                        # Convert from TipTap JSON (or legacy HTML) to HTML
+                        content = self._convert_content_to_html(db_content)
                     else:
                         content = ""
                 except Exception as e:
-                    logger.warning(f"Error fetching document {docId} for markdown file: {str(e)}")
+                    logger.warning(f"Error fetching document {docId} for HTML file: {str(e)}")
                     content = ""
             
             # Write content to file
@@ -1395,13 +1655,13 @@ class DocManagementTool(BaseAPIClient):
             # Track the file
             self._temp_files[docId] = file_path
             
-            logger.info(f"Created temporary markdown file: {file_path} for doc {docId}")
+            logger.info(f"Created temporary HTML file: {file_path} for doc {docId}")
             return file_path
         except Exception as e:
             os.close(fd)
             if os.path.exists(file_path):
                 os.remove(file_path)
-            logger.error(f"Error creating temporary markdown file: {str(e)}")
+            logger.error(f"Error creating temporary HTML file: {str(e)}")
             raise
     
     def cleanup_temp_file(self, file_path: str):
@@ -1426,8 +1686,177 @@ class DocManagementTool(BaseAPIClient):
                 del self._temp_files[docId_to_remove]
         except Exception as e:
             logger.warning(f"Error cleaning up temporary file {file_path}: {str(e)}")
+
+    def set_selected_text_positions(self, doc_id: str, html_from: Optional[int], html_to: Optional[int]) -> None:
+        """Store selected text HTML positions for a document."""
+        if not doc_id:
+            return
+        if html_from is None or html_to is None:
+            return
+        try:
+            self._selected_text_positions[doc_id] = {
+                "html_from": int(html_from),
+                "html_to": int(html_to)
+            }
+        except Exception:
+            return
+
+    def get_selected_text_positions(self, doc_id: str) -> Optional[Dict[str, int]]:
+        """Get stored selected text HTML positions for a document."""
+        if not doc_id:
+            return None
+        return self._selected_text_positions.get(doc_id)
     
-    def create_doc_from_markdown_file(
+    @property
+    def extract_text_at_html_positions_property(self):
+        """Property definition for extract_text_at_html_positions tool."""
+        description = """
+        Extract text from a document at specific HTML character positions.
+        
+        This tool is useful when working with selected text that has HTML positions
+        (converted from ProseMirror positions). The extracted text can be used
+        as a precise search target for editing operations.
+        
+        When the user provides selected text context (cited_context with selectedText),
+        HTML positions (htmlFrom, htmlTo) are automatically converted from ProseMirror
+        positions and made available. Use this tool to extract the exact text at those
+        positions for accurate editing.
+        
+        Parameters:
+        - docId (required): Document ID
+        - html_from (required): HTML start position (character offset)
+        - html_to (required): HTML end position (character offset)
+        - context_before (optional): Characters of context to include before html_from (default: 0)
+        - context_after (optional): Characters of context to include after html_to (default: 0)
+        
+        Returns:
+        - Success: Dictionary with extracted_html, extracted_text (plain text), and metadata
+        - Error: Dictionary with error message
+        """
+        return {
+            "type": "custom",
+            "name": "extract_text_at_html_positions",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {
+                        "type": "string",
+                        "description": "Document ID (required)"
+                    },
+                    "html_from": {
+                        "type": "integer",
+                        "description": "HTML start position (character offset, required)"
+                    },
+                    "html_to": {
+                        "type": "integer",
+                        "description": "HTML end position (character offset, required)"
+                    },
+                    "context_before": {
+                        "type": "integer",
+                        "description": "Optional: character count of context to include before html_from"
+                    },
+                    "context_after": {
+                        "type": "integer",
+                        "description": "Optional: character count of context to include after html_to"
+                    }
+                },
+                "required": ["docId", "html_from", "html_to"]
+            }
+        }
+    
+    def extract_text_at_html_positions(
+        self,
+        docId: str,
+        html_from: int,
+        html_to: int,
+        context_before: int = 0,
+        context_after: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Extract text from a document at specific HTML character positions.
+        
+        This is useful when working with selected text that has HTML positions
+        (converted from ProseMirror positions). The extracted text can be used
+        as a precise search target for editing operations.
+        
+        Args:
+            docId: Document ID
+            html_from: HTML start position (character offset)
+            html_to: HTML end position (character offset)
+            context_before: Optional character count of context to include before html_from
+            context_after: Optional character count of context to include after html_to
+            
+        Returns:
+            Dictionary with extracted text and metadata, or error dictionary
+        """
+        try:
+            html_content = None
+            cached_path = self._temp_files.get(docId)
+            if cached_path and os.path.exists(cached_path):
+                try:
+                    with open(cached_path, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                    logger.info(f"Using cached temp file for HTML extraction: {cached_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to read cached temp file {cached_path}: {str(e)}")
+                    html_content = None
+
+            if html_content is None:
+                # Get document content
+                doc_result = self.get_doc([docId])
+                if "error" in doc_result:
+                    return doc_result
+                
+                if not isinstance(doc_result, list) or not doc_result:
+                    return {"error": f"Document not found for id: {docId}"}
+
+                content = doc_result[0].get("content", "")
+                
+                # Convert to HTML if needed
+                html_content = self._convert_content_to_html(content)
+            
+            # Extract text at positions
+            if html_from < 0 or html_to > len(html_content) or html_from >= html_to:
+                return {
+                    "error": f"Invalid HTML positions: from={html_from}, to={html_to}, content_length={len(html_content)}"
+                }
+            
+            extracted_html = html_content[html_from:html_to]
+            context_before = max(0, int(context_before))
+            context_after = max(0, int(context_after))
+            context_from = max(0, html_from - context_before)
+            context_to = min(len(html_content), html_to + context_after)
+            context_html = html_content[context_from:context_to]
+            
+            # Remove HTML tags to get plain text
+            import re
+            import html as html_lib
+            plain_text = re.sub(r'<[^>]+>', '', extracted_html)
+            context_text = re.sub(r'<[^>]+>', '', context_html)
+            # Decode HTML entities
+            plain_text = html_lib.unescape(plain_text)
+            context_text = html_lib.unescape(context_text)
+            
+            return {
+                "success": True,
+                "docId": docId,
+                "html_from": html_from,
+                "html_to": html_to,
+                "context_from": context_from,
+                "context_to": context_to,
+                "extracted_html": extracted_html,
+                "extracted_text": plain_text.strip(),
+                "context_html": context_html,
+                "context_text": context_text.strip(),
+                "length": len(plain_text)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error extracting text at HTML positions: {str(e)}")
+            return {"error": str(e)}
+    
+    def create_doc_from_html_file(
         self,
         file_path: str,
         title: str,
@@ -1440,10 +1869,10 @@ class DocManagementTool(BaseAPIClient):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Create a document from a markdown file.
+        Create a document from an HTML file.
         
         Args:
-            file_path: Path to markdown file
+            file_path: Path to HTML file
             title: Document title
             **kwargs: Additional arguments passed to create_doc
             
@@ -1451,14 +1880,17 @@ class DocManagementTool(BaseAPIClient):
             Dictionary with doc id and created fields, or error dictionary
         """
         try:
-            # Read markdown file
+            # Read HTML file
             with open(file_path, 'r', encoding='utf-8') as f:
-                markdown_content = f.read()
+                html_content = f.read()
             
-            # Create document with markdown content (will be converted to HTML)
+            # Sanitize HTML content
+            html_content = self._sanitize_html(html_content)
+            
+            # Create document with HTML content (will be converted directly to TipTap JSON)
             result = self.create_doc(
                 title=title,
-                content=markdown_content,
+                content=html_content,
                 projectId=projectId,
                 teamId=teamId,
                 tags=tags,
@@ -1473,35 +1905,38 @@ class DocManagementTool(BaseAPIClient):
             
             return result
         except Exception as e:
-            logger.error(f"Error creating doc from markdown file: {str(e)}")
-            return {"error": f"Error reading markdown file: {str(e)}"}
+            logger.error(f"Error creating doc from HTML file: {str(e)}")
+            return {"error": f"Error reading HTML file: {str(e)}"}
     
-    def update_doc_from_markdown_file(
+    def update_doc_from_html_file(
         self,
         docId: str,
         file_path: str,
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Update a document from a markdown file.
+        Update a document from an HTML file.
         
         Args:
             docId: Document ID to update
-            file_path: Path to markdown file
+            file_path: Path to HTML file
             **kwargs: Additional arguments passed to update_doc
             
         Returns:
             Dictionary with success status, or error dictionary
         """
         try:
-            # Read markdown file
+            # Read HTML file
             with open(file_path, 'r', encoding='utf-8') as f:
-                markdown_content = f.read()
+                html_content = f.read()
             
-            # Update document with markdown content (will be converted to HTML)
+            # Sanitize HTML content
+            html_content = self._sanitize_html(html_content)
+            
+            # Update document with HTML content (will be converted directly to TipTap JSON)
             result = self.update_doc(
                 docId=docId,
-                content=markdown_content,
+                content=html_content,
                 **kwargs
             )
             
@@ -1510,8 +1945,8 @@ class DocManagementTool(BaseAPIClient):
             
             return result
         except Exception as e:
-            logger.error(f"Error updating doc from markdown file: {str(e)}")
-            return {"error": f"Error reading markdown file: {str(e)}"}
+            logger.error(f"Error updating doc from HTML file: {str(e)}")
+            return {"error": f"Error reading HTML file: {str(e)}"}
     
     # ============================================================================
     # Helper Methods
@@ -1647,7 +2082,7 @@ class DocManagementTool(BaseAPIClient):
         
         Returns:
         - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, visibility, created_at, updated_at
-        - Note: Full content is not included - only a preview. Use get_doc_markdown_path or query_postgres to get full content if needed.
+        - Note: Full content is not included - only a preview. Use get_doc_html_path or query_postgres to get full content if needed.
         - Error: Dictionary with error message
         
         Example Use Cases:
@@ -1789,10 +2224,10 @@ class DocManagementTool(BaseAPIClient):
                 # Create content preview from full content
                 content = doc.get('content', '')
                 if content:
-                    # Convert TipTap JSON to markdown first
-                    content_md = self._convert_content_to_markdown(content)
-                    # Strip markdown formatting for preview
-                    content_preview = re.sub(r'[#*_`\[\]()]', '', content_md)
+                    # Convert TipTap JSON to HTML first
+                    content_html = self._convert_content_to_html(content)
+                    # Strip HTML tags for preview
+                    content_preview = re.sub(r'<[^>]+>', '', content_html)
                     content_preview = ' '.join(content_preview.split())
                     if len(content_preview) > 200:
                         content_preview = content_preview[:200] + '...'
@@ -2163,7 +2598,11 @@ This consolidated tool handles the complete targeted edit workflow:
 3. Applies diff-first edit (OLD_BLOCK → NEW_BLOCK)
 4. Merges changes back to document
 
-Use this instead of calling export → search → edit → merge separately.""",
+Use this instead of calling export → search → edit → merge separately.
+Notes:
+- Reuses cached temp files when available to avoid re-fetching the document.
+- search_target should come from cited_context.selectedText.text when provided.
+- old_block must match the document HTML substring; if you have htmlFrom/htmlTo, this tool will extract the exact selection and surrounding context automatically.""",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -2171,7 +2610,11 @@ Use this instead of calling export → search → edit → merge separately.""",
                     "search_target": {"type": "string", "description": "Text to search for to locate the section"},
                     "old_block": {"type": "string", "description": "Exact text to replace"},
                     "new_block": {"type": "string", "description": "Replacement text"},
-                    "context_lines": {"type": "integer", "description": "Lines of context to show (default: 10)"}
+                    "context_lines": {"type": "integer", "description": "Lines of context to show (default: 10)"},
+                    "html_from": {"type": "integer", "description": "Optional: HTML start position (character offset)"},
+                    "html_to": {"type": "integer", "description": "Optional: HTML end position (character offset)"},
+                    "context_before": {"type": "integer", "description": "Optional: characters of context before html_from"},
+                    "context_after": {"type": "integer", "description": "Optional: characters of context after html_to"}
                 },
                 "required": ["docId", "search_target", "old_block", "new_block"]
             }
@@ -3127,7 +3570,11 @@ After all sections are drafted:
         search_target: str,
         old_block: str,
         new_block: str,
-        context_lines: int = 10
+        context_lines: int = 10,
+        html_from: Optional[int] = None,
+        html_to: Optional[int] = None,
+        context_before: int = 0,
+        context_after: int = 0
     ) -> Dict[str, Any]:
         """
         Edit a specific section in a document (end-to-end workflow).
@@ -3150,20 +3597,63 @@ After all sections are drafted:
         """
         try:
             logger.info(f"Starting consolidated edit workflow for doc {docId}")
-            
-            # Step 1: Load document
-            doc_result = self.get_doc(docId)
-            if "error" in doc_result:
-                return doc_result
-            
-            content = doc_result.get("content", "")
-            
-            # Step 2: Export to temp file
-            export_result = self._export_doc_to_temp_file_internal(docId, content)
-            if "error" in export_result:
-                return export_result
-            
-            temp_file = export_result["file_path"]
+            temp_file = None
+            tokens_before = None
+
+            if html_from is not None and html_to is not None:
+                extraction = self.extract_text_at_html_positions(
+                    docId=docId,
+                    html_from=html_from,
+                    html_to=html_to,
+                    context_before=context_before,
+                    context_after=context_after
+                )
+                if extraction.get("success"):
+                    extracted_text = extraction.get("extracted_text") or ""
+                    context_text = extraction.get("context_text") or ""
+                    if extracted_text:
+                        old_block = extracted_text
+                        search_target = context_text or extracted_text
+                        logger.info(
+                            f"Derived edit blocks from HTML positions for doc {docId}: "
+                            f"context_from={extraction.get('context_from')}, context_to={extraction.get('context_to')}"
+                        )
+                else:
+                    logger.warning(
+                        f"Failed to extract text at HTML positions for doc {docId}: {extraction.get('error')}"
+                    )
+
+            # Step 1: Reuse existing temp file when available
+            cached_path = self._temp_files.get(docId)
+            if cached_path:
+                if os.path.exists(cached_path):
+                    temp_file = cached_path
+                    try:
+                        with open(temp_file, 'r', encoding='utf-8') as f:
+                            tokens_before = self.estimate_tokens(f.read())
+                    except Exception as e:
+                        logger.warning(f"Error estimating tokens from cached file {temp_file}: {str(e)}")
+                    logger.info(f"Using cached temp file for doc {docId}: {temp_file}")
+                else:
+                    logger.warning(f"Cached temp file missing for doc {docId}: {cached_path}")
+                    del self._temp_files[docId]
+
+            # Step 2: Load document and export to temp file if no cache is available
+            if not temp_file:
+                doc_result = self.get_doc([docId])
+                if "error" in doc_result:
+                    return doc_result
+
+                if not isinstance(doc_result, list) or not doc_result:
+                    return {"error": f"Document not found for id: {docId}"}
+
+                content = doc_result[0].get("content", "")
+                export_result = self._export_doc_to_temp_file_internal(docId, content)
+                if "error" in export_result:
+                    return export_result
+
+                temp_file = export_result["file_path"]
+                tokens_before = export_result.get("size_tokens")
             
             try:
                 # Step 3: Search for target area
@@ -3200,7 +3690,7 @@ After all sections are drafted:
                         "line_number": search_result.get("line_number")
                     },
                     "edit_applied": True,
-                    "tokens_before": export_result["size_tokens"],
+                    "tokens_before": tokens_before,
                     "tokens_after": merge_result.get("updated_tokens"),
                     "message": "Document section updated successfully"
                 }
@@ -3394,10 +3884,10 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             Dictionary with file path and status
         """
         try:
-            # Create temp file
+            # Create temp file (HTML format)
             temp_file = tempfile.NamedTemporaryFile(
                 mode='w',
-                suffix='.md',
+                suffix='.html',
                 prefix=f'doc_{doc_id}_',
                 delete=False
             )
@@ -3595,7 +4085,14 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             with open(file_path, 'r', encoding='utf-8') as f:
                 updated_content = f.read()
             
-            # Update document via doc_tool
+            # Sanitize HTML content before updating
+            updated_content = self._sanitize_html(updated_content)
+
+            if not updated_content or not updated_content.strip():
+                logger.error(f"Refusing to update doc {doc_id} with empty content from {file_path}")
+                return {"error": "Updated content is empty; aborting update"}
+            
+            # Update document via doc_tool (now accepts HTML)
             result = self.update_doc(
                 docId=doc_id,
                 content=updated_content

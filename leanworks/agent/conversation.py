@@ -731,7 +731,7 @@ class ConversationManager:
         """
         Handle large doc management tool responses by creating temp markdown files.
         
-        Uses existing DocManagementTool.get_doc_markdown_path() or create_temp_markdown_file()
+        Uses existing DocManagementTool.get_doc_html_path() or create_temp_html_file()
         to create temporary files that can be accessed via text editor tool.
         """
         try:
@@ -739,8 +739,8 @@ class ConversationManager:
             doc_tool = None
             if 'get_doc' in function_map:
                 doc_tool = getattr(function_map['get_doc'], '__self__', None)
-            elif 'get_doc_markdown_path' in function_map:
-                doc_tool = getattr(function_map['get_doc_markdown_path'], '__self__', None)
+            elif 'get_doc_html_path' in function_map:
+                doc_tool = getattr(function_map['get_doc_html_path'], '__self__', None)
             
             if not doc_tool:
                 logger.warning(f"DocManagementTool not available in function_map for {tool_name}, truncating response")
@@ -759,8 +759,8 @@ class ConversationManager:
                         doc_content = doc.get('content', '')
                         
                         try:
-                            # Create temp markdown file with content
-                            file_path = doc_tool.create_temp_markdown_file(doc_id, doc_content)
+                            # Create temp HTML file with content
+                            file_path = doc_tool.create_temp_html_file(doc_id, doc_content)
                             file_paths.append(file_path)
                             doc_info.append({
                                 'title': doc_title,
@@ -789,7 +789,7 @@ class ConversationManager:
                     doc_content = result.get('content', '')
                     
                     try:
-                        file_path = doc_tool.create_temp_markdown_file(doc_id, doc_content)
+                        file_path = doc_tool.create_temp_html_file(doc_id, doc_content)
                         file_paths.append(file_path)
                         doc_info.append({
                             'title': doc_title,
@@ -837,8 +837,8 @@ class ConversationManager:
         """Check if tool is a doc management tool"""
         doc_tools = [
             'get_doc', 'list_docs', 'create_doc', 'update_doc',
-            'get_doc_markdown_path', 'create_doc_from_markdown_file', 
-            'update_doc_from_markdown_file',
+            'get_doc_html_path', 'create_doc_from_html_file',
+            'update_doc_from_html_file',
             'create_doc_with_workflow', 'update_doc_with_workflow',
             'generate_toc', 'create_toc_file', 'prepare_section_context',
             'upsert_section_to_file', 'draft_document_iteratively',

@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Optional
 from collections import defaultdict
 import re
 import tiktoken
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 # Constants
 DEFAULT_EMBEDDING_DIMENSION = 768
@@ -198,8 +200,8 @@ class PineconeHybridIndex:
         return all_chunks, chunk_metadata_list
     
     def _create_vectors(self, all_chunks: List[str], chunk_metadata_list: List[Dict]) -> tuple[List[Dict], List[Dict]]:
-        """Create dense and sparse vectors from chunks."""
-        logging.info("Generating dense embeddings for all chunks...")
+        """Create dense and sparse vectors from chunks with parallel sparse embedding generation."""
+        logging.info(f"Generating dense embeddings for {len(all_chunks)} chunks...")
         dense_embeddings = self.embedding_model_client.get_embeddings_batch(
             all_chunks, 
             task_type="RETRIEVAL_DOCUMENT"
@@ -208,7 +210,8 @@ class PineconeHybridIndex:
         dense_vectors = []
         sparse_vectors = []
         
-        for chunk, chunk_metadata, dense_embedding in zip(all_chunks, chunk_metadata_list, dense_embeddings):
+        # Prepare dense vectors first (already have embeddings)
+        for chunk_metadata, dense_embedding in zip(chunk_metadata_list, dense_embeddings):
             chunk_id = chunk_metadata['chunk_id']
             final_metadata = {k: v for k, v in chunk_metadata.items() if k != 'chunk_id'}
             
@@ -222,9 +225,34 @@ class PineconeHybridIndex:
                 'values': dense_embedding,
                 'metadata': final_metadata
             })
+        
+        # Parallelize sparse embedding generation (CPU-bound task)
+        logging.info(f"Generating sparse embeddings for {len(all_chunks)} chunks in parallel...")
+        max_workers = min(len(all_chunks), os.cpu_count() or 4, 8)  # Cap at 8 workers
+        
+        sparse_embeddings = [None] * len(all_chunks)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all sparse embedding tasks
+            future_to_index = {
+                executor.submit(self._get_sparse_embedding, chunk): i 
+                for i, chunk in enumerate(all_chunks)
+            }
             
-            # Create sparse vector
-            sparse_embedding = self._get_sparse_embedding(chunk)
+            # Collect results as they complete
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    sparse_embeddings[index] = future.result()
+                except Exception as e:
+                    logging.error(f"Error generating sparse embedding for chunk {index}: {e}")
+                    # Fallback to empty sparse embedding
+                    sparse_embeddings[index] = {'indices': [], 'values': []}
+        
+        # Create sparse vectors
+        for chunk_metadata, sparse_embedding in zip(chunk_metadata_list, sparse_embeddings):
+            chunk_id = chunk_metadata['chunk_id']
+            final_metadata = {k: v for k, v in chunk_metadata.items() if k != 'chunk_id'}
+            
             sparse_vectors.append({
                 'id': chunk_id,
                 'values': sparse_embedding['values'],

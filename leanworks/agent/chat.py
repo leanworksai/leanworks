@@ -70,6 +70,9 @@ class ChatAgent:
         # Initialize document ID tracking for aggressive deduplication
         self.read_document_ids = set()
         
+        # Initialize selected text context (for position-based document editing)
+        self.selected_text_context = None
+        
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
         self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
         
@@ -386,10 +389,67 @@ class ChatAgent:
         # Log current state of document deduplication
         logger.info(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
         
+        # Process cited_context - handle both string and dict formats
+        # Store selected text context for tools to access
+        self.selected_text_context = None
+        cited_context_str = None
+        
+        if cited_context:
+            if isinstance(cited_context, dict):
+                # Structured format - extract selectedText and format for LLM
+                selected_text = cited_context.get("selectedText")
+                if selected_text:
+                    # Store for tools to access
+                    self.selected_text_context = selected_text
+                    logger.info(f"Stored selected text context: docId={selected_text.get('docId')}, htmlFrom={selected_text.get('htmlFrom')}, htmlTo={selected_text.get('htmlTo')}")
+                    doc_id = selected_text.get("docId")
+                    html_from = selected_text.get("htmlFrom")
+                    html_to = selected_text.get("htmlTo")
+                    if doc_id and html_from is not None and html_to is not None:
+                        try:
+                            doc_tool = self.tool_use.doc_management_tool
+                            if doc_tool:
+                                doc_tool.set_selected_text_positions(doc_id, html_from, html_to)
+                        except Exception as e:
+                            logger.warning(f"Failed to store selected text positions for doc {doc_id}: {e}")
+                
+                # Format structured context for LLM
+                context_parts = []
+                
+                # Add projects if present
+                projects = cited_context.get("projects", [])
+                if projects:
+                    project_names = [p.get("name", p.get("id", "")) for p in projects]
+                    context_parts.append(f"Cited projects: {', '.join(project_names)}")
+                
+                # Add tasks if present
+                tasks = cited_context.get("tasks", [])
+                if tasks:
+                    task_titles = [t.get("title", t.get("id", "")) for t in tasks]
+                    context_parts.append(f"Cited tasks: {', '.join(task_titles)}")
+                
+                # Add docs if present
+                docs = cited_context.get("docs", [])
+                if docs:
+                    doc_titles = [d.get("title", d.get("id", "")) for d in docs]
+                    context_parts.append(f"Cited documents: {', '.join(doc_titles)}")
+                
+                # Add selected text if present
+                if selected_text:
+                    text = selected_text.get("text", "")
+                    doc_id = selected_text.get("docId", "")
+                    if text:
+                        context_parts.append(f"Selected text from document {doc_id}: {text[:200]}{'...' if len(text) > 200 else ''}")
+                
+                cited_context_str = "\n".join(context_parts) if context_parts else None
+            else:
+                # String format (legacy)
+                cited_context_str = str(cited_context)
+        
         # Prepare user message (use the extracted actual message)
         user_message = actual_user_message
-        if cited_context:
-            user_message = f"<cited_context>{cited_context}</cited_context>\n{user_message}"
+        if cited_context_str:
+            user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
             # Log the final message with cited context
             logger.info(f"Final user message with cited context: {user_message}")
         
