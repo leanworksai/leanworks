@@ -211,9 +211,7 @@ class DocManagementTool(BaseAPIClient):
                 return {"error": "title and content are required"}
             
             # Normalize content to HTML (handles TipTap JSON, HTML, or markdown input)
-            # Then convert directly to TipTap JSON format for storage
             html_content = self._normalize_content_to_html(content)
-            tiptap_json_content = self._html_to_tiptap_json(html_content)
             
             # Validate visibility
             valid_visibility = ['all_members', 'specific_members']
@@ -229,7 +227,7 @@ class DocManagementTool(BaseAPIClient):
             # Prepare request body for API
             request_body = {
                 "title": title,
-                "content": tiptap_json_content,  # Send TipTap JSON to API
+                "content": html_content,  # API converts HTML to TipTap JSON
                 "projectId": projectId,
                 "teamId": teamId,
                 "tags": tags or [],
@@ -667,10 +665,8 @@ class DocManagementTool(BaseAPIClient):
             
             if content is not None:
                 # Normalize content to HTML (handles TipTap JSON, HTML, or markdown input)
-                # Then convert directly to TipTap JSON
                 html_content = self._normalize_content_to_html(content)
-                tiptap_json = self._html_to_tiptap_json(html_content)
-                updates['content'] = tiptap_json
+                updates['content'] = html_content
             
             if projectId is not None:
                 updates['projectId'] = projectId
@@ -2805,11 +2801,14 @@ Please proceed with generating the TOC based on these requirements.""",
             logger.info(f"Starting intelligent document update: {docId}")
             
             # Load document
-            doc_result = self.get_doc(docId)
+            doc_result = self.get_doc([docId])
             if "error" in doc_result:
                 return doc_result
             
-            content = doc_result.get("content", "")
+            if not isinstance(doc_result, list) or not doc_result:
+                return {"error": f"Document not found for id: {docId}"}
+
+            content = doc_result[0].get("content", "")
             
             # Detect strategy
             strategy = self._detect_update_strategy(content, update_request)
@@ -3599,6 +3598,7 @@ After all sections are drafted:
             logger.info(f"Starting consolidated edit workflow for doc {docId}")
             temp_file = None
             tokens_before = None
+            preferred_offset = html_from
 
             if html_from is not None and html_to is not None:
                 extraction = self.extract_text_at_html_positions(
@@ -3670,7 +3670,12 @@ After all sections are drafted:
                     }
                 
                 # Step 4: Apply diff edit
-                edit_result = self._apply_diff_edit_internal(temp_file, old_block, new_block)
+                edit_result = self._apply_diff_edit_internal(
+                    temp_file,
+                    old_block,
+                    new_block,
+                    preferred_offset=preferred_offset
+                )
                 if "error" in edit_result:
                     return edit_result
                 
@@ -4014,7 +4019,8 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
         self,
         file_path: str,
         old_block: str,
-        new_block: str
+        new_block: str,
+        preferred_offset: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Apply diff-first edit to document file.
@@ -4038,16 +4044,33 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
                     "suggestion": "Verify the exact text to replace"
                 }
             
-            # Check if old_block appears multiple times
-            occurrences = content.count(old_block)
-            if occurrences > 1:
+            # Handle multiple occurrences with preferred offset if provided
+            occurrences = []
+            start = 0
+            while True:
+                idx = content.find(old_block, start)
+                if idx == -1:
+                    break
+                occurrences.append(idx)
+                start = idx + len(old_block)
+            
+            if not occurrences:
                 return {
-                    "error": f"Old block appears {occurrences} times",
+                    "error": "Old block not found in document",
+                    "suggestion": "Verify the exact text to replace"
+                }
+            
+            if len(occurrences) == 1:
+                target_idx = occurrences[0]
+            elif preferred_offset is not None:
+                target_idx = min(occurrences, key=lambda x: abs(x - preferred_offset))
+            else:
+                return {
+                    "error": f"Old block appears {len(occurrences)} times",
                     "suggestion": "Provide more context to make the block unique"
                 }
             
-            # Perform replacement
-            updated_content = content.replace(old_block, new_block, 1)
+            updated_content = content[:target_idx] + new_block + content[target_idx + len(old_block):]
             
             # Write back
             with open(file_path, 'w', encoding='utf-8') as f:
