@@ -444,7 +444,8 @@ class MemoryManager:
                     "conversation_turns": self.conversation_turns,
                     "system_prompt": self.system_prompt,
                     "last_profile_update_turn_count": self._last_profile_update_turn_count,
-                    "last_updated": datetime.now().isoformat()
+                    "last_updated": datetime.now().isoformat(),
+                    "working_context": self.working_context.to_dict()
                 }
                 
                 file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.memory_path)

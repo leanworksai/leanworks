@@ -19,14 +19,15 @@ class WorkingContext:
     during a session to prevent loss during summarization.
     """
 
-    def __init__(self, default_ttl_hours: int = 24):
+    def __init__(self, default_ttl_hours: int = 24, resources_data: Dict[str, Dict[str, Any]] = None):
         """
         Initialize WorkingContext.
 
         Args:
             default_ttl_hours: Default time-to-live for resources in hours
+            resources_data: Optional persisted resources data to restore
         """
-        self.resources: Dict[str, Dict[str, Any]] = {}
+        self.resources: Dict[str, Dict[str, Any]] = resources_data or {}
         self.default_ttl_hours = default_ttl_hours
 
         # Resource type to TTL mapping
@@ -210,3 +211,64 @@ class WorkingContext:
             resources_list.append(resource_copy)
 
         return resources_list
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize working context for persistence.
+        
+        Returns:
+            Dictionary representation of working context
+        """
+        return {
+            "resources": self.resources,
+            "default_ttl_hours": self.default_ttl_hours,
+            "ttl_config": self.ttl_config
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'WorkingContext':
+        """
+        Deserialize working context from persisted data.
+        
+        Args:
+            data: Dictionary containing working context data
+            
+        Returns:
+            WorkingContext instance with restored state
+        """
+        instance = cls(
+            default_ttl_hours=data.get('default_ttl_hours', 24),
+            resources_data=data.get('resources', {})
+        )
+        
+        # Update TTL config if provided
+        if 'ttl_config' in data:
+            instance.ttl_config.update(data['ttl_config'])
+            
+        return instance
+
+    def validate_resources(self) -> int:
+        """
+        Check if persisted resources still exist on disk.
+        Validates temp files and removes ones that no longer exist.
+        
+        Returns:
+            Number of removed invalid resources
+        """
+        import os
+        removed_count = 0
+        
+        for resource_id, resource_info in list(self.resources.items()):
+            resource_type = resource_info.get('type', '')
+            path = resource_info.get('path', '')
+            
+            if resource_type == 'temp_file' and path:
+                if not os.path.exists(path):
+                    logger.warning(f"Temp file no longer exists, removing from working context: {path}")
+                    del self.resources[resource_id]
+                    removed_count += 1
+        
+        if removed_count > 0:
+            logger.info(f"Validated working context - removed {removed_count} missing temp file resources")
+        
+        return removed_count
