@@ -26,8 +26,8 @@ class DocManagementTool(BaseAPIClient):
     """
     
     def __init__(
-        self, 
-        postgres_client_wrapper, 
+        self,
+        postgres_client_wrapper,
         user_id: Optional[str] = None,
         # Optional dependencies for workflow features
         rag_storage_tool=None,
@@ -35,7 +35,8 @@ class DocManagementTool(BaseAPIClient):
         bash_tool=None,
         text_editor_tool=None,
         model_client: Optional[anthropic.Anthropic] = None,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        memory_manager=None  # NEW: For working context registration
     ):
         """
         Initialize DocManagementTool with API access.
@@ -76,6 +77,10 @@ class DocManagementTool(BaseAPIClient):
         self.text_editor = text_editor_tool
         self.model_client = model_client
         self.org_slug = org_slug
+
+        # Store memory manager and working context reference
+        self.memory_manager = memory_manager
+        self.working_context = memory_manager.working_context if memory_manager else None
         
         # Load workflow configuration
         if config is None:
@@ -1602,33 +1607,37 @@ class DocManagementTool(BaseAPIClient):
     
     def create_temp_html_file(self, docId: str, content: str = None) -> str:
         """
-        Create a temporary HTML file for a document.
-        
+        Create a workspace HTML file for a document.
+
         Args:
             docId: Document ID
             content: Optional initial content (if None, will fetch from DB)
-            
+
         Returns:
-            Path to temporary HTML file
+            Docker-accessible path to HTML file
         """
+        # Check for existing workspace file
         existing_path = self._temp_files.get(docId)
         if existing_path and os.path.exists(existing_path):
             if content is not None:
                 try:
                     with open(existing_path, 'w', encoding='utf-8') as f:
                         f.write(content)
-                    logger.info(f"Reused temporary HTML file (updated): {existing_path} for doc {docId}")
+                    logger.info(f"Reused workspace HTML file (updated): {existing_path} for doc {docId}")
                 except Exception as e:
-                    logger.warning(f"Failed to update cached temp file {existing_path} for doc {docId}: {str(e)}")
+                    logger.warning(f"Failed to update cached workspace file {existing_path} for doc {docId}: {str(e)}")
             else:
-                logger.info(f"Reused temporary HTML file: {existing_path} for doc {docId}")
+                logger.info(f"Reused workspace HTML file: {existing_path} for doc {docId}")
+            # Convert host path to container path for return
+            workspace_dir = self._get_workspace_dir()
+            if existing_path.startswith(workspace_dir):
+                filename = os.path.basename(existing_path)
+                return f'/workspace/{filename}'
             return existing_path
+
         if existing_path and not os.path.exists(existing_path):
             del self._temp_files[docId]
 
-        # Create temporary file
-        fd, file_path = tempfile.mkstemp(suffix='.html', prefix=f'doc_{docId}_', text=True)
-        
         try:
             if content is None:
                 # Try to fetch from API and convert to HTML
@@ -1643,21 +1652,28 @@ class DocManagementTool(BaseAPIClient):
                 except Exception as e:
                     logger.warning(f"Error fetching document {docId} for HTML file: {str(e)}")
                     content = ""
-            
-            # Write content to file
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(content)
-            
-            # Track the file
-            self._temp_files[docId] = file_path
-            
-            logger.info(f"Created temporary HTML file: {file_path} for doc {docId}")
-            return file_path
+
+            # Save to workspace directory (Docker-accessible)
+            container_path = self._save_workflow_file_to_workspace(
+                content=content,
+                prefix=f'doc_{docId}_',
+                suffix='.html',
+                doc_id=docId
+            )
+
+            # Get host path for tracking
+            workspace_dir = self._get_workspace_dir()
+            filename = container_path.split('/')[-1]
+            host_path = os.path.join(workspace_dir, filename)
+
+            # Track the file (host path for local operations)
+            self._temp_files[docId] = host_path
+
+            logger.info(f"Created workspace HTML file: {container_path} for doc {docId}")
+            return container_path  # Return Docker-accessible path
+
         except Exception as e:
-            os.close(fd)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            logger.error(f"Error creating temporary HTML file: {str(e)}")
+            logger.error(f"Error creating workspace HTML file: {str(e)}")
             raise
     
     def cleanup_temp_file(self, file_path: str):
@@ -2936,31 +2952,23 @@ Please proceed with generating the TOC based on these requirements.""",
     
     def create_toc_file(self, toc_structure: Dict[str, Any]) -> str:
         """
-        Create a temporary markdown file with TOC structure.
-        
+        Create a workspace markdown file with TOC structure.
+
         Args:
             toc_structure: TOC dictionary structure
-            
+
         Returns:
-            Path to temporary TOC file
+            Docker-accessible path to TOC file
         """
         # Generate markdown TOC content
         md_content = self._toc_to_markdown(toc_structure)
-        
-        # Create temp file
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w',
-            suffix='.md',
+
+        # Save to workspace directory (Docker-accessible)
+        return self._save_workflow_file_to_workspace(
+            content=md_content,
             prefix='toc_',
-            delete=False
+            suffix='.md'
         )
-        temp_file.write(md_content)
-        temp_file.close()
-        
-        self._workflow_temp_files.append(temp_file.name)
-        logger.info(f"Created TOC file: {temp_file.name}")
-        
-        return temp_file.name
     
     def _toc_to_markdown(self, toc: Dict[str, Any]) -> str:
         """
@@ -3879,38 +3887,39 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
         content: str
     ) -> Dict[str, Any]:
         """
-        Export document content to temporary file for editing.
-        
+        Export document content to workspace file for editing.
+
         Args:
             doc_id: Document ID
             content: Document content
-            
+
         Returns:
             Dictionary with file path and status
         """
         try:
-            # Create temp file (HTML format)
-            temp_file = tempfile.NamedTemporaryFile(
-                mode='w',
-                suffix='.html',
+            # Save to workspace directory (Docker-accessible)
+            file_path = self._save_workflow_file_to_workspace(
+                content=content,
                 prefix=f'doc_{doc_id}_',
-                delete=False
+                suffix='.html',
+                doc_id=doc_id
             )
-            temp_file.write(content)
-            temp_file.close()
-            
-            self._workflow_temp_files.append(temp_file.name)
-            logger.info(f"Exported doc {doc_id} to {temp_file.name}")
-            
+
+            # Get host path for token estimation
+            workspace_dir = self._get_workspace_dir()
+            filename = file_path.split('/')[-1]
+            host_path = os.path.join(workspace_dir, filename)
+
             return {
                 "success": True,
-                "file_path": temp_file.name,
+                "file_path": file_path,  # Docker-accessible path
+                "host_path": host_path,   # Host path for operations
                 "doc_id": doc_id,
                 "size_tokens": self.estimate_tokens(content)
             }
-            
+
         except Exception as e:
-            logger.error(f"Error exporting doc to temp file: {str(e)}")
+            logger.error(f"Error exporting doc to workspace file: {str(e)}")
             return {"error": str(e)}
     
     def _search_in_doc_internal(
@@ -4756,9 +4765,85 @@ The chunks include overlap with neighbors for continuity.""",
 5. Update change log"""
     
     # ============================================================================
+    # Workspace File Management
+    # ============================================================================
+
+    def _save_workflow_file_to_workspace(
+        self,
+        content: str,
+        prefix: str,
+        suffix: str,
+        doc_id: Optional[str] = None
+    ) -> str:
+        """
+        Save workflow file to workspace directory (Docker-accessible).
+
+        Args:
+            content: File content to write
+            prefix: Filename prefix
+            suffix: File extension (e.g., '.md', '.html')
+            doc_id: Optional document ID for context
+
+        Returns:
+            File path in workspace (Docker-accessible format)
+        """
+        import uuid
+        import os
+
+        # Get workspace directory (try bash tool first, fallback to session temp)
+        workspace_dir = self._get_workspace_dir()
+
+        # Generate filename
+        filename = f'{prefix}{uuid.uuid4().hex[:8]}{suffix}'
+        file_path = os.path.join(workspace_dir, filename)
+
+        # Write file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # Track for cleanup
+        self._workflow_temp_files.append(file_path)
+
+        # Register in working context if available
+        if self.working_context:
+            resource_id = f"workflow_file_{uuid.uuid4().hex[:8]}"
+            self.working_context.register_resource(
+                resource_id=resource_id,
+                type='workflow_file',
+                path=f'/workspace/{filename}',
+                metadata={
+                    'tool': 'doc_management',
+                    'operation': 'workflow',
+                    'doc_id': doc_id,
+                    'file_type': suffix,
+                    'host_path': file_path
+                }
+            )
+
+        logger.info(f"Created workflow file: {file_path}")
+        return f'/workspace/{filename}'  # Return Docker-accessible path
+
+    def _get_workspace_dir(self) -> str:
+        """Get workspace directory (Docker-accessible temp dir)."""
+        # Try to get from bash tool session
+        if self.bash_tool:
+            bash_instance = getattr(self.bash_tool, '__self__', None)
+            if bash_instance and hasattr(bash_instance, '_bash_session'):
+                session = bash_instance._bash_session
+                if session and hasattr(session, 'session_temp_dir'):
+                    return session.session_temp_dir
+
+        # Fallback: use system temp (same pattern as conversation manager)
+        import tempfile
+        session_id = getattr(self, 'session_id', 'default')
+        workspace_dir = os.path.join(tempfile.gettempdir(), f"session_{session_id}")
+        os.makedirs(workspace_dir, exist_ok=True)
+        return workspace_dir
+
+    # ============================================================================
     # Cleanup
     # ============================================================================
-    
+
     def cleanup_temp_files(self):
         """Clean up any temporary files created during workflows."""
         for temp_file in self._workflow_temp_files:

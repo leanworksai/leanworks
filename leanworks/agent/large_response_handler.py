@@ -87,7 +87,16 @@ class LargeResponseHandler:
                 return (ResponseType.UNSTRUCTURED, True)
         
         if isinstance(result, str):
-            return (ResponseType.UNSTRUCTURED, True)
+            # HTML content from doc tools should be treated as unstructured text
+            # Check for common HTML patterns
+            html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
+            is_html = any(pattern in result for pattern in html_patterns)
+            if is_html:
+                # HTML content - definitely unstructured
+                return (ResponseType.UNSTRUCTURED, True)
+            else:
+                # Plain text - unstructured
+                return (ResponseType.UNSTRUCTURED, True)
         
         # Default to structured for other types
         return (ResponseType.STRUCTURED, True)

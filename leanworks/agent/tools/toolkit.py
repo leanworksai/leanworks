@@ -137,7 +137,8 @@ class ToolUse:
                         bash_tool=self.bash,
                         text_editor_tool=self.text_editor,
                         model_client=self.model_client,
-                        config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None
+                        config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None,
+                        memory_manager=getattr(self, 'memory_manager', None)  # Pass memory manager for working context
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')

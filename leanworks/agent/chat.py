@@ -95,11 +95,12 @@ class ChatAgent:
         
         # Initialize conversation manager
         self.conversation = ConversationManager(
-            self.model_client, 
+            self.model_client,
             self.firestore_client,
             self.org_slug,
-            self.user_id, 
-            self.session_id
+            self.user_id,
+            self.session_id,
+            memory_manager=self.memory_manager
         )
         
         if clear_conversation:

@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
-    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None):
+    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None, memory_manager=None):
         self.model_client = model_client
         self.firestore_client = firestore_client
         self.org_slug = org_slug
         self.user_id = user_id
         self.session_id = session_id
+        self.memory_manager = memory_manager
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
 
@@ -409,15 +410,11 @@ class ConversationManager:
                         response_type, is_large = LargeResponseHandler.classify_response(result)
                         
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
-                            # Check if this is a doc management tool - always use text files (never DuckDB)
-                            if self._is_doc_management_tool(tool_name):
-                                formatted_result = self._handle_large_doc_response(
-                                    result, tool_name, tool_input, tool_use_id, data_sources, function_map
-                                )
-                                tool_results.append(formatted_result)
-                                continue
+                            # Preprocess doc tool responses to HTML before storage
+                            if self._is_doc_content_tool(tool_name):
+                                result = self._preprocess_doc_response(result, tool_name)
 
-                            # Use unified handler for all other tools
+                            # Use unified handler for all tools
                             formatted_result = self.handle_large_response(
                                 result, tool_name, tool_input, tool_use_id, data_sources
                             )
@@ -486,7 +483,14 @@ class ConversationManager:
                                                     data_sources.append(f"Knowledge base: {source_part}")
                                             except Exception as e:
                                                 logger.warning(f"Error parsing source from line: {line}, error: {e}")
-                        
+
+                        elif tool_name in ["get_doc", "search_docs"]:
+                            # Extract document titles/IDs from original result for tracking
+                            if isinstance(result, list):
+                                doc_titles = [doc.get('title', doc.get('id', 'Unknown')) for doc in result if isinstance(doc, dict)]
+                                if doc_titles:
+                                    data_sources.append(f"Documents: {', '.join(doc_titles[:3])}")
+
                         # If tool returns an error object, surface just the error message
                         if isinstance(result, dict) and "error" in result:
                             tool_results.append({
@@ -970,133 +974,6 @@ NOTE: {rag_note}
             # Fallback to truncation
             return self._truncate_response(content, tool_use_id)
     
-    def _handle_large_doc_response(
-        self,
-        result: Any,
-        tool_name: str,
-        tool_input: Dict[str, Any],
-        tool_use_id: str,
-        data_sources: List[str],
-        function_map: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Handle large doc management tool responses by creating temp markdown files.
-        
-        Uses existing DocManagementTool.get_doc_html_path() or create_temp_html_file()
-        to create temporary files that can be accessed via text editor tool.
-        """
-        try:
-            # Extract DocManagementTool instance from function_map
-            doc_tool = None
-            if 'get_doc' in function_map:
-                doc_tool = getattr(function_map['get_doc'], '__self__', None)
-            elif 'get_doc_html_path' in function_map:
-                doc_tool = getattr(function_map['get_doc_html_path'], '__self__', None)
-            
-            if not doc_tool:
-                logger.warning(f"DocManagementTool not available in function_map for {tool_name}, truncating response")
-                return self._truncate_response(result, tool_use_id)
-            
-            # Handle different result types
-            file_paths = []
-            doc_info = []
-            
-            if isinstance(result, list):
-                # List of documents (get_doc, list_docs)
-                for doc in result:
-                    if isinstance(doc, dict) and 'id' in doc:
-                        doc_id = doc.get('id')
-                        doc_title = doc.get('title', 'Untitled')
-                        doc_content = doc.get('content', '')
-                        
-                        try:
-                            # Create temp HTML file with content
-                            file_path = doc_tool.create_temp_html_file(doc_id, doc_content)
-                            file_paths.append(file_path)
-                            doc_info.append({
-                                'title': doc_title,
-                                'id': doc_id,
-                                'file_path': file_path
-                            })
-                            logger.info(f"Created temp file for doc {doc_id}: {file_path}")
-                        except Exception as e:
-                            logger.error(f"Failed to create temp file for doc {doc_id}: {e}")
-                            # Continue with other documents
-                            continue
-            elif isinstance(result, dict):
-                # Single document or error
-                if 'error' in result:
-                    # Error response, return as-is
-                    return {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": str(result.get('error', 'Unknown error'))
-                    }
-                
-                # Single document dict
-                if 'id' in result:
-                    doc_id = result.get('id')
-                    doc_title = result.get('title', 'Untitled')
-                    doc_content = result.get('content', '')
-                    
-                    try:
-                        file_path = doc_tool.create_temp_html_file(doc_id, doc_content)
-                        file_paths.append(file_path)
-                        doc_info.append({
-                            'title': doc_title,
-                            'id': doc_id,
-                            'file_path': file_path
-                        })
-                        logger.info(f"Created temp file for doc {doc_id}: {file_path}")
-                    except Exception as e:
-                        logger.error(f"Failed to create temp file for doc {doc_id}: {e}")
-                        return self._truncate_response(result, tool_use_id)
-            
-            if not file_paths:
-                # No files created, fallback to truncation
-                logger.warning(f"No files created for {tool_name}, truncating response")
-                return self._truncate_response(result, tool_use_id)
-            
-            # Format summary with title, ID, and file path
-            summary_lines = ["Large document response stored in temporary markdown files.\n\nDocuments saved:"]
-            for info in doc_info:
-                summary_lines.append(f'- "{info["title"]}" (ID: {info["id"]}) → {info["file_path"]}')
-            
-            if len(doc_info) == 1:
-                summary_lines.append(f'\nUse text editor tool with path="{doc_info[0]["file_path"]}" to view.')
-            else:
-                summary_lines.append(f'\nUse text editor tool with path="<file_path>" to view any document.')
-            
-            formatted_result = "\n".join(summary_lines)
-            
-            # Track data source
-            data_sources.append(f"Document files: {', '.join(file_paths)}")
-            
-            logger.info(f"Stored large doc response in temp files: {len(file_paths)} files created")
-            
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": formatted_result
-            }
-        except Exception as e:
-            logger.error(f"Failed to store large doc response in temp files: {e}")
-            # Fallback to truncation
-            return self._truncate_response(result, tool_use_id)
-    
-    def _is_doc_management_tool(self, tool_name: str) -> bool:
-        """Check if tool is a doc management tool"""
-        doc_tools = [
-            'get_doc', 'list_docs', 'create_doc', 'update_doc',
-            'get_doc_html_path', 'create_doc_from_html_file',
-            'update_doc_from_html_file',
-            'create_doc_with_workflow', 'update_doc_with_workflow',
-            'generate_toc', 'create_toc_file', 'prepare_section_context',
-            'upsert_section_to_file', 'draft_document_iteratively',
-            'run_quality_passes', 'edit_doc_section', 'search_large_doc',
-            'finalize_doc_update', 'generate_impact_map', 'update_section_with_rag'
-        ]
-        return tool_name in doc_tools
     
     def _get_table_name_for_tool(self, tool_name: str, tool_input: Dict) -> str:
         """Generate appropriate table name based on tool and query"""
@@ -1136,7 +1013,7 @@ NOTE: {rag_note}
 
     def _save_file_to_docker_workspace(self, content: str, tool_name: str, suffix: str = '.txt') -> tuple[str, str]:
         """
-        Save file to Docker workspace directory.
+        Save file to Docker workspace directory and register in working context.
 
         Returns:
             tuple: (host_path, container_path)
@@ -1155,6 +1032,21 @@ NOTE: {rag_note}
         # Write file on host
         with open(host_path, 'w', encoding='utf-8') as f:
             f.write(content)
+
+        # Register in working context if available
+        if self.memory_manager and hasattr(self.memory_manager, 'working_context'):
+            resource_id = f"tool_response_file_{uuid.uuid4().hex[:8]}"
+            self.memory_manager.working_context.register_resource(
+                resource_id=resource_id,
+                type='tool_response_file',
+                path=f'/workspace/{filename}',
+                metadata={
+                    'tool': tool_name,
+                    'host_path': host_path,
+                    'file_type': suffix,
+                    'created_via': 'unified_response_handler'
+                }
+            )
 
         # Return both host path and container path
         container_path = f'/workspace/{filename}'
@@ -1545,16 +1437,86 @@ Preview (first {preview_length} chars):
             "content": serializable_content
         })
 
+    def _is_doc_content_tool(self, tool_name: str) -> bool:
+        """Check if tool returns document content that should be converted to HTML"""
+        DOC_CONTENT_TOOLS = {
+            'get_doc',
+            'search_docs',
+            # list_docs returns previews only, so exclude it
+        }
+        return tool_name in DOC_CONTENT_TOOLS
+
+    def _preprocess_doc_response(self, result: Any, tool_name: str) -> str:
+        """
+        Convert doc management tool responses to clean HTML format.
+
+        Extracts document content and metadata from JSON structure and
+        formats as readable HTML for better storage and RAG indexing.
+
+        Args:
+            result: Doc tool response (List[Dict] or error Dict)
+            tool_name: Name of the doc tool
+
+        Returns:
+            HTML formatted string with document(s) content
+        """
+        # Handle error responses - pass through unchanged
+        if isinstance(result, dict) and 'error' in result:
+            return str(result)  # Convert to string for storage
+
+        # Must be a list of documents
+        if not isinstance(result, list):
+            logger.warning(f"Unexpected doc response type: {type(result)}, returning as-is")
+            return str(result)
+
+        if not result:
+            return "No documents found."
+
+        html_parts = []
+
+        for doc in result:
+            if not isinstance(doc, dict):
+                continue
+
+            doc_id = doc.get('id', 'Unknown')
+            title = doc.get('title', 'Untitled Document')
+            content = doc.get('content', '')
+            owner_email = doc.get('owner_email', 'Unknown')
+            created_at = doc.get('created_at', 'Unknown')
+            updated_at = doc.get('updated_at', 'Unknown')
+
+            # Format metadata as HTML comments
+            metadata = f"""<!-- Document: {title} -->
+<!-- ID: {doc_id} -->
+<!-- Owner: {owner_email} -->
+<!-- Created: {created_at} -->
+<!-- Updated: {updated_at} -->
+
+"""
+
+            # Add title as H1 if content doesn't start with HTML
+            if content and not content.strip().startswith('<'):
+                content = f"<h1>{title}</h1>\n\n{content}"
+
+            # Format document
+            doc_html = f"{metadata}{content}\n\n<!-- End of Document: {title} -->\n\n"
+
+            html_parts.append(doc_html)
+
+        # Join multiple documents with separator
+        separator = "=" * 80 + "\n\n"
+        return separator.join(html_parts)
+
     # Helper function to create a modified copy of parameters
     def create_params_copy(self, params, **modifications):
         params_copy = copy.deepcopy(params)
-        
+
         # Make sure required parameters are present in the copy
         required_params = ["model", "max_tokens", "messages"]
         for param in required_params:
             if param not in params_copy and param not in modifications:
                 raise ValueError(f"Missing required parameter: {param}")
-        
+
         # Apply modifications
         for key, value in modifications.items():
             if value is None and key in params_copy:
@@ -1563,5 +1525,5 @@ Preview (first {preview_length} chars):
                     del params_copy[key]
             elif value is not None:
                 params_copy[key] = value
-                
+
         return params_copy
