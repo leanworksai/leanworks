@@ -82,7 +82,11 @@ class MemoryManager:
         self._token_count_lock = threading.Lock()  # Thread safety
         self._last_token_calculation_turns = 0  # Track when we last calculated
         self._shutdown = False  # Track shutdown state
-        
+
+        # Add working context (in-memory only, no persistence)
+        from leanworks.agent.working_context import WorkingContext
+        self.working_context = WorkingContext()
+
         # Load existing memory state
         self.load_memory_state()
     
@@ -635,17 +639,32 @@ class MemoryManager:
         if len(self.conversation_turns) <= self.recent_turns_to_keep:
             logger.info("Not enough turns to summarize")
             return
-        
+
         # Split conversation into parts to summarize and parts to keep
         turns_to_summarize = self.conversation_turns[:-self.recent_turns_to_keep]
         recent_turns = self.conversation_turns[-self.recent_turns_to_keep:]
-        
+
+        # NEW: Extract facts before summarization
+        from leanworks.agent.fact_extractor import FactExtractor
+        facts = FactExtractor.extract_facts(turns_to_summarize)
+
+        # Register extracted facts in working context
+        for fact_type, values in facts.items():
+            for value in values:
+                resource_id = self._generate_resource_id(fact_type, value)
+                self.working_context.register_resource(
+                    resource_id=resource_id,
+                    type=fact_type,
+                    path=value,
+                    metadata={'extracted_from': 'summarization'}
+                )
+
         # Convert turns to text for summarization
         conversation_text = self._turns_to_text(turns_to_summarize)
-        
+
         try:
-            # Create summarization prompt
-            prompt = self._create_summarization_prompt(conversation_text)
+            # Create enhanced summarization prompt
+            prompt = self._create_enhanced_summarization_prompt(conversation_text, facts)
             
             # Call model for summarization
             messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -743,7 +762,71 @@ New conversation to incorporate:
 Please provide an updated running summary that incorporates both the existing summary and the new conversation content:"""
 
         return prompt
-    
+
+    def _create_enhanced_summarization_prompt(self, conversation_text: str, extracted_facts: Dict) -> str:
+        """Create enhanced prompt that protects technical details"""
+
+        facts_context = self._format_facts_for_prompt(extracted_facts)
+
+        existing_summary_part = ""
+        if self.running_summary:
+            existing_summary_part = f"\n\nExisting running summary:\n{self.running_summary}\n"
+
+        prompt = f"""Update the existing running summary to include the new conversation below.
+
+CRITICAL PRESERVATION RULES:
+1. NEVER omit or condense these technical details:
+   - File paths, especially temporary files (/tmp/, temp directories)
+   - Document/resource IDs (doc-xxx, file-xxx, task-xxx, etc.)
+   - Database/storage references (response_id, query_id, etc.)
+   - Tool call results stored externally
+   - Any specific numbers, codes, or identifiers user referenced
+
+2. Preserve technical facts verbatim using format:
+   [FACT: description | value]
+   Example: [FACT: analysis results stored | /tmp/analysis_abc123.json]
+   Example: [FACT: task query results | response_id: a1b2c3d4]
+
+3. After preserving facts, provide narrative summary focusing on:
+   - Important tasks, decisions, and open questions
+   - Key context and user preferences
+   - Actionable items and ongoing topics
+   - Remain under {self.summary_max_tokens} tokens total
+
+{facts_context}
+
+{existing_summary_part}
+
+New conversation to incorporate:
+{conversation_text}
+
+Provide updated running summary:"""
+
+        return prompt
+
+    def _format_facts_for_prompt(self, facts: Dict) -> str:
+        """Format extracted facts for inclusion in summarization prompt"""
+        if not facts or all(not v for v in facts.values()):
+            return ""
+
+        lines = ["Extracted Technical Facts:"]
+        for fact_type, values in facts.items():
+            if values:
+                lines.append(f"  {fact_type.replace('_', ' ').title()}:")
+                for value in values[:10]:  # Limit to prevent prompt bloat
+                    lines.append(f"    - {value}")
+                if len(values) > 10:
+                    lines.append(f"    ... and {len(values) - 10} more")
+
+        return "\n".join(lines)
+
+    def _generate_resource_id(self, fact_type: str, value: str) -> str:
+        """Generate a unique resource ID for a fact"""
+        import hashlib
+        # Create a hash of the fact to ensure uniqueness
+        fact_hash = hashlib.md5(f"{fact_type}:{value}".encode()).hexdigest()[:8]
+        return f"{fact_type}_{fact_hash}"
+
     def get_context_for_inference(self) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Get the context for model inference.
@@ -790,7 +873,12 @@ Please provide an updated running summary that incorporates both the existing su
         # Add running summary if available
         if self.running_summary:
             context_parts.append(f"Previous Conversation Summary: {self.running_summary}")
-        
+
+        # NEW: Add working context
+        working_resources = self.working_context.get_active_resources()
+        if working_resources:
+            context_parts.append(working_resources)
+
         combined_context = "\n\n".join(context_parts)
         
         # Convert recent turns back to message format

@@ -15,9 +15,8 @@ class ToolRegistry:
     # Server tools (executed by Anthropic)
     SERVER_TOOLS: Set[str] = {
         "web_search",
-        "web_fetch", 
-        "tool_search",
-        "code_execution"
+        "web_fetch",
+        "tool_search"
     }
     
     # Server tool block types in responses

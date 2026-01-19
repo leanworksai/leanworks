@@ -564,18 +564,18 @@ class ToolUse:
     def _create_bash_session(self):
         """Create a persistent bash session using Docker."""
         import uuid
-        
+
         class DockerBashSession:
-            def __init__(self):
+            def __init__(self, session_id=None):
                 # Generate unique container name
                 self.container_name = f"bash-session-{uuid.uuid4().hex[:12]}"
                 self.container_id = None
-                
-                # Get system temp directory to mount into container
-                # This allows files created on the host to be accessible from inside the container
-                host_temp_dir = tempfile.gettempdir()
-                # Mount temp directory at /host-tmp in container
-                container_mount_path = '/host-tmp'
+
+                # Create session-specific temp directory on host
+                session_temp_dir = os.path.join(tempfile.gettempdir(), f"session_{session_id or 'default'}")
+                os.makedirs(session_temp_dir, exist_ok=True)
+                # Mount session temp directory at /workspace in container (read-write)
+                container_mount_path = '/workspace'
                 
                 # Create and start Docker container
                 try:
@@ -585,15 +585,15 @@ class ToolUse:
                         '--name', self.container_name,
                         '--rm',  # Auto-remove when stopped
                         '--network', 'none',  # No network access for security
-                        '--memory', '256m',  # Limit memory to 256MB
+                        '--memory', '512m',  # Increase to 512MB for jq operations
                         '--cpus', '1.0',  # Limit to 1 CPU
                         '--pids-limit', '100',  # Limit number of processes
                         '--read-only',  # Read-only root filesystem
                         '--tmpfs', '/tmp:rw,noexec,nosuid,size=100m',  # Writable /tmp
                         '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
-                        '-v', f'{host_temp_dir}:{container_mount_path}:ro',  # Mount temp dir as read-only
+                        '-v', f'{session_temp_dir}:{container_mount_path}:rw',  # Mount session dir as writable
                         'alpine:latest',
-                        'sh', '-c', 'tail -f /dev/null'  # Keep container running
+                        'sh', '-c', 'apk add --no-cache jq bash grep sed coreutils && tail -f /dev/null'  # Install jq, bash tools, and text editors
                     ]
                     
                     result = subprocess.run(
@@ -607,9 +607,9 @@ class ToolUse:
                         raise Exception(f"Failed to create Docker container: {result.stderr}")
                     
                     self.container_id = result.stdout.strip()
-                    self.host_temp_dir = host_temp_dir
-                    self.container_mount_path = container_mount_path
-                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with temp dir mounted at {container_mount_path}")
+                    self.session_temp_dir = session_temp_dir
+                    self.container_workspace_path = container_mount_path
+                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
                     
                 except FileNotFoundError:
                     raise Exception("Docker is not installed or not in PATH")
@@ -619,55 +619,56 @@ class ToolUse:
                     logger.error(f"Error creating Docker container: {e}")
                     raise
         
-        return DockerBashSession()
+        # Get session_id from ToolUse instance (assuming it's available)
+        session_id = getattr(self, 'session_id', None)
+        return DockerBashSession(session_id=session_id)
     
     def _translate_path_for_container(self, command: str, session) -> str:
         """
-        Translate file paths in command from host temp directory to container mount path.
-        
+        Translate file paths in command from host session directory to container workspace path.
+
         Args:
             command: The bash command with potential file paths
             session: DockerBashSession instance with mount info
-            
+
         Returns:
             Command with translated paths
         """
-        if not hasattr(session, 'host_temp_dir') or not hasattr(session, 'container_mount_path'):
+        if not hasattr(session, 'session_temp_dir') or not hasattr(session, 'container_workspace_path'):
             return command
-        
-        host_temp_dir = session.host_temp_dir
-        container_mount_path = session.container_mount_path
-        
+
+        session_temp_dir = session.session_temp_dir
+        container_workspace_path = session.container_workspace_path
+
         # Normalize paths for comparison
-        host_temp_dir_norm = os.path.normpath(host_temp_dir)
-        
-        # Simple approach: replace temp directory path with container mount path
-        if host_temp_dir_norm in command:
-            # Escape special regex characters in the temp directory path
-            escaped_temp_dir = re.escape(host_temp_dir_norm)
-            
-            def replace_temp_path(match):
+        session_temp_dir_norm = os.path.normpath(session_temp_dir)
+
+        # Replace session directory paths with workspace paths
+        if session_temp_dir_norm in command:
+            # Escape special regex characters in the session directory path
+            escaped_temp_dir = re.escape(session_temp_dir_norm)
+
+            def replace_session_path(match):
                 matched_path = match.group(0)
-                # Get the relative path from temp directory
-                if matched_path.startswith(host_temp_dir_norm):
-                    rel_path = matched_path[len(host_temp_dir_norm):].lstrip(os.sep)
+                # Get the relative path from session directory
+                if matched_path.startswith(session_temp_dir_norm):
+                    rel_path = matched_path[len(session_temp_dir_norm):].lstrip(os.sep)
                     if rel_path:
-                        # Construct container path
-                        container_path = os.path.join(container_mount_path, rel_path).replace('\\', '/')
+                        # Construct container workspace path
+                        container_path = os.path.join(container_workspace_path, rel_path).replace('\\', '/')
                     else:
-                        container_path = container_mount_path
+                        container_path = container_workspace_path
                     return container_path
                 return matched_path
-            
-            # Replace temp directory paths (match the temp dir followed by any path characters)
-            # This pattern matches the temp dir path and everything after it until a space, quote, or special char
+
+            # Replace session directory paths
             translated_command = re.sub(
                 escaped_temp_dir + r'[^\s"\'<>|&;()]*',
-                replace_temp_path,
+                replace_session_path,
                 command
             )
             return translated_command
-        
+
         return command
     
     def _execute_bash_command_in_session(self, command: str, timeout: int = 30) -> dict:
@@ -703,7 +704,7 @@ class ToolUse:
                 logger.warning(f"Container {session.container_name} is not running, recreating...")
                 try:
                     # Try to remove old container if it exists
-                    subprocess.run(['docker', 'rm', '-f', session.container_name], 
+                    subprocess.run(['docker', 'rm', '-f', session.container_name],
                                  capture_output=True, timeout=5)
                 except:
                     pass
@@ -712,41 +713,58 @@ class ToolUse:
             
             # Translate file paths from host temp directory to container mount path
             translated_command = self._translate_path_for_container(command, session)
-            
-            # Execute command in Docker container
-            # Use sh -c to execute the command (alpine uses sh, not bash)
-            exec_cmd = [
-                'docker', 'exec',
-                session.container_name,
-                'sh', '-c', translated_command
-            ]
-            
-            try:
-                result = subprocess.run(
-                    exec_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout
-                )
-                
-                return {
-                    "output": result.stdout,
-                    "error": result.stderr,
-                    "return_code": result.returncode
-                }
-            except subprocess.TimeoutExpired:
-                # Kill the command if it times out
+
+            # If command references /workspace paths, ensure they exist on host to avoid container 404s
+            if "/workspace" in translated_command:
                 try:
-                    subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
-                                 capture_output=True, timeout=5)
-                except:
+                    parts = translated_command.split()
+                    missing = False
+                    for part in parts:
+                        if part.startswith("/workspace"):
+                            host_path = os.path.join(session.session_temp_dir, os.path.relpath(part, "/workspace"))
+                            if not os.path.exists(host_path):
+                                missing = True
+                                break
+                    if missing:
+                        return {"output": "", "error": "Referenced file does not exist on host for /workspace path", "return_code": 1}
+                except Exception:
                     pass
                 
-                return {
-                    "output": "",
-                    "error": f"Command timed out after {timeout} seconds",
-                    "return_code": -1
-                }
+                # Execute command in Docker container
+                # Use sh -c to execute the command (alpine uses sh, not bash)
+                # Change to workspace directory for consistent file operations
+                exec_cmd = [
+                    'docker', 'exec',
+                    session.container_name,
+                    'sh', '-c', f'cd /workspace && {translated_command}'
+                ]
+                
+                try:
+                    result = subprocess.run(
+                        exec_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout
+                    )
+                    
+                    return {
+                        "output": result.stdout,
+                        "error": result.stderr,
+                        "return_code": result.returncode
+                    }
+                except subprocess.TimeoutExpired:
+                    # Kill the command if it times out
+                    try:
+                        subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
+                                     capture_output=True, timeout=5)
+                    except:
+                        pass
+                    
+                    return {
+                        "output": "",
+                        "error": f"Command timed out after {timeout} seconds",
+                        "return_code": -1
+                    }
                 
         except Exception as e:
             logger.error(f"Error executing bash command in Docker: {e}")
@@ -767,65 +785,7 @@ class ToolUse:
             resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
         except Exception as e:
             logger.warning(f"Could not set all resource limits: {e}")
-    
-    def _execute_code(self, code: str, language: str = "python", timeout: int = 30) -> dict:
-        """
-        Execute code in a sandboxed environment.
-        
-        Args:
-            code: The code to execute
-            language: Programming language (python, javascript, etc.)
-            timeout: Maximum execution time in seconds (default: 30)
-            
-        Returns:
-            dict with 'output' and 'error' keys
-        """
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                if language.lower() == "python":
-                    # Write code to temporary file
-                    code_file = os.path.join(temp_dir, "code.py")
-                    with open(code_file, 'w') as f:
-                        f.write(code)
-                    
-                    # Execute Python code
-                    process = subprocess.Popen(
-                        ["python3", code_file],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        cwd=temp_dir,
-                        preexec_fn=lambda: self._set_resource_limits()
-                    )
-                    
-                    try:
-                        stdout, stderr = process.communicate(timeout=timeout)
-                        return {
-                            "output": stdout.decode('utf-8', errors='replace'),
-                            "error": stderr.decode('utf-8', errors='replace'),
-                            "return_code": process.returncode
-                        }
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-                        return {
-                            "output": "",
-                            "error": f"Code execution timed out after {timeout} seconds",
-                            "return_code": -1
-                        }
-                else:
-                    return {
-                        "output": "",
-                        "error": f"Unsupported language: {language}. Currently only 'python' is supported.",
-                        "return_code": -1
-                    }
-        except Exception as e:
-            logger.error(f"Error executing code: {e}")
-            return {
-                "output": "",
-                "error": f"Error executing code: {str(e)}",
-                "return_code": -1
-            }
-    
+
     def _handle_text_editor(self, action: str, file_path: str = None, content: str = None, start_line: int = None, end_line: int = None) -> dict:
         """
         Handle text editor operations.
@@ -960,6 +920,15 @@ class ToolUse:
         if not command:
             return "Error: command is required unless restart is true"
 
+        # Prevent tight loops on identical commands
+        if getattr(self, "_bash_last_cmd", None) == command:
+            self._bash_last_cmd_count = getattr(self, "_bash_last_cmd_count", 0) + 1
+        else:
+            self._bash_last_cmd = command
+            self._bash_last_cmd_count = 1
+        if self._bash_last_cmd_count > 2:
+            return f"Error: repeated bash command detected, aborting: {command}"
+
         
         # Use persistent session if available, otherwise create one
         if not hasattr(self, '_bash_session') or self._bash_session is None:
@@ -975,7 +944,43 @@ class ToolUse:
             error_msg = result['error'] if result['error'] else "No error message"
             output_msg = result['output'] if result['output'] else "No output"
             return f"Error (return code {result['return_code']}): {error_msg}\nOutput: {output_msg}"
-    
+
+    def jq(self, query: str = None, file_path: str = None) -> str:
+        """Execute jq queries on JSON files in the Docker container."""
+        if not query:
+            return "Error: query is required"
+        if not file_path:
+            return "Error: file_path is required"
+
+        # Construct jq command
+        jq_command = f"jq '{query}' '{file_path}'"
+
+        # Execute via bash tool
+        return self.bash(jq_command)
+
+    @property
+    def jq_tool_property(self):
+        """jq tool specification for JSON querying."""
+        return {
+            "type": "custom",
+            "name": "jq",
+            "description": "Execute jq queries on JSON files stored in the Docker workspace. Use container paths (e.g., /workspace/file.json) for file_path parameter.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "jq query string (e.g., '.items[] | select(.active)', '.user.name')"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to JSON file in Docker container (use /workspace/filename.json)"
+                    }
+                },
+                "required": ["query", "file_path"]
+            }
+        }
+
     @property
     def text_editor_tool_property(self):
         """Text editor tool specification (Anthropic-defined schema-less tool)."""
@@ -1093,7 +1098,51 @@ class ToolUse:
                 "line_count": 0,
                 "estimated": False
             }
-    
+
+    def _ensure_container_path(self, path: str) -> str:
+        """
+        Ensure path is in container workspace format.
+        Converts host paths to container paths automatically.
+
+        Args:
+            path: User-provided path (could be host or container format)
+
+        Returns:
+            Container path format (/workspace/filename)
+        """
+        # If already a container path, return as-is
+        if path.startswith('/workspace/'):
+            return path
+
+        # Extract filename from any path format
+        filename = os.path.basename(path)
+
+        # Return container format
+        return f'/workspace/{filename}'
+
+    def _escape_for_bash(self, text: str) -> str:
+        """Escape text for safe bash usage"""
+        # Escape single quotes for heredoc/sed
+        return text.replace("'", "'\\''")
+
+    def _escape_for_sed(self, text: str) -> str:
+        """Escape text for sed patterns"""
+        # Escape sed special characters
+        special_chars = ['/', '&', '\\']
+        escaped = text
+        for char in special_chars:
+            escaped = escaped.replace(char, '\\' + char)
+        return escaped
+
+    def _is_bash_error(self, result: str) -> bool:
+        """Check if bash command result indicates an error"""
+        return (
+            result.startswith("Error") or
+            "return code" in result.lower() or
+            "not found" in result.lower() or
+            "permission denied" in result.lower()
+        )
+
     def _handle_text_editor_from_kwargs(self, **kwargs) -> dict:
         """
         Handle text editor operations from Claude's tool call parameters.
@@ -1110,274 +1159,104 @@ class ToolUse:
         if 'file_text' in kwargs:
             path = kwargs.get('path')
             file_text = kwargs.get('file_text')
-            
+
             if not path:
                 return {"error": "path is required for create operation"}
-            
-            # Determine safe directory
-            safe_dir = os.getcwd()
-            if not os.path.exists(safe_dir):
-                safe_dir = tempfile.gettempdir()
-            
-            # Handle absolute paths or relative paths
-            if os.path.isabs(path):
-                temp_dir = tempfile.gettempdir()
-                if path.startswith(temp_dir):
-                    full_path = path
-                else:
-                    full_path = os.path.join(safe_dir, os.path.basename(path))
-            else:
-                full_path = os.path.join(safe_dir, path)
-            
-            # Security check
-            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
-                return {"error": "File path is outside safe directory"}
-            
-            # Create directory if needed
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            # Write file
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.write(file_text)
-            
-            return {"success": True, "file_path": path, "message": f"File created successfully"}
+
+            container_path = self._ensure_container_path(path)
+
+            # Use heredoc for safe multi-line content
+            # self.bash() automatically executes this in Docker
+            bash_cmd = f"""cat > {container_path} << 'EOF'
+{file_text}
+EOF"""
+
+            result = self.bash(bash_cmd)
+
+            if self._is_bash_error(result):
+                return {"error": f"Failed to create file: {result}"}
+
+            return {"success": True, "file_path": path, "message": "File created successfully"}
         
         # Handle 'str_replace' command
         if 'old_str' in kwargs and 'new_str' in kwargs:
             path = kwargs.get('path')
             old_str = kwargs.get('old_str')
             new_str = kwargs.get('new_str')
-            
+
             if not path:
                 return {"error": "path is required for str_replace operation"}
-            
-            # Determine safe directory
-            safe_dir = os.getcwd()
-            if not os.path.exists(safe_dir):
-                safe_dir = tempfile.gettempdir()
-            
-            # Handle absolute paths or relative paths
-            if os.path.isabs(path):
-                temp_dir = tempfile.gettempdir()
-                if path.startswith(temp_dir):
-                    full_path = path
-                else:
-                    full_path = os.path.join(safe_dir, os.path.basename(path))
-            else:
-                full_path = os.path.join(safe_dir, path)
-            
-            # Security check
-            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
-                return {"error": "File path is outside safe directory"}
-            
-            if not os.path.exists(full_path):
-                return {"error": f"File not found: {path}"}
-            
-            # Read file
-            with open(full_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Count occurrences
-            count = content.count(old_str)
+
+            container_path = self._ensure_container_path(path)
+
+            # Count occurrences (bash auto-executes in Docker)
+            count_cmd = f"grep -o -F '{self._escape_for_bash(old_str)}' {container_path} | wc -l"
+            count_result = self.bash(count_cmd)
+            count = int(count_result.strip()) if count_result.strip().isdigit() else 0
+
             if count == 0:
-                return {"error": f"No matches found for the string to replace in {path}"}
+                return {"error": f"No matches found"}
             if count > 1:
-                return {"error": f"Multiple matches ({count}) found for the string to replace. Please be more specific."}
-            
-            # Replace
-            new_content = content.replace(old_str, new_str, 1)  # Replace only first occurrence
-            
-            # Write back
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            
-            return {"success": True, "file_path": path, "message": f"String replaced successfully in {path}"}
+                return {"error": f"Multiple matches ({count}) found. Be more specific."}
+
+            # Perform replacement (bash auto-executes in Docker)
+            sed_cmd = f"sed -i '0,/{self._escape_for_sed(old_str)}/s//{self._escape_for_sed(new_str)}/' {container_path}"
+            result = self.bash(sed_cmd)
+
+            if self._is_bash_error(result):
+                return {"error": result}
+
+            return {"success": True, "file_path": path, "message": "String replaced successfully"}
         
         # Handle 'insert' command
         if 'insert_line' in kwargs and 'new_str' in kwargs:
             path = kwargs.get('path')
             insert_line = kwargs.get('insert_line')
             new_str = kwargs.get('new_str')
-            
+
             if not path:
                 return {"error": "path is required for insert operation"}
-            
-            # Determine safe directory
-            safe_dir = os.getcwd()
-            if not os.path.exists(safe_dir):
-                safe_dir = tempfile.gettempdir()
-            
-            # Handle absolute paths or relative paths
-            if os.path.isabs(path):
-                temp_dir = tempfile.gettempdir()
-                if path.startswith(temp_dir):
-                    full_path = path
-                else:
-                    full_path = os.path.join(safe_dir, os.path.basename(path))
-            else:
-                full_path = os.path.join(safe_dir, path)
-            
-            # Security check
-            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
-                return {"error": "File path is outside safe directory"}
-            
-            if not os.path.exists(full_path):
-                return {"error": f"File not found: {path}"}
-            
-            # Read file
-            with open(full_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            # Insert at specified line (1-indexed, insert after the line)
-            if insert_line < 0:
-                insert_line = 0
-            if insert_line > len(lines):
-                insert_line = len(lines)
-            
-            # Insert the new string (add newline if new_str doesn't end with one)
-            insert_text = new_str if new_str.endswith('\n') else new_str + '\n'
-            lines.insert(insert_line, insert_text)
-            
-            # Write back
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-            
-            return {"success": True, "file_path": path, "message": f"Text inserted successfully at line {insert_line + 1}"}
+
+            container_path = self._ensure_container_path(path)
+
+            # Insert text (bash auto-executes in Docker)
+            escaped_text = self._escape_for_bash(new_str)
+            sed_cmd = f"sed -i '{insert_line}i\\{escaped_text}' {container_path}"
+            result = self.bash(sed_cmd)
+
+            if self._is_bash_error(result):
+                return {"error": result}
+
+            return {"success": True, "file_path": path, "message": f"Text inserted at line {insert_line}"}
         
         # Handle 'view' command (default if only path is provided)
         if 'path' in kwargs:
             path = kwargs.get('path')
             view_range = kwargs.get('view_range')  # Optional: [start_line, end_line]
             max_characters = kwargs.get('max_characters')  # Optional
-            
-            # Determine safe directory
-            safe_dir = os.getcwd()
-            if not os.path.exists(safe_dir):
-                safe_dir = tempfile.gettempdir()
-            
-            # Handle absolute paths or relative paths
-            if os.path.isabs(path):
-                # If absolute path, check if it's in temp directory (for doc management files)
-                temp_dir = tempfile.gettempdir()
-                if path.startswith(temp_dir):
-                    # It's a temp file, use it directly
-                    full_path = path
-                else:
-                    # Absolute path outside temp - treat as relative to safe_dir
-                    full_path = os.path.join(safe_dir, os.path.basename(path))
-            else:
-                # Relative path
-                full_path = os.path.join(safe_dir, path)
-            
-            # Security check
-            if not os.path.abspath(full_path).startswith(os.path.abspath(safe_dir)) and not full_path.startswith(tempfile.gettempdir()):
-                return {"error": "File path is outside safe directory"}
-            
-            if not os.path.exists(full_path):
-                return {"error": f"File not found: {path}"}
-            
-            # Check if file is large
-            file_metadata = self._is_large_file(full_path)
-            is_large = file_metadata.get("is_large", False)
-            
-            # For large files, enforce restrictions
-            if is_large:
-                # Check if view_range or max_characters is provided
-                has_view_range = view_range and len(view_range) == 2
-                has_max_chars = max_characters is not None
-                
-                if not has_view_range and not has_max_chars:
-                    # Large file without limits - return error with grep suggestions
-                    from leanworks.setting import TEXT_EDITOR_CONFIG
-                    return {
-                        "error": "Cannot view entire large file. File is too large.",
-                        "file_size_bytes": file_metadata.get("size_bytes", 0),
-                        "file_size_mb": file_metadata.get("size_mb", 0.0),
-                        "estimated_lines": file_metadata.get("line_count", 0),
-                        "line_count_estimated": file_metadata.get("estimated", False),
-                        "suggestion": "Use grep to locate relevant sections first, then view specific line ranges.",
-                        "example_commands": [
-                            f"Use bash tool: grep -n 'search_term' {path}",
-                            f"Or with context: grep -n -A 5 -B 5 'search_term' {path}",
-                            "Then use view with view_range: [start_line, end_line]",
-                            f"Or use view with max_characters: {TEXT_EDITOR_CONFIG.get('max_view_chars_default', 50000)}"
-                        ],
-                        "instructions": "For large files, you must first use grep (via bash tool) to locate the area of interest, then use view with view_range or max_characters to view only that specific section."
-                    }
-            
-            # Read file content (with limits if large)
-            with open(full_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            total_lines = len(lines)
 
-            if not view_range and max_characters is None:
-                doc_id = None
-                base_name = os.path.basename(full_path)
-                match = re.match(r"^doc_([^_]+)_", base_name)
-                if match:
-                    doc_id = match.group(1)
-                if doc_id and self.doc_management_tool:
-                    positions = self.doc_management_tool.get_selected_text_positions(doc_id)
-                else:
-                    positions = None
-                if positions:
-                    def line_for_offset(all_lines, offset):
-                        running = 0
-                        for idx, line in enumerate(all_lines, start=1):
-                            running += len(line)
-                            if offset < running:
-                                return idx
-                        return len(all_lines) if all_lines else 1
+            # Convert to container path
+            container_path = self._ensure_container_path(path)
 
-                    html_from = positions.get("html_from")
-                    html_to = positions.get("html_to")
-                    if isinstance(html_from, int) and isinstance(html_to, int):
-                        start_line = line_for_offset(lines, max(0, html_from))
-                        end_line = line_for_offset(lines, max(0, html_to))
-                        context_lines = 5
-                        view_range = [
-                            max(1, start_line - context_lines),
-                            min(total_lines, end_line + context_lines)
-                        ]
-            
-            # Apply view_range if specified
+            # Build bash command - automatically executes in Docker via self.bash()
             if view_range and len(view_range) == 2:
                 start_line, end_line = view_range
-                # Convert to 0-indexed and handle bounds
-                start_idx = max(0, start_line - 1) if start_line > 0 else 0
-                end_idx = min(len(lines), end_line) if end_line > 0 else len(lines)
-                content = ''.join(lines[start_idx:end_idx])
+                bash_cmd = f"sed -n '{start_line},{end_line}p' {container_path}"
+            elif max_characters:
+                bash_cmd = f"head -c {max_characters} {container_path}"
             else:
-                content = ''.join(lines)
-            
-            # Apply max_characters limit if specified
-            if max_characters and len(content) > max_characters:
-                content = content[:max_characters] + "\n... [truncated]"
-            
-            # For large files with only one limit, apply additional safety limit
-            if is_large:
-                from leanworks.setting import TEXT_EDITOR_CONFIG
-                if view_range and not max_characters:
-                    # Apply character limit as safety even if view_range is provided
-                    max_chars = TEXT_EDITOR_CONFIG.get("max_view_chars_default", 50000)
-                    if len(content) > max_chars:
-                        content = content[:max_chars] + "\n... [truncated]"
-                elif max_characters and not view_range:
-                    # Apply line limit as safety
-                    max_lines = TEXT_EDITOR_CONFIG.get("max_view_lines_default", 500)
-                    if total_lines > max_lines:
-                        # Truncate to first max_lines
-                        content = ''.join(lines[:max_lines]) + "\n... [truncated (file has more lines)]"
-            
-            # Return content with file metadata
+                bash_cmd = f"cat {container_path}"
+
+            # Execute in Docker (self.bash automatically handles Docker routing)
+            content = self.bash(bash_cmd)
+
+            # Check for errors
+            if self._is_bash_error(content):
+                return {"error": f"Failed to read file: {content}"}
+
             return {
                 "content": content,
-                "file_path": path,
-                "file_size_bytes": file_metadata.get("size_bytes", 0),
-                "file_size_mb": file_metadata.get("size_mb", 0.0),
-                "total_lines": total_lines,
-                "line_count_estimated": file_metadata.get("estimated", False)
+                "file_path": path
             }
         
         # If no recognized command, return error
@@ -1557,7 +1436,7 @@ class ToolUse:
                 ])
                 logger.info("DuckDB tools added to tools list (query_response, get_schema)")
             
-            # Add client tools (bash and text_editor - code_execution is a server tool)
+            # Add client tools (bash and text_editor)
             # These are always available as they don't require external dependencies
             self._tools_cache.extend([
                 self.bash_tool_property,
@@ -1743,7 +1622,7 @@ class ToolUse:
                 })
 
             # Add client tool function mappings (always available)
-            # Note: bash and text_editor are client tools, code_execution is a server tool
+            # Note: bash and text_editor are client tools
             # text_editor tool uses name "str_replace_based_edit_tool" in the API for version 20250728
             self._function_map_cache.update({
                 "bash": self.bash,

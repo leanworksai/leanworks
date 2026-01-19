@@ -202,6 +202,12 @@ class ClientToolResponseHandler(ToolResponseHandler):
             data_sources,
             rag_storage=rag_storage
         )
+
+        # Register tool resources in working context
+        memory_manager = context.get('memory_manager')
+        if memory_manager and hasattr(memory_manager, 'working_context'):
+            self._register_tool_resources(tool_results, memory_manager.working_context)
+
         conversation.add_tool_results(tool_results)
         
         # Show tool results summary if streaming is enabled
@@ -211,6 +217,72 @@ class ClientToolResponseHandler(ToolResponseHandler):
         # Client tools require another API call to get final response
         # Return None to continue the loop
         return None
+
+    def _register_tool_resources(self, tool_results, working_context):
+        """
+        Register tool-generated resources in working context.
+
+        Args:
+            tool_results: List of tool result dictionaries
+            working_context: WorkingContext instance
+        """
+        for tool_result in tool_results:
+            if tool_result.get("role") == "user" and isinstance(tool_result.get("content"), list):
+                for content_block in tool_result["content"]:
+                    if content_block.get("type") == "tool_result":
+                        tool_name = content_block.get("tool_call_id", "").split(".")[0] if "." in content_block.get("tool_call_id", "") else None
+                        result_content = content_block.get("content", "")
+
+                        # Register DuckDB response resources
+                        if tool_name == "save_data_to_duckdb" and isinstance(result_content, dict):
+                            response_id = result_content.get("response_id")
+                            if response_id:
+                                working_context.register_resource(
+                                    resource_id=response_id,
+                                    type='storage_ref',
+                                    path=f'duckdb:response_id:{response_id}',
+                                    metadata={
+                                        'tool': 'duckdb',
+                                        'operation': 'save_data',
+                                        'created_at': 'tool_execution'
+                                    }
+                                )
+                                logger.debug(f"Registered DuckDB resource in working context: {response_id}")
+
+                        # Register file path resources (temp files, etc.)
+                        if isinstance(result_content, str):
+                            # Look for file paths in result content
+                            import re
+                            file_paths = re.findall(r'(/[\w/.-]+\.\w+|\.{0,2}/[\w/.-]+)', result_content)
+                            for file_path in file_paths:
+                                if '/tmp/' in file_path or 'temp_' in file_path:
+                                    resource_id = f"temp_file_{hash(file_path) % 10000}"
+                                    working_context.register_resource(
+                                        resource_id=resource_id,
+                                        type='temp_file',
+                                        path=file_path,
+                                        metadata={
+                                            'tool': tool_name,
+                                            'source': 'tool_result'
+                                        }
+                                    )
+                                    logger.debug(f"Registered temp file in working context: {file_path}")
+
+                        # Register document IDs
+                        if isinstance(result_content, str):
+                            doc_ids = re.findall(r'\b(doc-|file-|task-|proj-)[a-zA-Z0-9]+\b', result_content)
+                            for doc_id in doc_ids:
+                                resource_id = f"doc_{doc_id}"
+                                working_context.register_resource(
+                                    resource_id=resource_id,
+                                    type='document_id',
+                                    path=doc_id,
+                                    metadata={
+                                        'tool': tool_name,
+                                        'source': 'tool_result'
+                                    }
+                                )
+                                logger.debug(f"Registered document ID in working context: {doc_id}")
     
     def _show_tool_results(self, tool_results):
         """Display tool results information"""

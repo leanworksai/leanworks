@@ -20,7 +20,13 @@ class ConversationManager:
         self.session_id = session_id
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
-        
+
+        # Initialize background indexing manager for RAG
+        from leanworks.agent.tools.rag_storage import BackgroundIndexingManager
+        from leanworks.setting import LARGE_RESPONSE_CONFIG
+        max_workers = LARGE_RESPONSE_CONFIG.get("rag_indexing_thread_pool_size", 2)
+        self.background_indexing_manager = BackgroundIndexingManager(max_workers=max_workers)
+
         # Note: Conversation is now loaded from messages collection (source of truth)
         # This is done in ChatAgent.__init__ or ChatAgent.process_message()
     
@@ -403,8 +409,6 @@ class ConversationManager:
                         response_type, is_large = LargeResponseHandler.classify_response(result)
                         
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
-                            logger.info(f"Large response detected for {tool_name}: type={response_type.value}, size={LargeResponseHandler.estimate_tokens(result)} tokens")
-                            
                             # Check if this is a doc management tool - always use text files (never DuckDB)
                             if self._is_doc_management_tool(tool_name):
                                 formatted_result = self._handle_large_doc_response(
@@ -412,43 +416,13 @@ class ConversationManager:
                                 )
                                 tool_results.append(formatted_result)
                                 continue
-                            
-                            # For other tools, use existing logic (DuckDB for structured, RAG for unstructured)
-                            if response_type == ResponseType.STRUCTURED:
-                                # Store in DuckDB
-                                formatted_result = self._handle_large_structured_response(
-                                    result, tool_name, tool_input, tool_use_id, data_sources
-                                )
-                                tool_results.append(formatted_result)
-                                continue
-                            
-                            elif response_type == ResponseType.UNSTRUCTURED:
-                                # Store as text file
-                                formatted_result = self._handle_large_unstructured_response(
-                                    result, tool_name, tool_input, tool_use_id, data_sources
-                                )
-                                tool_results.append(formatted_result)
-                                continue
-                            
-                            elif response_type == ResponseType.MIXED:
-                                # Split and handle both
-                                structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
-                                
-                                # Handle structured part
-                                if structured_part:
-                                    formatted_result = self._handle_large_structured_response(
-                                        structured_part, tool_name, tool_input, tool_use_id, data_sources
-                                    )
-                                    tool_results.append(formatted_result)
-                                
-                                # Handle unstructured part
-                                if unstructured_part:
-                                    # Store as text file
-                                    formatted_result = self._handle_large_unstructured_response(
-                                        unstructured_part, tool_name, tool_input, tool_use_id, data_sources
-                                    )
-                                    tool_results.append(formatted_result)
-                                continue
+
+                            # Use unified handler for all other tools
+                            formatted_result = self.handle_large_response(
+                                result, tool_name, tool_input, tool_use_id, data_sources
+                            )
+                            tool_results.append(formatted_result)
+                            continue
                         
                         # Track data sources based on tool type
                         if tool_name == "query_postgres":
@@ -572,7 +546,87 @@ class ConversationManager:
                     })
         
         return tool_results
-    
+
+    def handle_large_response(
+        self,
+        result: Any,
+        tool_name: str,
+        tool_input: Dict,
+        tool_use_id: str,
+        data_sources: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Unified entry point for handling all large tool responses.
+        Routes to appropriate storage method based on data format and complexity.
+
+        Args:
+            result: The tool response data
+            tool_name: Name of the tool that generated the response
+            tool_input: Input parameters passed to the tool
+            tool_use_id: Unique identifier for this tool use
+            data_sources: List to append data source tracking info
+
+        Returns:
+            Formatted tool result with storage instructions
+        """
+        from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
+
+        # Classify response type and check if large
+        response_type, is_large = LargeResponseHandler.classify_response(result)
+
+        if not is_large:
+            # Small response - should not reach here, but fallback
+            logger.warning(f"handle_large_response called with small response: {response_type}")
+            return self._truncate_response(result, tool_use_id)
+
+        logger.info(f"Routing large response for {tool_name}: type={response_type.value}")
+
+        # Route to appropriate handler based on classification
+        if response_type == ResponseType.STRUCTURED_SIMPLE:
+            # Simple JSON → DuckDB
+            return self._handle_large_structured_response(
+                result, tool_name, tool_input, tool_use_id, data_sources
+            )
+
+        elif response_type == ResponseType.STRUCTURED_COMPLEX:
+            # Complex JSON → jq + file
+            return self._handle_json_file_storage(
+                result, tool_name, tool_input, tool_use_id, data_sources
+            )
+
+        elif response_type == ResponseType.UNSTRUCTURED:
+            # Text → hybrid file + background RAG
+            return self._handle_hybrid_text_and_rag_storage(
+                result, tool_name, tool_input, tool_use_id, data_sources
+            )
+
+        elif response_type == ResponseType.MIXED:
+            # Split and handle both parts
+            structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
+            results = []
+
+            # Handle structured part (use simple DuckDB for mixed responses)
+            if structured_part:
+                structured_result = self._handle_large_structured_response(
+                    structured_part, tool_name, tool_input, tool_use_id, data_sources
+                )
+                results.append(structured_result)
+
+            # Handle unstructured part (hybrid approach)
+            if unstructured_part:
+                unstructured_result = self._handle_hybrid_text_and_rag_storage(
+                    unstructured_part, tool_name, tool_input, tool_use_id, data_sources
+                )
+                results.append(unstructured_result)
+
+            # Return the first result (primary) - mixed responses are rare
+            return results[0] if results else self._truncate_response(result, tool_use_id)
+
+        else:
+            # Unknown type - fallback to truncation
+            logger.warning(f"Unknown response type: {response_type}")
+            return self._truncate_response(result, tool_use_id)
+
     def _handle_large_structured_response(
         self,
         result: Any,
@@ -625,7 +679,204 @@ class ConversationManager:
             logger.error(f"Failed to store large structured response in DuckDB: {e}")
             # Fallback to truncation
             return self._truncate_response(result, tool_use_id)
-    
+
+    def _handle_json_file_storage(
+        self,
+        result: Any,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Store complex JSON in file for jq access.
+
+        Args:
+            result: Complex JSON data to store
+            tool_name: Name of the tool that generated this
+            tool_input: Input parameters to the tool
+            tool_use_id: Tool use ID for tracking
+            data_sources: List to append data source info
+
+        Returns:
+            Formatted result with file path for jq access
+        """
+        import json
+
+        # 1. Save JSON to Docker workspace (mounted directory)
+        host_path, container_path = self._save_file_to_docker_workspace(
+            json.dumps(result, indent=2),
+            tool_name,
+            suffix='.json'
+        )
+
+        # 2. Analyze JSON structure for summary
+        from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
+        complexity_info = JSONComplexityAnalyzer.analyze(result)
+
+        # 3. Generate summary
+        summary = self._generate_response_summary(result, tool_name)
+
+        # 4. Format response with jq instructions (use CONTAINER path)
+        formatted_result = f"""Complex JSON saved to: {container_path}
+- Max depth: {complexity_info['max_depth']} levels
+- Total keys: {complexity_info['key_count']}
+- Structure: {summary.get('type', 'unknown')}
+
+Query with jq via bash tool:
+- View all: jq '.' {container_path}
+- Navigate: jq '.path.to.field' {container_path}
+- Filter: jq '.items[] | select(.key == "value")' {container_path}
+- Count items: jq '.items | length' {container_path}
+
+All operations use: {container_path}
+"""
+
+        # Track data source
+        data_sources.append(f"JSON file: {container_path}")
+
+        logger.info(f"Stored complex JSON: host={host_path}, container={container_path}")
+
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": formatted_result
+        }
+
+    def _handle_hybrid_text_and_rag_storage(
+        self,
+        content: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        data_sources: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Store large unstructured response with hybrid approach:
+        1. Save text file immediately (synchronous)
+        2. Start background RAG indexing (asynchronous, non-blocking)
+        3. Return immediately with both access methods
+        """
+        import uuid
+
+        # STEP 1: Save text file to Docker workspace (synchronous)
+        host_path, container_path = self._save_file_to_docker_workspace(
+            content,
+            tool_name,
+            suffix='.txt'
+        )
+
+        document_id = str(uuid.uuid4())
+
+        # STEP 2: Start background RAG indexing (asynchronous)
+        job_id = None
+        indexing_status = "disabled"
+
+        if self._should_use_rag_for_content(content):
+            rag_storage = self._get_rag_storage_tool()
+            if rag_storage and self.background_indexing_manager:
+                try:
+                    job_id = self.background_indexing_manager.submit_indexing_job(
+                        content=content,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        document_id=document_id,
+                        rag_storage=rag_storage
+                    )
+                    indexing_status = "in_progress"
+                    logger.info(f"Background RAG indexing started: job_id={job_id}, document_id={document_id}")
+                except Exception as e:
+                    logger.error(f"Failed to start background RAG indexing: {e}")
+                    indexing_status = "failed"
+
+        # STEP 3: Generate summary
+        summary = self._generate_text_summary(content)
+
+        # STEP 4: Format response with BOTH access methods (use CONTAINER path for grep)
+        formatted_result = self._format_hybrid_storage_summary(
+            container_path=container_path,
+            host_path=host_path,
+            document_id=document_id,
+            job_id=job_id,
+            indexing_status=indexing_status,
+            summary=summary
+        )
+
+        # Track data source
+        data_sources.append(f"Text file: {container_path}")
+        if indexing_status == "in_progress":
+            data_sources.append(f"RAG indexing: {document_id} (background)")
+
+        logger.info(f"Hybrid storage complete: container={container_path}, host={host_path}, document={document_id}, indexing={indexing_status}")
+
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": formatted_result
+        }
+
+    def _should_use_rag_for_content(self, content: str) -> bool:
+        """Check if content should be indexed in RAG based on config"""
+        from leanworks.setting import LARGE_RESPONSE_CONFIG
+        config = LARGE_RESPONSE_CONFIG
+        return (
+            config.get("use_rag_for_unstructured", True) and
+            len(content) >= config.get("rag_min_semantic_value", 1000)
+        )
+
+    def _get_rag_storage_tool(self):
+        """Get RAG storage tool if available"""
+        # Check if tool_use has access to rag_storage_tool
+        if hasattr(self, 'tool_use') and self.tool_use:
+            return getattr(self.tool_use, 'rag_storage_tool', None)
+        return None
+
+    def _format_hybrid_storage_summary(
+        self,
+        container_path: str,
+        host_path: str,
+        document_id: str,
+        job_id: str,
+        indexing_status: str,
+        summary: str
+    ) -> str:
+        """Format summary for hybrid text + RAG storage"""
+
+        # Build indexing status message
+        if indexing_status == "in_progress":
+            indexing_msg = f"Status: Background indexing in progress (job_id: {job_id})"
+            rag_note = "Semantic search available once background indexing completes."
+        elif indexing_status == "failed":
+            indexing_msg = "Status: Background indexing failed"
+            rag_note = "Only text search available."
+        else:
+            indexing_msg = "Status: Background indexing disabled"
+            rag_note = "Only text search available."
+
+        return f"""Large unstructured text saved to: {container_path}
+- Size: {summary.split('characters,')[0].strip()} characters
+- Lines: {summary.split('words')[0].split(',')[1].strip() if ',' in summary else 'N/A'}
+
+IMMEDIATE ACCESS via bash tool (grep):
+- Find text: grep -n 'pattern' {container_path}
+- With context: grep -n -A 5 -B 5 'pattern' {container_path}
+- Case insensitive: grep -in 'pattern' {container_path}
+
+Then view specific sections with text_editor:
+- Use bash grep output to find line numbers
+- View with: text_editor(path='{container_path}', view_range=[start, end])
+
+SEMANTIC SEARCH (background RAG indexing):
+- Document ID: {document_id}
+- {indexing_msg}
+- Once ready, use: search_tool_response_in_vectorstore(query='...', document_id='{document_id}')
+- Best for: Conceptual searches without exact keywords
+
+All operations use: {container_path}
+
+NOTE: {rag_note}
+"""
+
     def _handle_large_unstructured_response(
         self,
         content: str,
@@ -871,7 +1122,44 @@ class ConversationManager:
         
         # Default: use tool name
         return tool_name.replace("_", "_") + "_results"
-    
+
+    def _get_session_temp_dir(self) -> str:
+        """Get the session-specific temp directory that's mounted in Docker container"""
+        if hasattr(self.tool_use, '_bash_session') and self.tool_use._bash_session:
+            return self.tool_use._bash_session.session_temp_dir
+        # Fallback: create if container not initialized yet
+        import tempfile
+        import os
+        session_temp_dir = os.path.join(tempfile.gettempdir(), f"session_{self.session_id}")
+        os.makedirs(session_temp_dir, exist_ok=True)
+        return session_temp_dir
+
+    def _save_file_to_docker_workspace(self, content: str, tool_name: str, suffix: str = '.txt') -> tuple[str, str]:
+        """
+        Save file to Docker workspace directory.
+
+        Returns:
+            tuple: (host_path, container_path)
+        """
+        import uuid
+        import re
+        import os
+
+        session_temp_dir = self._get_session_temp_dir()
+        tool_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', tool_name)[:30]
+
+        # Create unique filename
+        filename = f'tool_response_{tool_name_safe}_{uuid.uuid4().hex[:8]}{suffix}'
+        host_path = os.path.join(session_temp_dir, filename)
+
+        # Write file on host
+        with open(host_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # Return both host path and container path
+        container_path = f'/workspace/{filename}'
+        return host_path, container_path
+
     def _generate_response_summary(self, result: Any, tool_name: str) -> Dict[str, Any]:
         """Generate summary statistics for large responses"""
         summary = {}

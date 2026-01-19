@@ -1593,7 +1593,7 @@ class DocManagementTool(BaseAPIClient):
         Returns:
             Path to temporary HTML file
         """
-        if docId in self._temp_files:
+        if docId in self._temp_files and os.path.exists(self._temp_files[docId]):
             return self._temp_files[docId]
         
         # Create new temporary file
@@ -4065,9 +4065,22 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             elif preferred_offset is not None:
                 target_idx = min(occurrences, key=lambda x: abs(x - preferred_offset))
             else:
+                # Try to disambiguate using surrounding context (50 chars each side)
+                context_window = 50
+                before_snippet = content[:context_window]
+                after_snippet = content[-context_window:] if context_window < len(content) else content
+                matches_with_context = []
+                for idx in occurrences:
+                    start = max(0, idx - context_window)
+                    end = min(len(content), idx + len(old_block) + context_window)
+                    snippet = content[start:end]
+                    matches_with_context.append((idx, snippet))
+                # If still ambiguous, return error with examples
+                snippets = [s for _, s in matches_with_context[:3]]
                 return {
                     "error": f"Old block appears {len(occurrences)} times",
-                    "suggestion": "Provide more context to make the block unique"
+                    "suggestion": "Provide more context to make the block unique",
+                    "examples": snippets
                 }
             
             updated_content = content[:target_idx] + new_block + content[target_idx + len(old_block):]
@@ -4244,7 +4257,7 @@ Output format:
                 chunks = self._chunk_by_paragraphs(content)
             
             # Store in RAG using existing RAGStorageTool
-            rag_doc_id = self.rag_storage.store_tool_response(
+            rag_doc_id = self.rag_storage.store_tool_response_in_vectorstore(
                 content=content,
                 tool_name="doc_management",
                 tool_input={"doc_id": doc_id, "action": "chunk_for_editing"},

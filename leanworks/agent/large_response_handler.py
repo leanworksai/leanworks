@@ -7,10 +7,11 @@ logger = logging.getLogger(__name__)
 
 class ResponseType(Enum):
     """Response type classification"""
-    STRUCTURED = "structured"  # Lists, dicts, tables → DuckDB
-    UNSTRUCTURED = "unstructured"  # Long text, documents → RAG
-    MIXED = "mixed"  # Contains both types
-    SMALL = "small"  # Small enough to include directly
+    STRUCTURED_SIMPLE = "structured_simple"    # Simple JSON → DuckDB
+    STRUCTURED_COMPLEX = "structured_complex"  # Complex JSON → jq + file
+    UNSTRUCTURED = "unstructured"              # Text → hybrid file + RAG
+    MIXED = "mixed"                            # Contains both types
+    SMALL = "small"                            # Small enough to include directly
 
 class LargeResponseHandler:
     """Handles large tool responses with automatic storage routing"""
@@ -54,23 +55,36 @@ class LargeResponseHandler:
             # Check first item type
             first_item = result[0]
             if isinstance(first_item, dict):
-                return (ResponseType.STRUCTURED, True)
+                # List of dicts - analyze complexity of first item
+                from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
+                analysis = JSONComplexityAnalyzer.analyze(first_item)
+
+                if analysis["level"].value == "simple":
+                    return (ResponseType.STRUCTURED_SIMPLE, True)
+                else:  # complex
+                    return (ResponseType.STRUCTURED_COMPLEX, True)
             elif isinstance(first_item, str):
                 # List of strings - could be unstructured
                 total_text = ' '.join(str(item) for item in result)
                 if len(total_text) > cls.MIN_UNSTRUCTURED_CHARS:
                     return (ResponseType.UNSTRUCTURED, True)
-                return (ResponseType.STRUCTURED, True)
+                return (ResponseType.STRUCTURED_SIMPLE, True)
             else:
                 # List of other types (numbers, etc.)
-                return (ResponseType.STRUCTURED, True)
+                return (ResponseType.STRUCTURED_SIMPLE, True)
         
         if isinstance(result, dict):
-            # Check if dict contains mostly text vs structured data
-            text_ratio = cls._calculate_text_ratio(result)
-            if text_ratio > 0.7:  # Mostly text content
+            # Use JSON complexity analyzer to classify dicts
+            from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
+            analysis = JSONComplexityAnalyzer.analyze(result)
+
+            if analysis["level"].value == "simple":
+                return (ResponseType.STRUCTURED_SIMPLE, True)
+            elif analysis["level"].value == "complex":
+                return (ResponseType.STRUCTURED_COMPLEX, True)
+            else:
+                # Not JSON or other cases - treat as unstructured
                 return (ResponseType.UNSTRUCTURED, True)
-            return (ResponseType.STRUCTURED, True)
         
         if isinstance(result, str):
             return (ResponseType.UNSTRUCTURED, True)

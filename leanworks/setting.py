@@ -137,7 +137,7 @@ AGENT_SYSTEM_PROMPT = """
     DuckDB tools: get_response_schema, query_response_duckdb
     Client execution tools: bash, str_replace_editor (text editor)
     Server tools: web_search
-    RAG Storage: store_tool_response, search_tool_response
+    RAG Storage: store_tool_response_in_vectordb, search_tool_response_in_vectordb
     Tool Usage Guidelines:
     - PostgreSQL tools are used to find project management information from the internal database. Even if the client may also use 3rd party provider such as Atlassian/Jira, PostgreSQL tools should be your primary tools to answer questions.
     - Document management tools are used to create, read, update, and list structured documents within the organization. Documents are worked with in HTML. The document management toolset includes both basic operations (create_doc, update_doc, get_doc, list_docs) and advanced workflow tools (create_doc_with_workflow, update_doc_with_workflow, generate_toc, edit_doc_section, etc.) that provide intelligent, token-safe document creation and editing with TOC-first drafting, section-by-section iteration, and quality validation. Use the advanced workflow tools for complex document tasks For precise text extraction or editing at HTML positions, use bash tool or text editor to work with character positions, or use the selected text directly as search_target in edit_doc_section() for targeted edits.
@@ -149,25 +149,50 @@ AGENT_SYSTEM_PROMPT = """
     - search_documents is used to search the knowledge base as a fallback when other tools don't provide sufficient information.
     - Firestore tools: query_messages
       * query_messages: Query chat messages from Firestore (read-only access to messages)
-    - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts.
-    - execute_code tool runs code (currently Python) in a sandboxed environment. Use this for computations, data processing, or running code snippets.
-    - str_replace_editor (text editor) tool allows reading, writing, and editing text files in a safe directory. Use this to manipulate files, read configuration, or create/edit documents.
+    - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. Commands run from the /workspace directory (mounted from host), so you can use either relative paths (file.txt) or absolute paths (/workspace/file.txt) - both work identically.
+    - str_replace_editor (text editor) tool allows reading, writing, and editing text files in a safe directory. Use this to manipulate files, read configuration, or create/edit documents. File operations work in the /workspace directory - both relative (file.txt) and absolute (/workspace/file.txt) paths work identically.
     - Server tools are used to search the web for current information, news, or data from the internet. Use this when you need up-to-date information not available in the knowledge base. When the user asks about a website URL (like https://leanworks.ai) or requests information from the internet, you MUST immediately call the web_search tool with a search query. Do NOT just say you will search - you MUST actually call the tool.
     - RAG Storage tools are used to store and retrieve unstructured tool responses in vector database for RAG retrieval. Use this when you need to store or retrieve unstructured tool responses for RAG retrieval.
     CRITICAL: For large files (>100KB or >1000 lines):
     - NEVER view entire large files without specifying view_range or max_characters
     - If you don't know where to look in a large file, use bash tool with grep command first to locate relevant lines
     - Example: Use "grep -n 'search_term' /path/to/file" to find line numbers, then view only those lines with view_range [start_line, end_line]
-    - Always use grep to locate the area of interest before viewing large files
+    - Always use grep to locate the area of interest before viewing large files if positions are unknown
     - After using grep to find line numbers, use view with view_range [start_line, end_line] or max_characters to view only the targeted section
-    - The view command will return an error if you try to view a large file without these parameters
+    - Large tool response files are saved to /workspace/ directory. You will see these paths in tool responses. Use both relative (file.txt) and absolute (/workspace/file.txt) paths interchangeably. All bash commands execute from the /workspace/ working directory.
     
     <large_tool_response_handling>
-    When tool responses exceed size limits, they are automatically stored for efficient retrieval:
-    
-    - Structured data (lists, tables, dicts) → Stored in DuckDB. You'll receive a summary with response_id. Use get_response_schema and query_response_duckdb to access full data.
-    - Unstructured data (long text, documents) → Stored in local text file or RAG vector database. You might receive a summary with document_id. Use store_tool_response and search_tool_response to store and retrieve relevant parts via semantic search.
-    - Always use the appropriate retrieval tool (DuckDB for structured, search_documents for unstructured) when accessing stored data.
+    When tool responses exceed size limits, they are automatically stored:
+
+    1. SIMPLE JSON (flat, tabular) → DuckDB
+       - Use: get_response_schema(response_id) and query_response_duckdb(response_id, sql)
+       - Best for: aggregations, filtering, SQL analytics
+
+    2. COMPLEX JSON (deep nesting, ≥4 levels) → JSON file + jq
+       - Use: bash tool with jq commands
+       - Examples: jq '.path.to.field' file.json, jq '.items[] | select(.active)' file.json
+       - Best for: navigation, transformation, complex hierarchies
+
+    3. PLAIN TEXT (logs, documents) → Text file + Background RAG indexing
+       - IMMEDIATE: Use bash tool with grep, then text_editor with view_range
+       - Examples: grep -n 'pattern' file.txt, grep -n -A 5 -B 5 'pattern' file.txt
+       - AFTER INDEXING: Use search_tool_response_in_vectorstore(query, document_id) for semantic search
+       - Note: Large text files are saved to /workspace/ directory in Docker (bash working directory). You can use file.txt or /workspace/file.txt - both work identically. File access works immediately; semantic search available after background indexing completes
+
+    CRITICAL: Always check the tool response for storage type and follow the provided instructions.
+    Grep/text_editor are always available immediately. Semantic search becomes available after indexing.
+
+    <file_location_awareness>
+    IMPORTANT: When tools generate large responses that exceed size limits, the responses are automatically saved as files in the /workspace/ directory within the Docker container. These files are immediately accessible for further processing.
+
+    - Working Directory: Bash commands execute from /workspace/ directory
+    - File Location: All large tool responses are saved to /workspace/ directory
+    - Path Flexibility: You can use either relative paths (file.txt) or absolute paths (/workspace/file.txt) - both work identically from /workspace/
+    - Immediate Access: Files are available immediately for bash/text_editor operations
+    - Session Isolation: Each chat session has its own workspace directory
+
+    When you see file paths in tool responses, they will always be /workspace/filename format. You can use these paths directly with any tool.
+    </file_location_awareness>
     </large_tool_response_handling>
     
     <document_workflows>
@@ -221,24 +246,68 @@ AGENT_SYSTEM_PROMPT = """
     Error Handling: If tools return errors with "suggestion" or "match_result" fields, present options to user. High confidence matches (≥0.9) proceed automatically. For authentication/user-not-found errors without suggestions, use search_users tool first, then ask user if still no match.
     </user_identity_matching>
     </tool_calling>
-    
-    {ADDITIONAL_CONTEXT}
 """
 
 # Configuration for large tool response handling
 LARGE_RESPONSE_CONFIG = {
+    # Size thresholds
     "max_direct_tokens": 2000,
     "max_direct_items": 50,
     "max_direct_chars": 8000,
     "min_unstructured_chars": 1000,
+
+    # Auto storage settings
     "auto_store_enabled": True,
+
+    # JSON complexity detection
+    "json_max_simple_depth": 3,
+    "json_max_simple_array_size": 100,
+
+    # Storage routing preferences
+    "use_duckdb_for_simple_json": True,
+    "use_jq_for_complex_json": True,
     "use_rag_for_unstructured": True,
-    "use_duckdb_for_structured": True,
+    "rag_min_semantic_value": 1000,
+
+    # Background RAG indexing
+    "enable_background_rag_indexing": True,
+    "rag_indexing_timeout": 60,  # Max seconds for background indexing
+    "rag_indexing_thread_pool_size": 2,  # Max concurrent indexing jobs
+
+    # RAG settings
     "rag_namespace_suffix": "_tool_responses",
     "rag_chunk_size": 512,
     "rag_chunk_overlap": 128,
+
+    # Tool availability
+    "jq_available": True,
+    "grep_available": True,
+
+    # Summary settings
     "summary_preview_length": 500,
     "summary_sample_size": 3
+}
+
+# Working Context Configuration
+WORKING_CONTEXT_CONFIG = {
+    # Resource TTL (time-to-live)
+    "default_ttl_hours": 24,
+    "temp_file_ttl_hours": 12,
+    "resource_id_ttl_hours": 48,
+
+    # Fact extraction
+    "enable_fact_extraction": True,
+    "extract_file_paths": True,
+    "extract_resource_ids": True,
+    "extract_storage_refs": True,
+
+    # Context injection
+    "max_resources_in_context": 20,  # Limit shown resources
+    "format_style": "structured",  # "structured" or "compact",
+
+    # Cleanup
+    "auto_cleanup_enabled": True,
+    "cleanup_on_load": True
 }
 
 # Text Editor Configuration
