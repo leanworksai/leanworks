@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
-    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None, memory_manager=None):
+    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None, memory_manager=None, tool_use=None):
         self.model_client = model_client
         self.firestore_client = firestore_client
         self.org_slug = org_slug
         self.user_id = user_id
         self.session_id = session_id
         self.memory_manager = memory_manager
+        self.tool_use = tool_use  # Store tool_use reference
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
 
@@ -81,7 +82,7 @@ class ConversationManager:
             query = query.limit(limit)
             
             # Execute query with retry logic for transient errors
-            logger.info(f"Loading conversation from messages collection: chatId={chat_id}, limit={limit}")
+            logger.debug(f"Loading conversation from messages collection: chatId={chat_id}, limit={limit}")
             messages = self._execute_firestore_query_with_retry(query, max_retries=3)
             
             # Convert Firestore documents to conversation format
@@ -121,10 +122,10 @@ class ConversationManager:
             # Set conversation (excluding the last message which is the current one being processed)
             if len(conversation_messages) > 0:
                 self.conversation = conversation_messages
-                logger.info(f"Loaded {len(self.conversation)} messages from messages collection for chatId: {chat_id}")
+                logger.debug(f"Loaded {len(self.conversation)} messages from messages collection for chatId: {chat_id}")
             else:
                 self.conversation = []
-                logger.info(f"No messages found for chatId: {chat_id}")
+                logger.debug(f"No messages found for chatId: {chat_id}")
                 
         except Exception as e:
             logger.error(f"Error loading conversation from messages collection: {e}")
@@ -275,13 +276,13 @@ class ConversationManager:
                     try:
                         # Log tool call with parameters
                         logger.info(f"Tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)}")
-                        
+
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
                         
                         # Log tool call result preview
                         result_preview = self._get_result_preview(result)
-                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        logger.debug(f"Tool call result for {tool_name}: {result_preview}")
                         
                         # If tool returns an error object, surface just the error message
                         if isinstance(result, dict) and "error" in result:
@@ -397,7 +398,7 @@ class ConversationManager:
                         
                         # Log tool call result preview
                         result_preview = self._get_result_preview(result)
-                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        logger.debug(f"Tool call result for {tool_name}: {result_preview}")
                         
                         # Check if response is large and needs special handling
                         from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
@@ -410,13 +411,15 @@ class ConversationManager:
                         response_type, is_large = LargeResponseHandler.classify_response(result)
                         
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
-                            # Preprocess doc tool responses to HTML before storage
+                            # Extract doc IDs for doc tools (preprocessing moved to storage handler)
+                            doc_ids = []
                             if self._is_doc_content_tool(tool_name):
-                                result = self._preprocess_doc_response(result, tool_name)
+                                if isinstance(result, list):
+                                    doc_ids = [doc.get('id') for doc in result if isinstance(doc, dict) and doc.get('id')]
 
                             # Use unified handler for all tools
                             formatted_result = self.handle_large_response(
-                                result, tool_name, tool_input, tool_use_id, data_sources
+                                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
                             )
                             tool_results.append(formatted_result)
                             continue
@@ -551,13 +554,59 @@ class ConversationManager:
         
         return tool_results
 
+    def _ensure_docker_container_initialized(self) -> bool:
+        """
+        Ensure Docker container is initialized and healthy before file operations.
+
+        This prevents race conditions where files are saved to temp directories
+        before the Docker container's session directory is created.
+
+        Returns:
+            bool: True if container is ready, False if initialization failed
+        """
+        if not self.tool_use:
+            logger.warning("No tool_use available for Docker container initialization")
+            return False
+
+        # Check if bash session already exists
+        if hasattr(self.tool_use, '_bash_session') and self.tool_use._bash_session:
+            # Verify container is still running
+            try:
+                session = self.tool_use._bash_session
+                import subprocess
+                check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.container_name]
+                check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
+
+                if check_result.returncode == 0 and check_result.stdout.strip() == 'true':
+                    logger.debug(f"Docker container {session.container_name} is healthy")
+                    return True
+            except Exception as e:
+                logger.warning(f"Docker health check failed: {e}")
+
+        # Initialize Docker container by calling bash tool
+        try:
+            logger.debug("Initializing Docker container for file operations")
+            # Simple echo command to trigger container creation
+            result = self.tool_use.bash("echo 'Docker initialized'")
+
+            if "Error" in result:
+                logger.error(f"Failed to initialize Docker container: {result}")
+                return False
+
+            logger.debug("Docker container initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Exception during Docker initialization: {e}")
+            return False
+
     def handle_large_response(
         self,
         result: Any,
         tool_name: str,
         tool_input: Dict,
         tool_use_id: str,
-        data_sources: List[str]
+        data_sources: List[str],
+        doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Unified entry point for handling all large tool responses.
@@ -583,7 +632,7 @@ class ConversationManager:
             logger.warning(f"handle_large_response called with small response: {response_type}")
             return self._truncate_response(result, tool_use_id)
 
-        logger.info(f"Routing large response for {tool_name}: type={response_type.value}")
+        logger.debug(f"Routing large response for {tool_name}: type={response_type.value}")
 
         # Route to appropriate handler based on classification
         if response_type == ResponseType.STRUCTURED_SIMPLE:
@@ -601,7 +650,7 @@ class ConversationManager:
         elif response_type == ResponseType.UNSTRUCTURED:
             # Text → hybrid file + background RAG
             return self._handle_hybrid_text_and_rag_storage(
-                result, tool_name, tool_input, tool_use_id, data_sources
+                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
             )
 
         elif response_type == ResponseType.MIXED:
@@ -672,7 +721,7 @@ class ConversationManager:
             # Track data source
             data_sources.append(f"DuckDB response database: {response_id}")
             
-            logger.info(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
+            logger.debug(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
             
             return {
                 "type": "tool_result",
@@ -739,7 +788,7 @@ All operations use: {container_path}
         # Track data source
         data_sources.append(f"JSON file: {container_path}")
 
-        logger.info(f"Stored complex JSON: host={host_path}, container={container_path}")
+        logger.debug(f"Stored complex JSON: host={host_path}, container={container_path}")
 
         return {
             "type": "tool_result",
@@ -749,25 +798,34 @@ All operations use: {container_path}
 
     def _handle_hybrid_text_and_rag_storage(
         self,
-        content: str,
+        result: Any,
         tool_name: str,
         tool_input: Dict[str, Any],
         tool_use_id: str,
-        data_sources: List[str]
+        data_sources: List[str],
+        doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Store large unstructured response with hybrid approach:
-        1. Save text file immediately (synchronous)
-        2. Start background RAG indexing (asynchronous, non-blocking)
-        3. Return immediately with both access methods
+        1. Convert result to content string if needed (preprocessing for doc tools)
+        2. Save text file immediately (synchronous)
+        3. Start background RAG indexing (asynchronous, non-blocking)
+        4. Return immediately with both access methods
         """
+        # STEP 0: Convert result to content string (preprocessing for doc tools)
+        if self._is_doc_content_tool(tool_name):
+            content = self._preprocess_doc_response(result, tool_name)
+        else:
+            content = str(result) if not isinstance(result, str) else result
         import uuid
 
         # STEP 1: Save text file to Docker workspace (synchronous)
+        suffix = '.html' if self._is_doc_content_tool(tool_name) else '.txt'
         host_path, container_path = self._save_file_to_docker_workspace(
             content,
             tool_name,
-            suffix='.txt'
+            suffix=suffix,
+            doc_ids=doc_ids
         )
 
         document_id = str(uuid.uuid4())
@@ -788,7 +846,7 @@ All operations use: {container_path}
                         rag_storage=rag_storage
                     )
                     indexing_status = "in_progress"
-                    logger.info(f"Background RAG indexing started: job_id={job_id}, document_id={document_id}")
+                    logger.debug(f"Background RAG indexing started: job_id={job_id}, document_id={document_id}")
                 except Exception as e:
                     logger.error(f"Failed to start background RAG indexing: {e}")
                     indexing_status = "failed"
@@ -811,7 +869,7 @@ All operations use: {container_path}
         if indexing_status == "in_progress":
             data_sources.append(f"RAG indexing: {document_id} (background)")
 
-        logger.info(f"Hybrid storage complete: container={container_path}, host={host_path}, document={document_id}, indexing={indexing_status}")
+        logger.debug(f"Hybrid storage complete: container={container_path}, host={host_path}, document={document_id}, indexing={indexing_status}")
 
         return {
             "type": "tool_result",
@@ -956,7 +1014,7 @@ NOTE: {rag_note}
                 # Track data source
                 data_sources.append(f"Text file: {file_path}")
                 
-                logger.info(f"Stored large unstructured response in text file: {file_path}")
+                logger.debug(f"Stored large unstructured response in text file: {file_path}")
                 
                 return {
                     "type": "tool_result",
@@ -1011,9 +1069,12 @@ NOTE: {rag_note}
         os.makedirs(session_temp_dir, exist_ok=True)
         return session_temp_dir
 
-    def _save_file_to_docker_workspace(self, content: str, tool_name: str, suffix: str = '.txt') -> tuple[str, str]:
+    def _save_file_to_docker_workspace(self, content: str, tool_name: str, suffix: str = '.txt', doc_ids: Optional[List[str]] = None) -> tuple[str, str]:
         """
         Save file to Docker workspace directory and register in working context.
+
+        Ensures Docker container is initialized before saving to guarantee
+        consistent session directory paths.
 
         Returns:
             tuple: (host_path, container_path)
@@ -1021,6 +1082,11 @@ NOTE: {rag_note}
         import uuid
         import re
         import os
+
+        # Ensure Docker container is initialized before saving files
+        if not self._ensure_docker_container_initialized():
+            logger.error("Failed to initialize Docker container for file save operation")
+            raise Exception("Docker container initialization failed - cannot save file to workspace")
 
         session_temp_dir = self._get_session_temp_dir()
         tool_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', tool_name)[:30]
@@ -1044,7 +1110,8 @@ NOTE: {rag_note}
                     'tool': tool_name,
                     'host_path': host_path,
                     'file_type': suffix,
-                    'created_via': 'unified_response_handler'
+                    'created_via': 'unified_response_handler',
+                    'doc_ids': doc_ids if doc_ids else []
                 }
             )
 

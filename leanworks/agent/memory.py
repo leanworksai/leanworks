@@ -193,7 +193,7 @@ class MemoryManager:
         # Apply any user overrides
         config.update(kwargs)
         
-        logger.info(f"Creating MemoryManager for {model_name} with config: {config}")
+        logger.debug(f"Creating MemoryManager for {model_name} with config: {config}")
         
         return cls(
             model_client=model_client,
@@ -295,7 +295,7 @@ class MemoryManager:
         and user-level profile from user storage.
         """
         if not self.firestore_client or not self.user_id or not self.org_slug:
-            logger.info("No firestore client, org_slug, or user_id provided, starting with empty memory")
+            logger.debug("No firestore client, org_slug, or user_id provided, starting with empty memory")
             return
             
         try:
@@ -345,9 +345,9 @@ class MemoryManager:
                             last_update_count = 0
                     self._last_profile_update_turn_count = last_update_count
                     
-                    logger.info(f"Loaded session memory with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
+                    logger.debug(f"Loaded session memory with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
                 else:
-                    logger.info("No existing session memory found, starting fresh")
+                    logger.debug("No existing session memory found, starting fresh")
             
             # Load user-level profile (shared across all sessions)
             if self.profile_path:
@@ -377,7 +377,7 @@ class MemoryManager:
                                     # Convert to JSON string for in-memory use (exclude Firestore metadata)
                                     profile_dict_for_json = self._filter_firestore_metadata(profile_dict)
                                     self.user_profile = json.dumps(profile_dict_for_json, ensure_ascii=False)
-                                    logger.info(f"Migrated and loaded user profile from old format")
+                                    logger.debug(f"Migrated and loaded user profile from old format")
                                 except json.JSONDecodeError as json_error:
                                     # JSON parsing failed - create clean profile from available data
                                     logger.warning(f"Failed to parse profile JSON, migrating to flattened structure: {json_error}")

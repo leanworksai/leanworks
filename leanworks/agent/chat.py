@@ -87,8 +87,8 @@ class ChatAgent:
                 user_id=user_id,
                 session_id=session_id
             )
-            logger.info(f"MemoryManager initialized for model {GENERATION_MODEL}")
-            logger.info(f"Memory settings: {self.memory_manager.get_memory_stats()}")
+            logger.debug(f"MemoryManager initialized for model {GENERATION_MODEL}")
+            logger.debug(f"Memory settings: {self.memory_manager.get_memory_stats()}")
         except Exception as e:
             logger.error(f"Failed to initialize MemoryManager: {e}")
             self.memory_manager = None
@@ -100,7 +100,8 @@ class ChatAgent:
             self.org_slug,
             self.user_id,
             self.session_id,
-            memory_manager=self.memory_manager
+            memory_manager=self.memory_manager,
+            tool_use=self.tool_use  # Pass tool_use for Docker access
         )
         
         if clear_conversation:
@@ -116,7 +117,7 @@ class ChatAgent:
         # This includes AI assistant chats, project channels, team channels, etc.
         # Do this after clear_conversation check so we don't clear what we just loaded
         if self.session_id and not clear_conversation:
-            logger.info(f"Loading conversation history from messages collection for chatId: {self.session_id}")
+            logger.debug(f"Loading conversation history from messages collection for chatId: {self.session_id}")
             self.conversation.load_conversation_from_messages(
                 chat_id=self.session_id,
                 limit=10,
@@ -164,9 +165,9 @@ class ChatAgent:
         all_tools = list(self.tool_use.tools) + server_tools
         
         # Log tools for debugging
-        logger.info(f"Total tools registered: {len(all_tools)}")
+        logger.debug(f"Total tools registered: {len(all_tools)}")
         tool_names = [tool.get("name", "unknown") for tool in all_tools]
-        logger.info(f"Tool names: {tool_names}")
+        logger.debug(f"Tool names: {tool_names}")
         
         self.api_params = {
             "model": GENERATION_MODEL,
@@ -286,7 +287,7 @@ class ChatAgent:
                                         actual_message = "\n".join(lines[i+1:]).strip()
                                         break
                             
-                            logger.info(f"Extracted actual user message from conversation history: {actual_message[:100]}...")
+                            logger.debug(f"Extracted actual user message from conversation history: {actual_message[:100]}...")
                             return actual_message
                     
                     # If no user message found, log warning and return original
@@ -302,7 +303,7 @@ class ChatAgent:
                     if "Write your response message now" in line or "CRITICAL INSTRUCTIONS" in line:
                         remaining = "\n".join(lines[i+1:]).strip()
                         if remaining:
-                            logger.info(f"Extracted user message from text pattern: {remaining[:100]}...")
+                            logger.debug(f"Extracted user message from text pattern: {remaining[:100]}...")
                             return remaining
         
         # No conversation history detected, return as-is
@@ -334,21 +335,21 @@ class ChatAgent:
         actual_user_message = self._extract_user_message_from_conversation_history(user_message)
         
         # Log the user query with context
-        logger.info(f"User query received - user_id: {self.user_id}, session_id: {self.session_id}, org_slug: {self.org_slug}")
-        logger.info(f"User query: {actual_user_message}")
+        logger.debug(f"User query received - user_id: {self.user_id}, session_id: {self.session_id}, org_slug: {self.org_slug}")
+        logger.debug(f"User query: {actual_user_message}")
         
         # Log cited context if provided
         if cited_context:
-            logger.info(f"Cited context provided: {cited_context}")
-        
+            logger.debug(f"Cited context provided: {cited_context}")
+
         # Log file references if provided
         if file_references:
-            logger.info(f"File references: {[f.get('filename', 'unknown') for f in file_references]}")
-        
+            logger.debug(f"File references: {[f.get('filename', 'unknown') for f in file_references]}")
+
         # Load conversation history from messages collection (source of truth for all chat types)
         # This ensures we have the latest context from the channel before processing the new message
         if self.session_id:
-            logger.info(f"Loading conversation history from messages collection before processing message: {self.session_id}")
+            logger.debug(f"Loading conversation history from messages collection before processing message: {self.session_id}")
             self.conversation.load_conversation_from_messages(
                 chat_id=self.session_id,
                 limit=10,
@@ -364,10 +365,10 @@ class ChatAgent:
         
         # Store the original user query for evaluation (before adding cited context)
         self.original_user_query = actual_user_message
-        logger.info(f"Stored original user query for evaluation: {self.original_user_query[:200]}...")
-        
+        logger.debug(f"Stored original user query for evaluation: {self.original_user_query[:200]}...")
+
         # Log current state of document deduplication
-        logger.info(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
+        logger.debug(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
         
         # Process cited_context - handle both string and dict formats
         # Store selected text context for tools to access
@@ -381,7 +382,7 @@ class ChatAgent:
                 if selected_text:
                     # Store for tools to access
                     self.selected_text_context = selected_text
-                    logger.info(f"Stored selected text context: docId={selected_text.get('docId')}, htmlFrom={selected_text.get('htmlFrom')}, htmlTo={selected_text.get('htmlTo')}")
+                    logger.debug(f"Stored selected text context: docId={selected_text.get('docId')}, htmlFrom={selected_text.get('htmlFrom')}, htmlTo={selected_text.get('htmlTo')}")
                     doc_id = selected_text.get("docId")
                     html_from = selected_text.get("htmlFrom")
                     html_to = selected_text.get("htmlTo")
@@ -431,7 +432,7 @@ class ChatAgent:
         if cited_context_str:
             user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
             # Log the final message with cited context
-            logger.info(f"Final user message with cited context: {user_message}")
+            logger.debug(f"Final user message with cited context: {user_message}")
         
         # Build multimodal message content
         content_blocks = [{"type": "text", "text": user_message}]
@@ -457,7 +458,7 @@ class ChatAgent:
                             "file_id": file_id
                         }
                     })
-                    logger.info(f"Added image reference: {filename} ({file_id})")
+                    logger.debug(f"Added image reference: {filename} ({file_id})")
                     
                 elif mime_type in ["application/pdf", "text/plain"]:
                     # Document content block with citations enabled
@@ -470,7 +471,7 @@ class ChatAgent:
                         "title": filename,
                         "citations": {"enabled": True}  # Enable citations for PDFs
                     })
-                    logger.info(f"Added document reference: {filename} ({file_id})")
+                    logger.debug(f"Added document reference: {filename} ({file_id})")
                     
                 else:
                     # For unsupported types, log warning
@@ -485,7 +486,7 @@ class ChatAgent:
         # Add to memory manager if enabled
         if self.memory_manager:
             self.memory_manager.add_turn(user_message_obj)
-            logger.info(f"Added user message to memory manager. Stats: {self.memory_manager.get_memory_stats()}")
+            logger.debug(f"Added user message to memory manager. Stats: {self.memory_manager.get_memory_stats()}")
         
         # Add the user message to conversation (multimodal support)
         if file_references:
@@ -506,14 +507,14 @@ class ChatAgent:
                     before_communication = self.system_prompt[:communication_start].rstrip()
                     after_communication = self.system_prompt[communication_start:]
                     enhanced_system_prompt = f"{before_communication}\n\n{memory_context}\n\n{after_communication}"
-                    logger.info("Injected memory context before <communication> section")
+                    logger.debug("Injected memory context before <communication> section")
                 else:
                     # Fallback to appending if <communication> section not found
                     enhanced_system_prompt = f"{self.system_prompt}\n\n{memory_context}"
-                    logger.info("Appended memory context at end (communication section not found)")
+                    logger.debug("Appended memory context at end (communication section not found)")
             else:
                 enhanced_system_prompt = self.system_prompt
-                logger.info("No memory context to add")
+                logger.debug("No memory context to add")
             
             # IMPORTANT: Don't replace messages with memory messages during processing
             # We'll use current conversation messages but with enhanced system prompt
@@ -522,7 +523,7 @@ class ChatAgent:
                 # Do NOT update messages here - use current conversation during tool loops
             })
             
-            logger.info(f"Updated API params with memory context. Enhanced system prompt length: {len(enhanced_system_prompt)}")
+            logger.debug(f"Updated API params with memory context. Enhanced system prompt length: {len(enhanced_system_prompt)}")
         
         # Maximum number of iterations to prevent infinite loops
         unanswered_count = 0
@@ -550,10 +551,10 @@ class ChatAgent:
                 
                 # Log tools being sent for debugging
                 tools_in_request = current_params.get("tools", [])
-                logger.info(f"Making API call with {len(tools_in_request)} tools")
+                logger.debug(f"Making API call with {len(tools_in_request)} tools")
                 if tools_in_request:
                     tool_names = [tool.get("name", tool.get("type", "unknown")) for tool in tools_in_request[:5]]
-                    logger.info(f"Sample tools in request: {tool_names}")
+                    logger.debug(f"Sample tools in request: {tool_names}")
                 
                 response = self.model_client.messages.create(**current_params)
                 
@@ -577,7 +578,7 @@ class ChatAgent:
                     
                     if has_tool_use:
                         # If there are tool calls, continue the conversation loop to execute them
-                        logger.info("Response hit max_tokens but has tool calls - continuing conversation")
+                        logger.debug("Response hit max_tokens but has tool calls - continuing conversation")
                         # Use unified handler to process response (will execute tools and continue)
                         handler = self.tool_response_handler_factory.get_handler(response)
                         context = {
@@ -624,7 +625,7 @@ class ChatAgent:
                     
                     # If not thinking, skip evaluation and return response directly
                     if not thinking:
-                        logger.info("Thinking disabled: skipping evaluation and critique. Returning response directly.")
+                        logger.debug("Thinking disabled: skipping evaluation and critique. Returning response directly.")
                         
                         # Stream the response if streaming is enabled
                         if streaming:
@@ -839,8 +840,8 @@ class ChatAgent:
             logger.info(f"Final answer: {response_text}")
         else:
             logger.info(f"Final answer: {len(response_text)} characters")
-        logger.info(f"Data sources used: {unique_sources}")
-        logger.info(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
+        logger.debug(f"Data sources used: {unique_sources}")
+        logger.debug(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
         
         # Show final summary if streaming is enabled
         if streaming and unique_sources:
@@ -872,7 +873,7 @@ class ChatAgent:
             # Cleanup DuckDB temporary files
             try:
                 cleanup_responses()
-                logger.info("Cleaned up DuckDB response files")
+                logger.debug("Cleaned up DuckDB response files")
             except Exception as e:
                 logger.warning(f"Error cleaning up DuckDB files: {e}")
             
@@ -882,7 +883,7 @@ class ChatAgent:
                     rag_storage = self.tool_use._get_rag_storage_tool()
                     if rag_storage:
                         rag_storage.cleanup_session_data(self.session_id)
-                        logger.info(f"Cleaned up RAG namespace data for session {self.session_id}")
+                        logger.debug(f"Cleaned up RAG namespace data for session {self.session_id}")
                 except Exception as e:
                     logger.warning(f"Error cleaning up RAG namespace data: {e}")
             
@@ -894,7 +895,7 @@ class ChatAgent:
             if hasattr(self, 'memory_manager') and self.memory_manager:
                 self.memory_manager.shutdown()
             
-            logger.info("ChatAgent cleanup completed")
+            logger.debug("ChatAgent cleanup completed")
         except Exception as e:
             logger.error(f"Error during ChatAgent cleanup: {e}")
     
@@ -1041,7 +1042,7 @@ class ChatAgent:
             ]
             historical_messages.reverse()
             
-            logger.info(f"Retrieved {len(historical_messages)} historical messages for user profile analysis")
+            logger.debug(f"Retrieved {len(historical_messages)} historical messages for user profile analysis")
             return historical_messages
             
         except Exception as e:
@@ -1296,7 +1297,7 @@ If there's not enough information to make meaningful updates, return the current
                 logger.warning("Missing original user query or response text for evaluation")
                 return {"score": 5, "explanation": "Evaluation skipped due to missing inputs"}
             
-            logger.info(f"Using stored original user query for evaluation: {self.original_user_query}")
+            logger.debug(f"Using stored original user query for evaluation: {self.original_user_query}")
             
             # Create separate evaluation conversation (does not pollute main conversation)
             eval_messages = []
@@ -1309,7 +1310,7 @@ If there's not enough information to make meaningful updates, return the current
                     LAST_RESPONSE=response_text
                 )}]
             })
-            logger.info(f"Evaluation messages: {eval_messages}")
+            logger.debug(f"Evaluation messages: {eval_messages}")
             # Create evaluation parameters with separate conversation
             eval_params = {
                 "model": GENERATION_MODEL,
@@ -1348,12 +1349,12 @@ If there's not enough information to make meaningful updates, return the current
                     if json_end != -1:
                         json_only = json_text[json_start:json_end]
                         eval_feedback = json.loads(json_only)
-                        logger.info(f"Evaluation feedback: {eval_feedback}")
+                        logger.debug(f"Evaluation feedback: {eval_feedback}")
                         return eval_feedback
-                
+
                 # Fallback: try parsing the entire text
                 eval_feedback = json.loads(json_text)
-                logger.info(f"Evaluation feedback: {eval_feedback}")
+                logger.debug(f"Evaluation feedback: {eval_feedback}")
                 return eval_feedback
                 
             except json.JSONDecodeError:

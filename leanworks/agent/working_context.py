@@ -86,6 +86,77 @@ class WorkingContext:
             resource['last_used'] = datetime.now()
         return resource
 
+    def find_resources_by_metadata(
+        self,
+        resource_type: Optional[str] = None,
+        metadata_filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Find resources matching type and metadata criteria.
+
+        Args:
+            resource_type: Filter by resource type (None = all types)
+            metadata_filters: Dict of metadata key-value pairs to match
+
+        Returns:
+            List of matching resources with their IDs
+        """
+        matches = []
+
+        for resource_id, resource_info in self.resources.items():
+            # Check type filter
+            if resource_type and resource_info.get('type') != resource_type:
+                continue
+
+            # Check metadata filters
+            if metadata_filters:
+                resource_metadata = resource_info.get('metadata', {})
+                match = True
+
+                for key, value in metadata_filters.items():
+                    # Handle list values (e.g., doc_ids)
+                    if isinstance(value, list):
+                        metadata_value = resource_metadata.get(key, [])
+                        if not any(v in metadata_value for v in value):
+                            match = False
+                            break
+                    # Handle single values
+                    elif resource_metadata.get(key) != value:
+                        match = False
+                        break
+
+                if not match:
+                    continue
+
+            # Resource matches all criteria
+            result = resource_info.copy()
+            result['resource_id'] = resource_id
+            matches.append(result)
+
+        return matches
+
+    def find_document_file(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Find workspace HTML file for a specific document ID.
+
+        Args:
+            doc_id: Document ID to search for
+
+        Returns:
+            Resource info dict with file path, or None if not found
+        """
+        resources = self.find_resources_by_metadata(
+            resource_type='tool_response_file',
+            metadata_filters={'doc_ids': [doc_id]}
+        )
+
+        # Return the most recently used file
+        if resources:
+            resources.sort(key=lambda x: x.get('last_used', datetime.min), reverse=True)
+            return resources[0]
+
+        return None
+
     def touch_resource(self, resource_id: str) -> bool:
         """
         Update the last_used timestamp for a resource.
@@ -176,7 +247,7 @@ class WorkingContext:
             del self.resources[resource_id]
 
         if expired_ids:
-            logger.info(f"Cleaned up {len(expired_ids)} expired resources")
+            logger.debug(f"Cleaned up {len(expired_ids)} expired resources")
 
         return len(expired_ids)
 
@@ -269,6 +340,6 @@ class WorkingContext:
                     removed_count += 1
         
         if removed_count > 0:
-            logger.info(f"Validated working context - removed {removed_count} missing temp file resources")
+            logger.debug(f"Validated working context - removed {removed_count} missing temp file resources")
         
         return removed_count

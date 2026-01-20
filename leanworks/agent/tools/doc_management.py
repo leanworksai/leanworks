@@ -115,23 +115,25 @@ class DocManagementTool(BaseAPIClient):
     def create_doc_property(self):
         description = f"""
         Create a new document in the docs table for org `{self.org_slug}`.
-        
+
         This tool creates documents that are owned by the user who created them. Documents will have owner_email set to the user's email address.
-        
+
         Parameters:
         - title (required): Document title
-        - content (required): Document content in markdown format
+        - content (optional): Document content in HTML format. Required if file_path not provided.
+        - file_path (optional): Path to HTML file to read content from. Required if content not provided.
         - projectId (optional): Associated project ID
         - teamId (optional): Associated team ID
         - tags (optional): Array of tag strings
         - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
         - visibleToMembers (optional): Array of email addresses
         - metadata (optional): JSON object for additional metadata
-        
+
         Content Format:
-        - Input: Markdown format (required)
-        - Output: Markdown format (returned to agent)
-        
+        - Input: HTML format (from content parameter or file_path)
+        - Output: HTML format (returned to agent)
+        - Storage: Converted to TipTap JSON format internally
+
         Returns:
         - Success: Dictionary with doc id and created fields
         - Error: Dictionary with error message
@@ -149,7 +151,11 @@ class DocManagementTool(BaseAPIClient):
                     },
                     "content": {
                         "type": "string",
-                        "description": "Document content in HTML format (required). Will be converted to TipTap JSON format for storage."
+                        "description": "Document content in HTML format. Required if file_path not provided. Will be converted to TipTap JSON format for storage."
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to HTML file to read content from. Required if content not provided."
                     },
                     "projectId": {
                         "type": "string",
@@ -179,14 +185,15 @@ class DocManagementTool(BaseAPIClient):
                         "description": "JSON object for additional metadata"
                     }
                 },
-                "required": ["title", "content"]
+                "required": ["title"]
             }
         }
     
     def create_doc(
         self,
         title: str,
-        content: str,
+        content: Optional[str] = None,
+        file_path: Optional[str] = None,
         projectId: Optional[str] = None,
         teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
@@ -197,24 +204,36 @@ class DocManagementTool(BaseAPIClient):
     ) -> Dict[str, Any]:
         """
         Create a new document via API.
-        
+
         Args:
             title: Document title (required)
-            content: Document content in HTML format (required)
+            content: Document content in HTML format (required if file_path not provided)
+            file_path: Path to HTML file to read content from (alternative to content parameter)
             projectId: Associated project ID
             teamId: Associated team ID
             tags: Array of tag strings
             visibility: Document visibility
             visibleToMembers: Array of email addresses
             metadata: JSON object for additional metadata
-            
+
         Returns:
             Dictionary with doc id and created fields, or error dictionary
         """
         try:
-            if not title or not content:
-                return {"error": "title and content are required"}
-            
+            # Handle file_path parameter - read content from file if provided
+            if file_path:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    logger.debug(f"Read content from file: {file_path}")
+                except Exception as e:
+                    return {"error": f"Failed to read file {file_path}: {str(e)}"}
+            elif not content:
+                return {"error": "Either content or file_path must be provided"}
+
+            if not title:
+                return {"error": "title is required"}
+
             # Normalize content to HTML (handles TipTap JSON, HTML, or markdown input)
             html_content = self._normalize_content_to_html(content)
             
@@ -246,7 +265,7 @@ class DocManagementTool(BaseAPIClient):
             # Call API to create document
             result = self._make_request('POST', '/api/docs', json=request_body)
             
-            logger.info(f"Document created via API: id={result.get('id')}, title={title}")
+            logger.debug(f"Document created via API: id={result.get('id')}, title={title}")
             
             # Return HTML content to agent (not TipTap JSON)
             return {
@@ -269,22 +288,23 @@ class DocManagementTool(BaseAPIClient):
     def update_doc_property(self):
         description = f"""
         Update an existing document in the docs table for org `{self.org_slug}`.
-        
+
         Parameters:
         - docId (required): Document ID to update
         - title (optional): Update title
         - content (optional): Update content in HTML format
+        - file_path (optional): Path to HTML file to read content from (alternative to content parameter)
         - projectId (optional): Update project association
         - teamId (optional): Update team association
         - tags (optional): Update tags array
         - visibility (optional): Update visibility
         - visibleToMembers (optional): Update visible members
         - metadata (optional): Update metadata
-        
+
         Content Format:
-        - Input: HTML format
+        - Input: HTML format (or HTML file via file_path)
         - Output: Success status (content is converted to TipTap JSON format for storage)
-        
+
         Returns:
         - Success: Dictionary with success: true
         - Error: Dictionary with error message
@@ -307,6 +327,10 @@ class DocManagementTool(BaseAPIClient):
                     "content": {
                         "type": "string",
                         "description": "Update content in HTML format. Will be converted to TipTap JSON format for storage."
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to HTML file to read content from (alternative to content parameter)"
                     },
                     "projectId": {
                         "type": "string",
@@ -445,194 +469,21 @@ class DocManagementTool(BaseAPIClient):
             if missing_ids:
                 logger.warning(f"Some document IDs were not found: {missing_ids}")
             
-            logger.info(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
+            logger.debug(f"Retrieved {len(docs)} documents out of {len(docIds)} requested")
             return docs
         except Exception as e:
             logger.error(f"Error getting documents: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
     
-    @property
-    def get_doc_html_path_property(self):
-        description = f"""
-        Get or create a temporary HTML file path for a document in org `{self.org_slug}`.
-        
-        This allows the AI agent to use the text editor tool to view and edit document content
-        in HTML format. The file is temporary and will be cleaned up after operations.
-        
-        Parameters:
-        - docId (required): Document ID
-        
-        Returns:
-        - Success: Path to temporary HTML file
-        - Error: Dictionary with error message
-        """
-        return {
-            "type": "custom",
-            "name": "get_doc_html_path",
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "docId": {
-                        "type": "string",
-                        "description": "Document ID (required)"
-                    }
-                },
-                "required": ["docId"]
-            }
-        }
     
-    @property
-    def create_doc_from_html_file_property(self):
-        description = f"""
-        Create a new document from an HTML file in org `{self.org_slug}`.
-        
-        This tool reads an HTML file (typically created/edited with the text editor tool),
-        converts it directly to TipTap JSON format, and saves it to the database. The temporary file is cleaned up
-        after the operation. Content is stored as TipTap JSON internally but returned as HTML to the agent.
-        
-        Parameters:
-        - file_path (required): Path to HTML file
-        - title (required): Document title
-        - projectId (optional): Associated project ID
-        - teamId (optional): Associated team ID
-        - tags (optional): Array of tag strings
-        - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
-        - visibleToMembers (optional): Array of email addresses
-        - metadata (optional): JSON object for additional metadata
-        
-        Returns:
-        - Success: Dictionary with doc id and created fields
-        - Error: Dictionary with error message
-        """
-        return {
-            "type": "custom",
-            "name": "create_doc_from_html_file",
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to HTML file (required)"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Document title (required)"
-                    },
-                    "projectId": {
-                        "type": "string",
-                        "description": "Associated project ID"
-                    },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Associated team ID"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Array of tag strings"
-                    },
-                    "visibility": {
-                        "type": "string",
-                        "enum": ["all_members", "specific_members"],
-                        "description": "Document visibility (default: 'all_members')"
-                    },
-                    "visibleToMembers": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Array of email addresses"
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "JSON object for additional metadata"
-                    }
-                },
-                "required": ["file_path", "title"]
-            }
-        }
-    
-    @property
-    def update_doc_from_html_file_property(self):
-        description = f"""
-        Update an existing document from an HTML file in org `{self.org_slug}`.
-        
-        This tool reads an HTML file (typically created/edited with the text editor tool),
-        converts it directly to TipTap JSON format, and updates the document in the database. The temporary file is
-        cleaned up after the operation. Content is stored as TipTap JSON internally but returned as HTML to the agent.
-        
-        Parameters:
-        - docId (required): Document ID to update
-        - file_path (required): Path to HTML file
-        - title (optional): Update title
-        - projectId (optional): Update project association
-        - teamId (optional): Update team association
-        - tags (optional): Update tags array
-        - visibility (optional): Update visibility
-        - visibleToMembers (optional): Update visible members
-        - metadata (optional): Update metadata
-        
-        Returns:
-        - Success: Dictionary with success: true
-        - Error: Dictionary with error message
-        """
-        return {
-            "type": "custom",
-            "name": "update_doc_from_html_file",
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "docId": {
-                        "type": "string",
-                        "description": "Document ID to update (required)"
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to HTML file (required)"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Update title"
-                    },
-                    "projectId": {
-                        "type": "string",
-                        "description": "Update project association"
-                    },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Update team association"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Update tags array"
-                    },
-                    "visibility": {
-                        "type": "string",
-                        "enum": ["all_members", "specific_members"],
-                        "description": "Update visibility"
-                    },
-                    "visibleToMembers": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Update visible members"
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "Update metadata"
-                    }
-                },
-                "required": ["docId", "file_path"]
-            }
-        }
     
     def update_doc(
         self,
         docId: str,
         title: Optional[str] = None,
         content: Optional[str] = None,
+        file_path: Optional[str] = None,
         projectId: Optional[str] = None,
         teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
@@ -643,25 +494,37 @@ class DocManagementTool(BaseAPIClient):
     ) -> Dict[str, Any]:
         """
         Update an existing document via API.
-        
+
         Args:
             docId: Document ID to update (required)
             title: Update title
-            content: Update content in HTML format
+            content: Update content in HTML format (required if file_path not provided)
+            file_path: Path to HTML file to read content from (alternative to content parameter)
             projectId: Update project association
             teamId: Update team association
             tags: Update tags array
             visibility: Update visibility
             visibleToMembers: Update visible members
             metadata: Update metadata
-            
+
         Returns:
             Dictionary with success status, or error dictionary
         """
         try:
             if not docId:
                 return {"error": "docId is required"}
-            
+
+            # Handle file_path parameter - read content from file if provided
+            if file_path:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    logger.debug(f"Read content from file: {file_path}")
+                except Exception as e:
+                    return {"error": f"Failed to read file {file_path}: {str(e)}"}
+            elif not content and not any([title, projectId, teamId, tags, visibility, visibleToMembers, metadata]):
+                return {"error": "Either content, file_path, or other update fields must be provided"}
+
             # Build update payload
             updates = {}
             
@@ -706,7 +569,7 @@ class DocManagementTool(BaseAPIClient):
             # Call API to update document
             result = self._make_request('PATCH', f'/api/docs/{docId}', json=updates)
             
-            logger.info(f"Document updated via API: id={docId}")
+            logger.debug(f"Document updated via API: id={docId}")
             return result if result else {"success": True}
         except Exception as e:
             logger.error(f"Error updating document: {str(e)}")
@@ -1669,7 +1532,7 @@ class DocManagementTool(BaseAPIClient):
             # Track the file (host path for local operations)
             self._temp_files[docId] = host_path
 
-            logger.info(f"Created workspace HTML file: {container_path} for doc {docId}")
+            logger.debug(f"Created workspace HTML file: {container_path} for doc {docId}")
             return container_path  # Return Docker-accessible path
 
         except Exception as e:
@@ -1686,7 +1549,7 @@ class DocManagementTool(BaseAPIClient):
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                logger.info(f"Cleaned up temporary file: {file_path}")
+                logger.debug(f"Cleaned up temporary file: {file_path}")
             
             # Remove from tracking
             docId_to_remove = None
@@ -1809,7 +1672,7 @@ class DocManagementTool(BaseAPIClient):
                 try:
                     with open(cached_path, 'r', encoding='utf-8') as f:
                         html_content = f.read()
-                    logger.info(f"Using cached temp file for HTML extraction: {cached_path}")
+                    logger.debug(f"Using cached temp file for HTML extraction: {cached_path}")
                 except Exception as e:
                     logger.warning(f"Failed to read cached temp file {cached_path}: {str(e)}")
                     html_content = None
@@ -1868,97 +1731,7 @@ class DocManagementTool(BaseAPIClient):
             logger.error(f"Error extracting text at HTML positions: {str(e)}")
             return {"error": str(e)}
     
-    def create_doc_from_html_file(
-        self,
-        file_path: str,
-        title: str,
-        projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        visibility: str = "all_members",
-        visibleToMembers: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Create a document from an HTML file.
-        
-        Args:
-            file_path: Path to HTML file
-            title: Document title
-            **kwargs: Additional arguments passed to create_doc
-            
-        Returns:
-            Dictionary with doc id and created fields, or error dictionary
-        """
-        try:
-            # Read HTML file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            # Sanitize HTML content
-            html_content = self._sanitize_html(html_content)
-            
-            # Create document with HTML content (will be converted directly to TipTap JSON)
-            result = self.create_doc(
-                title=title,
-                content=html_content,
-                projectId=projectId,
-                teamId=teamId,
-                tags=tags,
-                visibility=visibility,
-                visibleToMembers=visibleToMembers,
-                metadata=metadata,
-                **kwargs
-            )
-            
-            # Clean up temporary file if it was tracked
-            self.cleanup_temp_file(file_path)
-            
-            return result
-        except Exception as e:
-            logger.error(f"Error creating doc from HTML file: {str(e)}")
-            return {"error": f"Error reading HTML file: {str(e)}"}
     
-    def update_doc_from_html_file(
-        self,
-        docId: str,
-        file_path: str,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Update a document from an HTML file.
-        
-        Args:
-            docId: Document ID to update
-            file_path: Path to HTML file
-            **kwargs: Additional arguments passed to update_doc
-            
-        Returns:
-            Dictionary with success status, or error dictionary
-        """
-        try:
-            # Read HTML file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            # Sanitize HTML content
-            html_content = self._sanitize_html(html_content)
-            
-            # Update document with HTML content (will be converted directly to TipTap JSON)
-            result = self.update_doc(
-                docId=docId,
-                content=html_content,
-                **kwargs
-            )
-            
-            # Clean up temporary file if it was tracked
-            self.cleanup_temp_file(file_path)
-            
-            return result
-        except Exception as e:
-            logger.error(f"Error updating doc from HTML file: {str(e)}")
-            return {"error": f"Error reading HTML file: {str(e)}"}
     
     # ============================================================================
     # Helper Methods
@@ -2063,7 +1836,7 @@ class DocManagementTool(BaseAPIClient):
         if match:
             # Extract content between tags
             html_content = match.group(1).strip()
-            logger.info("HTML content detected (wrapped in <html> tags), sanitizing...")
+            logger.debug("HTML content detected (wrapped in <html> tags), sanitizing...")
             
             # Sanitize HTML before returning
             sanitized_html = self._sanitize_html(html_content)
@@ -2282,7 +2055,7 @@ class DocManagementTool(BaseAPIClient):
             # Apply limit
             filtered_docs = filtered_docs[:limit]
             
-            logger.info(f"Listed {len(filtered_docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
+            logger.debug(f"Listed {len(filtered_docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
             return filtered_docs
                 
         except Exception as e:
@@ -2409,11 +2182,11 @@ class DocManagementTool(BaseAPIClient):
     
     # Tool Property Definitions (for Claude API)
     @property
-    def create_doc_with_workflow_property(self):
-        """Property definition for create_doc_with_workflow tool."""
+    def get_create_doc_instruction_property(self):
+        """Property definition for get_create_doc_instruction tool."""
         return {
             "type": "custom",
-            "name": "create_doc_with_workflow",
+            "name": "get_create_doc_instruction",
             "description": f"""Create a new document using TOC-first workflow for org `{self.org_slug}`.
             
 This initiates an intelligent document creation workflow:
@@ -2440,27 +2213,22 @@ Use this for complex documents that need structured, token-safe creation.""",
         }
     
     @property
-    def update_doc_with_workflow_property(self):
-        """Property definition for update_doc_with_workflow tool."""
+    def get_update_doc_instruction_property(self):
+        """Property definition for get_update_doc_instruction tool."""
         return {
             "type": "custom",
-            "name": "update_doc_with_workflow",
-            "description": f"""Update an existing document using intelligent workflow for org `{self.org_slug}`.
-            
-Automatically detects the best update strategy based on doc size and request type:
+            "name": "get_update_doc_instruction",
+            "description": f"""Get instructions for updating documents using intelligent workflow for org `{self.org_slug}`.
+
+Automatically detects document size from conversation history and provides guidance on update strategies:
 - Direct update (< 30K tokens)
 - Targeted edit (specific location in large doc)
 - Broad update (general changes in large doc)
-- RAG fallback (unknown location in large doc)
 
-Returns strategy recommendation and next steps.""",
+Returns comprehensive workflow instructions.""",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "docId": {"type": "string", "description": "Document ID to update"},
-                    "update_request": {"type": "string", "description": "Description of what to update"}
-                },
-                "required": ["docId", "update_request"]
+                "properties": {}
             }
         }
     
@@ -2602,26 +2370,35 @@ Returns quality report with issues and suggestions.""",
         return {
             "type": "custom",
             "name": "edit_doc_section",
-            "description": f"""Edit a specific section in a document (end-to-end workflow) for org `{self.org_slug}`.
-            
-This consolidated tool handles the complete targeted edit workflow:
+            "description": f"""Edit or insert content in a document (end-to-end workflow) for org `{self.org_slug}`.
+
+This consolidated tool handles the complete targeted edit/insert workflow:
 1. Exports doc to temp file
-2. Searches for target area (exact → fuzzy → RAG fallback)
-3. Applies diff-first edit (OLD_BLOCK → NEW_BLOCK)
+2. Searches for target area (exact → fuzzy → RAG fallback) or uses HTML position
+3. Applies edit or insert operation
 4. Merges changes back to document
+
+Operations:
+- replace: Replace old_block with new_block
+- insert_before: Insert new_block before search_target
+- insert_after: Insert new_block after search_target
+- insert_at_position: Insert new_block at html_position
 
 Use this instead of calling export → search → edit → merge separately.
 Notes:
 - Reuses cached temp files when available to avoid re-fetching the document.
-- search_target should come from cited_context.selectedText.text when provided.
-- old_block must match the document HTML substring; if you have htmlFrom/htmlTo, this tool will extract the exact selection and surrounding context automatically.""",
+- For replace: search_target and old_block required
+- For insert_before/insert_after: search_target required
+- For insert_at_position: html_position required""",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "docId": {"type": "string", "description": "Document ID"},
-                    "search_target": {"type": "string", "description": "Text to search for to locate the section"},
-                    "old_block": {"type": "string", "description": "Exact text to replace"},
-                    "new_block": {"type": "string", "description": "Replacement text"},
+                    "operation": {"type": "string", "enum": ["replace", "insert_before", "insert_after", "insert_at_position"], "description": "Operation type (default: replace)"},
+                    "search_target": {"type": "string", "description": "Text to search for (required for replace, insert_before, insert_after)"},
+                    "old_block": {"type": "string", "description": "Exact text to replace (required for replace)"},
+                    "new_block": {"type": "string", "description": "Content to insert or replacement text"},
+                    "html_position": {"type": "integer", "description": "Character position for insert_at_position"},
                     "context_lines": {"type": "integer", "description": "Lines of context to show (default: 10)"},
                     "html_from": {"type": "integer", "description": "Optional: HTML start position (character offset)"},
                     "html_to": {"type": "integer", "description": "Optional: HTML end position (character offset)"},
@@ -2725,20 +2502,13 @@ Returns instructions for retrieving section content via search_documents and inc
             }
         }
 
-    def create_doc_with_workflow(
+    def get_create_doc_instruction(
         self,
         title: str,
-        requirements: str,
-        projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        visibility: str = "all_members",
-        visibleToMembers: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        **kwargs
+        requirements: str
     ) -> Dict[str, Any]:
         """
-        Create a new document using TOC-first workflow.
+        Get instructions for creating a new document using TOC-first workflow.
         
         This method orchestrates the complete document creation process:
         1. Generate TOC with document contract
@@ -2761,7 +2531,7 @@ Returns instructions for retrieving section content via search_documents and inc
             Dictionary with created document info or error
         """
         try:
-            logger.info(f"Starting TOC-first document creation: {title}")
+            logger.debug(f"Starting TOC-first document creation: {title}")
             
             # This is a placeholder that will return instructions for the agent
             # The actual workflow will be driven by agent interactions
@@ -2771,16 +2541,20 @@ Returns instructions for retrieving section content via search_documents and inc
                 "next_step": "generate_toc",
                 "instructions": """Document creation workflow initiated.
 
-Next steps:
+TOC-FIRST APPROACH:
 1. Analyze the requirements to determine if they provide clear structure or just a topic
 2. Generate a Table of Contents including:
    - Document Contract (purpose, audience, scope, non-goals, evidence rule)
    - Major sections (H1) with subsections (H2, optionally H3)
    - Max 3 heading levels
 3. Show the TOC for confirmation before drafting content
-4. Once confirmed, draft sections iteratively with context sandwiches
-5. Run quality passes after all sections are complete
-6. Create the final document
+4. Once confirmed, draft sections iteratively with context sandwiches (bridge-in, main content, bridge-out)
+5. Run quality passes after all sections are complete (continuity, formatting, compression)
+6. Create the final document with create_doc(file_path="/path/to/workspace/file")
+
+STANDARDS:
+- Evidence: Never invent facts. Use TODO/ASSUMPTION tags. Cite sources.
+- Quality: Max 3 heading levels (H1→H2→H3), consistent terminology, bridge sentences between sections, valid internal references, maintain change log.
 
 Please proceed with generating the TOC based on these requirements.""",
                 "requirements": requirements
@@ -2790,60 +2564,37 @@ Please proceed with generating the TOC based on these requirements.""",
             logger.error(f"Error in create_doc_with_workflow: {str(e)}")
             return {"error": str(e)}
     
-    def update_doc_with_workflow(
-        self,
-        docId: str,
-        update_request: str,
-        **kwargs
-    ) -> Dict[str, Any]:
+    def get_update_doc_instruction(
+        self
+    ) -> str:
         """
-        Update an existing document using intelligent workflow.
-        
-        This method:
-        1. Loads the document and checks size
-        2. Determines update strategy (direct/targeted/broad/RAG)
-        3. Executes appropriate update workflow
-        4. Runs post-update validation
-        
-        Args:
-            docId: Document ID to update
-            update_request: Description of what to update
-            **kwargs: Additional update parameters
-            
+        Get instructions for updating an existing document using intelligent workflow.
+
         Returns:
-            Dictionary with update status or error
+            Instructions for document update workflow
         """
         try:
-            logger.info(f"Starting intelligent document update: {docId}")
-            
-            # Load document
-            doc_result = self.get_doc([docId])
-            if "error" in doc_result:
-                return doc_result
-            
-            if not isinstance(doc_result, list) or not doc_result:
-                return {"error": f"Document not found for id: {docId}"}
+            logger.debug("Starting document update instructions")
 
-            content = doc_result[0].get("content", "")
-            
-            # Detect strategy
-            strategy = self._detect_update_strategy(content, update_request)
-            
-            return {
-                "workflow_initiated": True,
-                "docId": docId,
-                "strategy": strategy["strategy"],
-                "doc_size_tokens": strategy["doc_size_tokens"],
-                "fits_in_context": strategy["fits_in_context"],
-                "has_specific_target": strategy["has_specific_target"],
-                "instructions": self._get_update_instructions(strategy),
-                "current_content": content if strategy["fits_in_context"] else None,
-                "update_request": update_request
-            }
-            
+            return """Document update instructions initiated.
+
+CHECK CONVERSATION HISTORY for document size indicators:
+- Look for recent assistant messages starting with: "Large unstructured response stored in temporary text file."
+- If you see this pattern → Document is LARGE (>30K tokens, stored as files)
+- If no such patterns → Document is SMALL (<30K tokens)
+
+For LARGE documents (>30K tokens, stored as files):
+   - TARGETED (user specifies location): Prefer edit_doc_section() when cited_context.selectedText is available. Use search_target (selected_text.text), old_block, new_block. If HTML positions available, use extract_text_at_html_positions() for verification. Avoid full-document overwrites unless targeted edit fails with a clear error.
+   - BROAD (general changes): Use generate_impact_map() → for each section: use search_large_doc() → update with update_section_with_rag()
+
+For SMALL documents (<30K tokens):
+   - DIRECT: Load full content → apply updates → update_doc() → finalize_doc_update()
+
+Please proceed with loading the document and determining the best update strategy."""
+
         except Exception as e:
-            logger.error(f"Error in update_doc_with_workflow: {str(e)}")
-            return {"error": str(e)}
+            logger.error(f"Error in get_update_doc_instruction: {str(e)}")
+            return f"Error getting update instructions: {str(e)}"
     
     # ============================================================================
     # TOC Generation and Document Structure
@@ -3125,7 +2876,7 @@ Please proceed with generating the TOC based on these requirements.""",
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(updated_content)
             
-            logger.info(f"Upserted section {section_id} to {file_path}")
+            logger.debug(f"Upserted section {section_id} to {file_path}")
             
             return {
                 "success": True,
@@ -3183,13 +2934,22 @@ Please proceed with generating the TOC based on these requirements.""",
         
         Args:
             toc: Table of Contents structure
-            output_file: Path to output file for iterative writing
+            output_file: Path to output file for iterative writing (will be converted to /workspace/ if not already)
             
         Returns:
             Instructions and section list for agent
         """
         sections = self.get_section_list_from_toc(toc)
-        
+
+        # Ensure output_file is in Docker workspace
+        if not output_file.startswith('/workspace/'):
+            import os
+            filename = os.path.basename(output_file)
+            if not filename:
+                filename = f"working_doc_{hash(str(toc)) % 10000}.html"
+            output_file = f"/workspace/{filename}"
+            logger.info(f"Converted output_file to Docker workspace path: {output_file}")
+
         return {
             "workflow": "iterative_drafting",
             "output_file": output_file,
@@ -3209,7 +2969,10 @@ For each section:
 
 After all sections are drafted:
 - Run quality passes (continuity, formatting, compression if needed)
-- Create final document via create_doc()"""
+- Create final document by calling create_doc() with file_path parameter:
+  * Use the output_file path returned in this response
+  * Pass it as file_path parameter to create_doc()
+  * Example: create_doc(title="Document Title", file_path="/workspace/working_doc.html")"""
         }
     
     # ============================================================================
@@ -3574,9 +3337,11 @@ After all sections are drafted:
     def edit_doc_section(
         self,
         docId: str,
-        search_target: str,
-        old_block: str,
-        new_block: str,
+        operation: str = "replace",
+        search_target: Optional[str] = None,
+        old_block: Optional[str] = None,
+        new_block: Optional[str] = None,
+        html_position: Optional[int] = None,
         context_lines: int = 10,
         html_from: Optional[int] = None,
         html_to: Optional[int] = None,
@@ -3584,26 +3349,51 @@ After all sections are drafted:
         context_after: int = 0
     ) -> Dict[str, Any]:
         """
-        Edit a specific section in a document (end-to-end workflow).
-        
-        This consolidated method handles the complete targeted edit workflow:
+        Edit or insert content in a document (end-to-end workflow).
+
+        This consolidated method handles the complete targeted edit/insert workflow:
         1. Export doc to temp file
-        2. Search for target area (exact → fuzzy → RAG)
-        3. Apply diff-first edit
+        2. Search for target area (exact → fuzzy → RAG) or use HTML position
+        3. Apply diff-first edit or insert operation
         4. Merge changes back to document
-        
+
         Args:
             docId: Document ID
-            search_target: Text to search for (helps locate the section)
-            old_block: Exact text to replace
-            new_block: Replacement text
+            operation: Type of operation - "replace", "insert_before", "insert_after", "insert_at_position"
+            search_target: Text to search for (helps locate the section for insert_before/insert_after)
+            old_block: Exact text to replace (required for "replace" operation)
+            new_block: New content to insert or replacement text
+            html_position: Character position for insert_at_position operation
             context_lines: Lines of context to show (default: 10)
-            
+
         Returns:
             Dictionary with edit status and details
         """
         try:
-            logger.info(f"Starting consolidated edit workflow for doc {docId}")
+            logger.debug(f"Starting consolidated edit workflow for doc {docId} with operation: {operation}")
+
+            # Validate operation parameters
+            valid_operations = ["replace", "insert_before", "insert_after", "insert_at_position"]
+            if operation not in valid_operations:
+                return {"error": f"Invalid operation: {operation}. Must be one of {valid_operations}"}
+
+            # Validate required parameters based on operation
+            if operation == "replace":
+                if not old_block:
+                    return {"error": "old_block is required for replace operation"}
+                if new_block is None:  # Allow empty string but not None
+                    return {"error": "new_block is required for replace operation"}
+            elif operation in ["insert_before", "insert_after"]:
+                if not search_target:
+                    return {"error": f"search_target is required for {operation} operation"}
+                if new_block is None:  # Allow empty string but not None
+                    return {"error": "new_block is required for insert operations"}
+            elif operation == "insert_at_position":
+                if html_position is None:
+                    return {"error": "html_position is required for insert_at_position operation"}
+                if new_block is None:  # Allow empty string but not None
+                    return {"error": "new_block is required for insert operations"}
+
             temp_file = None
             tokens_before = None
             preferred_offset = html_from
@@ -3631,22 +3421,38 @@ After all sections are drafted:
                         f"Failed to extract text at HTML positions for doc {docId}: {extraction.get('error')}"
                     )
 
-            # Step 1: Reuse existing temp file when available
-            cached_path = self._temp_files.get(docId)
-            if cached_path:
-                if os.path.exists(cached_path):
+            # Step 1: Check working context for existing HTML file
+            if self.working_context:
+                existing_resource = self.working_context.find_document_file(docId)
+                if existing_resource:
+                    host_path = existing_resource.get('metadata', {}).get('host_path')
+                    if host_path and os.path.exists(host_path):
+                        temp_file = host_path
+                        try:
+                            with open(temp_file, 'r', encoding='utf-8') as f:
+                                tokens_before = self.estimate_tokens(f.read())
+                        except Exception as e:
+                            logger.warning(f"Error reading working context file {temp_file}: {str(e)}")
+                        logger.info(f"Reusing working context HTML file for doc {docId}: {temp_file}")
+                        # Update cache reference
+                        self._temp_files[docId] = host_path
+
+            # Step 2: Check internal cache if not found in working context
+            if not temp_file:
+                cached_path = self._temp_files.get(docId)
+                if cached_path and os.path.exists(cached_path):
                     temp_file = cached_path
                     try:
                         with open(temp_file, 'r', encoding='utf-8') as f:
                             tokens_before = self.estimate_tokens(f.read())
                     except Exception as e:
-                        logger.warning(f"Error estimating tokens from cached file {temp_file}: {str(e)}")
-                    logger.info(f"Using cached temp file for doc {docId}: {temp_file}")
-                else:
+                        logger.warning(f"Error reading cached file {temp_file}: {str(e)}")
+                    logger.debug(f"Using cached temp file for doc {docId}: {temp_file}")
+                elif cached_path:
                     logger.warning(f"Cached temp file missing for doc {docId}: {cached_path}")
                     del self._temp_files[docId]
 
-            # Step 2: Load document and export to temp file if no cache is available
+            # Step 3: Create new temp file only if not found anywhere
             if not temp_file:
                 doc_result = self.get_doc([docId])
                 if "error" in doc_result:
@@ -3660,7 +3466,7 @@ After all sections are drafted:
                 if "error" in export_result:
                     return export_result
 
-                temp_file = export_result["file_path"]
+                temp_file = export_result["host_path"]
                 tokens_before = export_result.get("size_tokens")
             
             try:
@@ -3677,13 +3483,31 @@ After all sections are drafted:
                         "suggestion": search_result.get("suggestion", "Try RAG search or provide more specific target")
                     }
                 
-                # Step 4: Apply diff edit
-                edit_result = self._apply_diff_edit_internal(
-                    temp_file,
-                    old_block,
-                    new_block,
-                    preferred_offset=preferred_offset
-                )
+                # Step 4: Apply the appropriate operation
+                if operation == "replace":
+                    edit_result = self._apply_diff_edit_internal(
+                        temp_file,
+                        old_block,
+                        new_block,
+                        preferred_offset=preferred_offset
+                    )
+                elif operation == "insert_at_position":
+                    edit_result = self._apply_insert_at_position_internal(
+                        temp_file,
+                        html_position,
+                        new_block
+                    )
+                elif operation in ["insert_before", "insert_after"]:
+                    edit_result = self._apply_insert_near_target_internal(
+                        temp_file,
+                        search_target,
+                        new_block,
+                        insert_before=(operation == "insert_before"),
+                        preferred_offset=preferred_offset
+                    )
+                else:
+                    return {"error": f"Unsupported operation: {operation}"}
+
                 if "error" in edit_result:
                     return edit_result
                 
@@ -3740,7 +3564,7 @@ After all sections are drafted:
             Retrieved chunks with context
         """
         try:
-            logger.info(f"Searching large doc {docId} with query: {query}")
+            logger.debug(f"Searching large doc {docId} with query: {query}")
             
             # Load document to check if chunking needed
             doc_result = self.get_doc(docId)
@@ -3830,7 +3654,7 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             Validation report with change log entry
         """
         try:
-            logger.info(f"Finalizing update for doc {docId}")
+            logger.debug(f"Finalizing update for doc {docId}")
             
             # Step 1: Validate update
             if self.config["enable_post_update_validation"]:
@@ -4024,6 +3848,141 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
         matches.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         return matches[:5]  # Return top 5 matches
     
+    def _apply_insert_at_position_internal(
+        self,
+        file_path: str,
+        position: int,
+        new_block: str
+    ) -> Dict[str, Any]:
+        """
+        Insert content at a specific character position in document file.
+
+        Args:
+            file_path: Path to document file
+            position: Character position to insert at
+            new_block: Content to insert
+
+        Returns:
+            Status of insert operation
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if position < 0 or position > len(content):
+                return {
+                    "error": f"Position {position} is out of range (content length: {len(content)})"
+                }
+
+            updated_content = content[:position] + new_block + content[position:]
+
+            # Write back
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+
+            logger.debug(f"Applied insert at position {position} to {file_path}")
+
+            return {
+                "success": True,
+                "file_path": file_path,
+                "old_size_tokens": self.estimate_tokens(content),
+                "new_size_tokens": self.estimate_tokens(updated_content),
+                "operation": "insert_at_position"
+            }
+
+        except Exception as e:
+            logger.error(f"Error applying insert at position: {str(e)}")
+            return {"error": str(e)}
+
+    def _apply_insert_near_target_internal(
+        self,
+        file_path: str,
+        search_target: str,
+        new_block: str,
+        insert_before: bool = False,
+        preferred_offset: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Insert content before or after a search target in document file.
+
+        Args:
+            file_path: Path to document file
+            search_target: Text to search for
+            new_block: Content to insert
+            insert_before: If True, insert before target; if False, insert after
+            preferred_offset: Preferred position if multiple matches
+
+        Returns:
+            Status of insert operation
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Find all occurrences of search_target
+            occurrences = []
+            start = 0
+            while True:
+                idx = content.find(search_target, start)
+                if idx == -1:
+                    break
+                occurrences.append(idx)
+                start = idx + len(search_target)
+
+            if not occurrences:
+                return {
+                    "error": f"Search target '{search_target}' not found in document"
+                }
+
+            # Select the target occurrence
+            if len(occurrences) == 1:
+                target_idx = occurrences[0]
+            elif preferred_offset is not None:
+                target_idx = min(occurrences, key=lambda x: abs(x - preferred_offset))
+            else:
+                # Try to disambiguate using surrounding context
+                context_window = 50
+                matches_with_context = []
+                for idx in occurrences:
+                    start = max(0, idx - context_window)
+                    end = min(len(content), idx + len(search_target) + context_window)
+                    snippet = content[start:end]
+                    matches_with_context.append((idx, snippet))
+
+                # If still ambiguous, return error with examples
+                snippets = [s for _, s in matches_with_context[:3]]
+                return {
+                    "error": f"Search target appears {len(occurrences)} times",
+                    "suggestion": "Provide more context to make the target unique",
+                    "examples": snippets
+                }
+
+            # Calculate insert position
+            if insert_before:
+                insert_pos = target_idx
+            else:
+                insert_pos = target_idx + len(search_target)
+
+            updated_content = content[:insert_pos] + new_block + content[insert_pos:]
+
+            # Write back
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+
+            logger.debug(f"Applied insert {'before' if insert_before else 'after'} target to {file_path}")
+
+            return {
+                "success": True,
+                "file_path": file_path,
+                "old_size_tokens": self.estimate_tokens(content),
+                "new_size_tokens": self.estimate_tokens(updated_content),
+                "operation": "insert_before" if insert_before else "insert_after"
+            }
+
+        except Exception as e:
+            logger.error(f"Error applying insert near target: {str(e)}")
+            return {"error": str(e)}
+
     def _apply_diff_edit_internal(
         self,
         file_path: str,
@@ -4033,12 +3992,12 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
     ) -> Dict[str, Any]:
         """
         Apply diff-first edit to document file.
-        
+
         Args:
             file_path: Path to document file
             old_block: Text to replace (must match exactly)
             new_block: Replacement text
-            
+
         Returns:
             Status of edit operation
         """
@@ -4098,7 +4057,7 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(updated_content)
             
-            logger.info(f"Applied diff edit to {file_path}")
+            logger.debug(f"Applied diff edit to {file_path}")
             
             return {
                 "success": True,
@@ -4146,7 +4105,7 @@ The document has been chunked into {chunk_result['chunk_count']} chunks by {chun
             if "error" in result:
                 return result
             
-            logger.info(f"Merged temp file to doc {doc_id}")
+            logger.debug(f"Merged temp file to doc {doc_id}")
             
             return {
                 "success": True,
@@ -4277,7 +4236,7 @@ Output format:
                 }
             )
             
-            logger.info(f"Chunked doc {doc_id} into {len(chunks)} chunks, stored as {rag_doc_id}")
+            logger.debug(f"Chunked doc {doc_id} into {len(chunks)} chunks, stored as {rag_doc_id}")
             
             return {
                 "success": True,
@@ -4738,31 +4697,37 @@ The chunks include overlap with neighbors for continuity.""",
         strategy_type = strategy["strategy"]
         
         if strategy_type == "direct":
-            return """The document fits in context. You can update it directly:
-1. Review the current content
-2. Apply the requested updates
+            return """DIRECT UPDATE (doc < 30K tokens):
+The document fits in context. You can update it directly:
+1. Load full content and review current state
+2. Apply the requested updates to the content
 3. Use update_doc() to save changes
-4. Run post-update validation if enabled"""
+4. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
         
         elif strategy_type == "targeted":
-            return """The document is large but you have a specific target. Use targeted edit workflow:
-1. Export the document to a temp file
-2. Search for the target area (exact match, then fuzzy if needed)
-3. Extract a local window (context before + target + context after)
-4. Apply diff-first edit (OLD_BLOCK → NEW_BLOCK)
-5. Merge changes back using update_doc()
-6. Run post-update validation"""
+            return """TARGETED EDIT (large doc, user specifies location):
+The document is large but you have a specific target. Use targeted edit workflow:
+1. Prefer edit_doc_section() when cited_context.selectedText is available
+2. Use search_target (selected_text.text), old_block, new_block for precise edits
+3. If HTML positions available (htmlFrom, htmlTo), use extract_text_at_html_positions() for verification
+4. Avoid full-document overwrites unless targeted edit fails with a clear error
+5. Export the document to a temp file only if needed for complex edits
+6. Search for the target area (exact match, then fuzzy if needed)
+7. Extract a local window (context before + target + context after)
+8. Apply diff-first edit (OLD_BLOCK → NEW_BLOCK)
+9. Merge changes back using update_doc()
+10. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
         
         else:  # broad
-            return """The document is large and requires broad updates. Use structure-first workflow:
-1. Generate an impact map (which sections need updates)
-2. Optionally confirm with user
+            return """BROAD UPDATE (large doc, no specific location):
+The document is large and requires broad updates. Use structure-first workflow:
+1. Generate an impact map with generate_impact_map() to identify which sections need updates
+2. Optionally confirm impact map with user
 3. For each impacted section:
-   - Retrieve section using RAG search
-   - Update with new information
-   - Upsert back to document
-4. Run post-update validation
-5. Update change log"""
+   - Use search_large_doc() to retrieve the section
+   - Update with new information using update_section_with_rag()
+   - Upsert changes back to document
+4. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
     
     # ============================================================================
     # Workspace File Management
@@ -4815,12 +4780,13 @@ The chunks include overlap with neighbors for continuity.""",
                     'tool': 'doc_management',
                     'operation': 'workflow',
                     'doc_id': doc_id,
+                    'doc_ids': [doc_id] if doc_id else [],  # NEW: consistent with Large Response Handler
                     'file_type': suffix,
                     'host_path': file_path
                 }
             )
 
-        logger.info(f"Created workflow file: {file_path}")
+        logger.debug(f"Created workflow file: {file_path}")
         return f'/workspace/{filename}'  # Return Docker-accessible path
 
     def _get_workspace_dir(self) -> str:

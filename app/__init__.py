@@ -21,6 +21,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress verbose loggers while keeping essential tool/response logs
+logging.getLogger('leanworks.rag').setLevel(logging.WARNING)  # Covers query, chat, embedding, reranker, span_selection
+logging.getLogger('leanworks.agent.tools.toolkit').setLevel(logging.WARNING)
+logging.getLogger('leanworks.agent.tools.base_api_client').setLevel(logging.WARNING)
+logging.getLogger('leanworks.agent.tools.search').setLevel(logging.WARNING)
+logging.getLogger('leanworks.agent.conversation').setLevel(logging.INFO)  # Keep for tool calls
+logging.getLogger('leanworks.agent.chat').setLevel(logging.INFO)  # Keep for final response
+logging.getLogger('leanworks.agent.memory').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+
 # Firebase Admin SDK for Bearer token authentication
 try:
     import firebase_admin

@@ -110,7 +110,7 @@ class ToolUse:
             logger.info("DuckDB tools registered (stateless)")
         
         # Log initialization completion
-        logger.info(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
+        logger.debug(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
     
 
     # Lazy loading properties for individual tools
@@ -142,7 +142,7 @@ class ToolUse:
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')
-                    logger.info("DocManagementTool initialized successfully (lazy)")
+                    logger.debug("DocManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize DocManagementTool: {str(e)}")
                     self._tool_cache['doc_management_tool'] = None
@@ -171,7 +171,7 @@ class ToolUse:
                     )
                     if 'search' not in self.enabled_tools:
                         self.enabled_tools.append('search')
-                    logger.info("SearchTool initialized successfully (lazy)")
+                    logger.debug("SearchTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize SearchTool: {str(e)}")
                     self._tool_cache['search_tool'] = None
@@ -211,7 +211,7 @@ class ToolUse:
                     )
                     if 'outlook' not in self.enabled_tools:
                         self.enabled_tools.append('outlook')
-                    logger.info("OutlookTool initialized successfully (lazy)")
+                    logger.debug("OutlookTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize OutlookTool: {str(e)}")
                     self._tool_cache['outlook_tool'] = None
@@ -238,7 +238,7 @@ class ToolUse:
                     )
                     if 'task_management' not in self.enabled_tools:
                         self.enabled_tools.append('task_management')
-                    logger.info("TaskManagementTool initialized successfully (lazy)")
+                    logger.debug("TaskManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize TaskManagementTool: {str(e)}")
                     self._tool_cache['task_management_tool'] = None
@@ -261,7 +261,7 @@ class ToolUse:
                     )
                     if 'project_management' not in self.enabled_tools:
                         self.enabled_tools.append('project_management')
-                    logger.info("ProjectManagementTool initialized successfully (lazy)")
+                    logger.debug("ProjectManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize ProjectManagementTool: {str(e)}")
                     self._tool_cache['project_management_tool'] = None
@@ -284,7 +284,7 @@ class ToolUse:
                     )
                     if 'event_management' not in self.enabled_tools:
                         self.enabled_tools.append('event_management')
-                    logger.info("EventManagementTool initialized successfully (lazy)")
+                    logger.debug("EventManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize EventManagementTool: {str(e)}")
                     self._tool_cache['event_management_tool'] = None
@@ -307,7 +307,7 @@ class ToolUse:
                     )
                     if 'user_management' not in self.enabled_tools:
                         self.enabled_tools.append('user_management')
-                    logger.info("UserManagementTool initialized successfully (lazy)")
+                    logger.debug("UserManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize UserManagementTool: {str(e)}")
                     self._tool_cache['user_management_tool'] = None
@@ -330,7 +330,7 @@ class ToolUse:
                     )
                     if 'chat_management' not in self.enabled_tools:
                         self.enabled_tools.append('chat_management')
-                    logger.info("ChatManagementTool initialized successfully (lazy)")
+                    logger.debug("ChatManagementTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize ChatManagementTool: {str(e)}")
                     self._tool_cache['chat_management_tool'] = None
@@ -357,7 +357,7 @@ class ToolUse:
                     )
                     if 'cloud_storage' not in self.enabled_tools:
                         self.enabled_tools.append('cloud_storage')
-                    logger.info("CloudStorageTool initialized successfully (lazy)")
+                    logger.debug("CloudStorageTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize CloudStorageTool: {str(e)}")
                     self._tool_cache['cloud_storage_tool'] = None
@@ -396,7 +396,7 @@ class ToolUse:
                     )
                     if 'jira' not in self.enabled_tools:
                         self.enabled_tools.append('jira')
-                    logger.info("AtlassianTool initialized successfully (lazy)")
+                    logger.debug("AtlassianTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize AtlassianTool: {str(e)}")
                     self._tool_cache['atlassian_tool'] = None
@@ -440,7 +440,7 @@ class ToolUse:
                     )
                     if 'github' not in self.enabled_tools:
                         self.enabled_tools.append('github')
-                    logger.info("GitHubTool initialized successfully (lazy)")
+                    logger.debug("GitHubTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize GitHubTool: {str(e)}")
                     self._tool_cache['github_tool'] = None
@@ -477,7 +477,7 @@ class ToolUse:
                     )
                     if 'notion' not in self.enabled_tools:
                         self.enabled_tools.append('notion')
-                    logger.info("NotionTool initialized successfully (lazy)")
+                    logger.debug("NotionTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize NotionTool: {str(e)}")
                     self._tool_cache['notion_tool'] = None
@@ -514,7 +514,7 @@ class ToolUse:
                     )
                     if 'clickup' not in self.enabled_tools:
                         self.enabled_tools.append('clickup')
-                    logger.info("ClickUpTool initialized successfully (lazy)")
+                    logger.debug("ClickUpTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize ClickUpTool: {str(e)}")
                     self._tool_cache['clickup_tool'] = None
@@ -551,7 +551,7 @@ class ToolUse:
                     )
                     if 'linear' not in self.enabled_tools:
                         self.enabled_tools.append('linear')
-                    logger.info("LinearTool initialized successfully (lazy)")
+                    logger.debug("LinearTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize LinearTool: {str(e)}")
                     self._tool_cache['linear_tool'] = None
@@ -610,7 +610,7 @@ class ToolUse:
                     self.container_id = result.stdout.strip()
                     self.session_temp_dir = session_temp_dir
                     self.container_workspace_path = container_mount_path
-                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
+                    logger.debug(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
                     
                 except FileNotFoundError:
                     raise Exception("Docker is not installed or not in PATH")
@@ -1277,13 +1277,10 @@ EOF"""
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
                     self.doc_management_tool.list_docs_property,
-                    # HTML-based doc management tools
-                    self.doc_management_tool.get_doc_html_path_property,
-                    self.doc_management_tool.create_doc_from_html_file_property,
-                    self.doc_management_tool.update_doc_from_html_file_property,
+                    # HTML-based doc management tools (removed - use create_doc/update_doc directly)
                     # Workflow tools (now part of DocManagementTool)
-                    self.doc_management_tool.create_doc_with_workflow_property,
-                    self.doc_management_tool.update_doc_with_workflow_property,
+                    self.doc_management_tool.get_create_doc_instruction_property,
+                    self.doc_management_tool.get_update_doc_instruction_property,
                     self.doc_management_tool.generate_toc_property,
                     self.doc_management_tool.create_toc_file_property,
                     self.doc_management_tool.prepare_section_context_property,
@@ -1328,6 +1325,7 @@ EOF"""
             if self.user_management_tool:
                 self._tools_cache.extend([
                     self.user_management_tool.query_users_property,
+                    self.user_management_tool.get_user_identification_instruction_property,
                 ])
                 logger.info("UserManagementTool tools added to tools list (lazy)")
             
@@ -1443,9 +1441,9 @@ EOF"""
                 self.bash_tool_property,
                 self.text_editor_tool_property
             ])
-            logger.info("Client tools added to tools list (bash, text_editor)")
-            
-            logger.info(f"Tools list built with {len(self._tools_cache)} tools")
+            logger.debug("Client tools added to tools list (bash, text_editor)")
+
+            logger.debug(f"Tools list built with {len(self._tools_cache)} tools")
         
         return self._tools_cache
 
@@ -1463,13 +1461,10 @@ EOF"""
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
                     "list_docs": self.doc_management_tool.list_docs,
-                    # HTML-based doc management functions
-                    "get_doc_html_path": self.doc_management_tool.get_doc_html_path,
-                    "create_doc_from_html_file": self.doc_management_tool.create_doc_from_html_file,
-                    "update_doc_from_html_file": self.doc_management_tool.update_doc_from_html_file,
+                    # HTML-based doc management functions (removed - use create_doc/update_doc directly)
                     # Workflow functions (now part of DocManagementTool)
-                    "create_doc_with_workflow": self.doc_management_tool.create_doc_with_workflow,
-                    "update_doc_with_workflow": self.doc_management_tool.update_doc_with_workflow,
+                    "get_create_doc_instruction": self.doc_management_tool.get_create_doc_instruction,
+                    "get_update_doc_instruction": self.doc_management_tool.get_update_doc_instruction,
                     "generate_toc": self.doc_management_tool.generate_toc,
                     "create_toc_file": self.doc_management_tool.create_toc_file,
                     "prepare_section_context": self.doc_management_tool.prepare_section_context,
@@ -1514,6 +1509,7 @@ EOF"""
             if self.user_management_tool:
                 self._function_map_cache.update({
                     "query_users": self.user_management_tool.query_users,
+                    "get_user_identification_instruction": self.user_management_tool.get_user_identification_instruction,
                 })
                 logger.info("UserManagementTool functions added to function_map (lazy)")
             
@@ -1629,10 +1625,10 @@ EOF"""
                 "bash": self.bash,
                 "str_replace_based_edit_tool": self.text_editor
             })
-            logger.info("Client tool functions added to function_map (bash, str_replace_based_edit_tool)")
+            logger.debug("Client tool functions added to function_map (bash, str_replace_based_edit_tool)")
 
-            logger.info(f"Function map built with {len(self._function_map_cache)} functions")
-            logger.info(f"Available functions: {list(self._function_map_cache.keys())}")
+            logger.debug(f"Function map built with {len(self._function_map_cache)} functions")
+            logger.debug(f"Available functions: {list(self._function_map_cache.keys())}")
         
         return self._function_map_cache
     
@@ -1677,7 +1673,7 @@ EOF"""
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap
                     )
-                    logger.info("RAGStorageTool initialized successfully (reusing SearchTool clients)")
+                    logger.debug("RAGStorageTool initialized successfully (reusing SearchTool clients)")
                 except Exception as e:
                     logger.warning(f"Failed to initialize RAGStorageTool: {e}")
                     self._rag_storage = False  # Mark as unavailable
@@ -1707,7 +1703,7 @@ EOF"""
                              capture_output=True, timeout=10)
                 subprocess.run(['docker', 'rm', '-f', session.container_name],
                              capture_output=True, timeout=10)
-                logger.info(f"Cleaned up Docker container {session.container_name}")
+                logger.debug(f"Cleaned up Docker container {session.container_name}")
                 self._bash_session = None
             except Exception as e:
                 logger.warning(f"Error cleaning up Docker container: {e}")
