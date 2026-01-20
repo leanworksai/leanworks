@@ -132,7 +132,7 @@ AGENT_SYSTEM_PROMPT = """
     
     You have below tools at your disposal to answer project management related questions.
     PostgreSQL tools: query_postgres
-    Document management tools: create_doc, update_doc, get_doc, list_docs, get_create_doc_instruction, get_update_doc_instruction, generate_toc, create_toc_file, prepare_section_context, upsert_section_to_file, draft_document_iteratively, run_quality_passes, edit_doc_section, search_large_doc, finalize_doc_update, generate_impact_map, update_section_with_rag, extract_text_at_html_positions
+    Document management tools: create_doc, update_doc, get_doc, list_docs, get_create_doc_instruction, get_update_doc_instruction, generate_toc, create_toc_file, prepare_section_context, upsert_section_to_file, draft_document_iteratively, run_quality_passes, extract_text_at_html_positions
     Search tools: search_documents
     Outlook tools: list_upcoming_meetings,find_available_slots
     Atlassian tools: search_issues,get_issue,create_issue,update_issue,add_comment,jira_search_users
@@ -218,38 +218,48 @@ AGENT_SYSTEM_PROMPT = """
     </large_tool_response_handling>
     
     <document_workflows>
-    ==================================================================================
-    DOCUMENT MANAGEMENT WORKFLOW - ALWAYS TAKES PRECEDENCE OVER LARGE TOOL RESPONSE HANDLING
-    ==================================================================================
-    
+    ===================================================================================
+    DOCUMENT MANAGEMENT WORKFLOW - READ + WRITE OPERATIONS
+    ===================================================================================
+
     When working with document management tools (create_doc, update_doc, get_doc, list_docs):
-    
-    CRITICAL: Document workflows have their OWN dedicated instructions. Do NOT apply <large_tool_response_handling> 
-    instructions to document management tasks. Even if get_doc returns a large document stored as a file, you MUST 
-    follow document workflow instructions below, NOT the generic file handling instructions above.
-    
+
+    CRITICAL: Documents use the SAME READ strategies as <large_tool_response_handling> PLAIN TEXT section,
+    but ADD editing/writing capabilities. Tool responses are READ ONLY; documents are READ + WRITE.
+
     WORKFLOW RULES:
-    1. Creating documents: 
+    1. Creating documents:
        - ALWAYS call get_create_doc_instruction() FIRST to get TOC-first workflow
        - Follow the returned instructions exactly
        - Use draft_document_iteratively() for section-by-section creation
-    
+
     2. Updating/Editing documents:
        - ALWAYS call get_update_doc_instruction() FIRST to get the editing strategy
-       - The instruction tool automatically detects document size and provides the right workflow
-       - Follow the returned instructions exactly (edit_doc_section for targeted edits, etc.)
-       - Do NOT try to use grep/text_editor directly on document files - use edit_doc_section instead
-    
+       - get_doc automatically converts TipTap JSON to HTML and creates temp file if needed
+
+       READ strategies (from <large_tool_response_handling> PLAIN TEXT):
+         * EXACT text/positions (cited_context.selectedText) → text_editor view_range if positions available, bash grep otherwise, RAG fallback if needed
+         * ABSTRACT description → RAG semantic search FIRST, then bash grep to verify position
+         * Follow <working_with_large_files> HYBRID WORKFLOW for search
+
+       WRITE operations (document-specific):
+         * Edit using text_editor (str_replace, insert) or bash tools (sed, awk)
+         * bash commands execute in Docker at /workspace/ - use Docker paths
+         * ALWAYS use update_doc with file_path parameter (NOT content parameter)
+         * update_doc automatically converts HTML back to TipTap JSON
+
     3. When you see cited_context.selectedText with docId:
-       - This indicates a targeted edit request
-       - Call get_update_doc_instruction() to get guidance
-       - Use edit_doc_section() with search_target (selected text) for precise edits
-       - Available operations: replace, insert_before, insert_after, insert_at_position
-    
+       - This indicates a targeted edit request with known exact text
+       - Call get_update_doc_instruction() to get workflow guidance
+       - If HTML positions available (htmlFrom, htmlTo): Use text_editor view_range FIRST to see exact area
+       - Use bash grep with selected text if positions not available (exact match preferred)
+       - Use text_editor str_replace with the selected text as old_str
+       - All file paths use Docker format: /workspace/filename.html
+
     Document tools support: content parameter OR file_path parameter for reading from files
-    
-    REMEMBER: Document management has specialized workflows. Do not confuse document editing with 
-    generic file editing. Use the document-specific instruction tools to get proper guidance.
+
+    REMEMBER: Documents REUSE large response handling READ strategies but ADD WRITE capabilities.
+    Tool responses are view-only; documents can be edited and saved.
     </document_workflows>
     
     SYSTEM GUARDRAILS:

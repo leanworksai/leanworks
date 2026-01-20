@@ -1287,11 +1287,6 @@ EOF"""
                     self.doc_management_tool.upsert_section_to_file_property,
                     self.doc_management_tool.draft_document_iteratively_property,
                     self.doc_management_tool.run_quality_passes_property,
-                    self.doc_management_tool.edit_doc_section_property,
-                    self.doc_management_tool.search_large_doc_property,
-                    self.doc_management_tool.finalize_doc_update_property,
-                    self.doc_management_tool.generate_impact_map_property,
-                    self.doc_management_tool.update_section_with_rag_property,
                     self.doc_management_tool.extract_text_at_html_positions_property,
                 ])
                 logger.info("Doc Management tools (including workflow) added to tools list (lazy)")
@@ -1471,11 +1466,6 @@ EOF"""
                     "upsert_section_to_file": self.doc_management_tool.upsert_section_to_file,
                     "draft_document_iteratively": self.doc_management_tool.draft_document_iteratively,
                     "run_quality_passes": self.doc_management_tool.run_quality_passes,
-                    "edit_doc_section": self.doc_management_tool.edit_doc_section,
-                    "search_large_doc": self.doc_management_tool.search_large_doc,
-                    "finalize_doc_update": self.doc_management_tool.finalize_doc_update,
-                    "generate_impact_map": self.doc_management_tool.generate_impact_map,
-                    "update_section_with_rag": self.doc_management_tool.update_section_with_rag,
                     "extract_text_at_html_positions": self.doc_management_tool.extract_text_at_html_positions,
                 })
                 logger.info("Doc Management functions (including workflow) added to function_map (lazy)")
