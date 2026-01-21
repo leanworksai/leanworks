@@ -35,10 +35,10 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json", working_context=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
-        
+
         Args:
             org_slug: Organization name (e.g., 'leanworks.ai') extracted from user_id. Used to determine database and client_name.
             firestore_client: Firestore client
@@ -48,6 +48,7 @@ class ToolUse:
             tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
                    External tools (e.g., 'outlook') should be explicitly provided in this list.
             credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
+            working_context: WorkingContext instance for tracking cited documents and resources
         """
         # Store initialization parameters for lazy loading
         self.org_slug = org_slug
@@ -67,6 +68,7 @@ class ToolUse:
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
         self.user_id = user_id
         self.session_id = session_id
+        self.working_context = working_context
         
         # Internal tools that are always available
         internal_tools = [
@@ -138,7 +140,8 @@ class ToolUse:
                         text_editor_tool=self.text_editor,
                         model_client=self.model_client,
                         config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None,
-                        memory_manager=getattr(self, 'memory_manager', None)  # Pass memory manager for working context
+                        memory_manager=getattr(self, 'memory_manager', None),  # Pass memory manager for working context
+                        working_context=self.working_context  # Pass working context directly
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')
@@ -594,7 +597,7 @@ class ToolUse:
                         '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
                         '-v', f'{session_temp_dir}:{container_mount_path}:rw',  # Mount session dir as writable
                         'alpine:latest',
-                        'sh', '-c', 'apk add --no-cache jq bash grep sed coreutils && tail -f /dev/null'  # Install jq, bash tools, and text editors
+                        'sh', '-c', 'apk add --no-cache jq bash grep sed coreutils duckdb && tail -f /dev/null'  # Install jq, bash tools, text editors, and DuckDB CLI
                     ]
                     
                     result = subprocess.run(
@@ -1280,6 +1283,7 @@ EOF"""
                     # HTML-based doc management tools (removed - use create_doc/update_doc directly)
                     # Workflow tools (now part of DocManagementTool)
                     self.doc_management_tool.get_create_doc_instruction_property,
+                    self.doc_management_tool.get_understand_doc_instruction_property,
                     self.doc_management_tool.get_update_doc_instruction_property,
                     self.doc_management_tool.generate_toc_property,
                     self.doc_management_tool.create_toc_file_property,
@@ -1459,6 +1463,7 @@ EOF"""
                     # HTML-based doc management functions (removed - use create_doc/update_doc directly)
                     # Workflow functions (now part of DocManagementTool)
                     "get_create_doc_instruction": self.doc_management_tool.get_create_doc_instruction,
+                    "get_understand_doc_instruction": self.doc_management_tool.get_understand_doc_instruction,
                     "get_update_doc_instruction": self.doc_management_tool.get_update_doc_instruction,
                     "generate_toc": self.doc_management_tool.generate_toc,
                     "create_toc_file": self.doc_management_tool.create_toc_file,
@@ -1600,12 +1605,23 @@ EOF"""
                 })
                 logger.info("Linear functions added to function_map (lazy)")
 
-            # Add DuckDB function mapping (response-scoped functions only)
+            # Add DuckDB function mapping (Docker-based operations)
             if 'duckdb' in self.requested_tools:
-                from leanworks.agent.tools.duckdb import query_response_duckdb, get_response_schema
+                from leanworks.agent.tools.duckdb import DockerDuckDBTool
+
+                def query_response_duckdb_docker(response_id: str, sql: str):
+                    """Docker-based DuckDB query function."""
+                    tool = DockerDuckDBTool(self._bash_session, response_id=response_id)
+                    return tool.query_duckdb(sql)
+
+                def get_response_schema_docker(response_id: str):
+                    """Docker-based DuckDB schema function."""
+                    tool = DockerDuckDBTool(self._bash_session, response_id=response_id)
+                    return tool.get_response_schema()
+
                 self._function_map_cache.update({
-                    "query_response_duckdb": query_response_duckdb,
-                    "get_response_schema": get_response_schema
+                    "query_response_duckdb": query_response_duckdb_docker,
+                    "get_response_schema": get_response_schema_docker
                 })
 
             # Add client tool function mappings (always available)

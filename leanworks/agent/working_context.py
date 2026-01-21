@@ -34,6 +34,8 @@ class WorkingContext:
         self.ttl_config = {
             'temp_file': 12,      # Temp files last 12 hours
             'document_id': 48,    # Document refs last 48 hours
+            'project_id': 48,     # Project refs last 48 hours
+            'task_id': 48,        # Task refs last 48 hours
             'storage_ref': 24,    # Storage refs last 24 hours
             'resource_id': 48,    # Generic IDs last 48 hours
             'tool_state': 24      # Tool state last 24 hours

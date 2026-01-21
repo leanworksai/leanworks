@@ -51,7 +51,8 @@ class QueryRewriter:
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.7,  # Use some temperature for diversity
-                    max_tokens=1000
+                    max_tokens=1000,
+                    response_format={"type": "json_schema"}
                 )
                 result = response.content[0].text
             else:
@@ -63,7 +64,7 @@ class QueryRewriter:
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.7,  # Use some temperature for diversity
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_schema"}
                 )
                 result = response.choices[0].message.content
 
@@ -122,7 +123,8 @@ class QueryRewriter:
                             {"role": "user", "content": user_prompt}
                         ],
                         temperature=0.7,  # Use same temperature as sync version
-                        max_tokens=1000
+                        max_tokens=1000,
+                        response_format={"type": "json_schema"}
                     )
                 )
                 result = response.content[0].text
@@ -137,7 +139,7 @@ class QueryRewriter:
                             {"role": "user", "content": user_prompt}
                         ],
                         temperature=0.7,  # Use same temperature as sync version
-                        response_format={"type": "json_object"}
+                        response_format={"type": "json_schema"}
                     )
                 )
                 result = response.choices[0].message.content

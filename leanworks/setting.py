@@ -125,19 +125,18 @@ AGENT_SYSTEM_PROMPT = """
     </communication>
 
     <cited_context_handling>
-    When the user provides cited context (delimited by <cited_context> tags), use it directly:
+    When cited context (delimited by <cited_context> tags) is provided, it serves as the most authoritative context/reference for the user's query. You should use it directly:
     
     - **selectedText** (highest priority): The user's directly highlighted text. Ground your answer in this content.
-    - **docs**: Referenced documents by id and title. Fetch them using get_understand_doc_instruction() and get_doc() - don't ask the user to provide the document again.
-    - **projects**: Referenced projects by id and name. Use them as context for your answer.
-    - **tasks**: Referenced tasks by id and title. Use them as context for your answer.
+    - **docs**: Referenced documents by id and title. 
+    - **projects**: Referenced projects by id and name.
+    - **tasks**: Referenced tasks by id and title.
     
     Guidelines:
-    - When docs are cited, actively fetch and use them via get_understand_doc_instruction() and get_doc() tools.
-    - Don't ask the user for information already provided in cited context (e.g., "Which document?" when docs are already cited).
+    - When docs are cited, use them directly. Please don't ask the user for information already provided in cited context (e.g., "Which document?" when docs are already cited).
     - If cited context is insufficient for a complete answer, supplement with additional tools and clarify the source.
     
-    If no <cited_context> block appears, answer normally using available tools.
+    If no <cited_context> block appears, answer normally using available tools. If the user asks about a document, use the get_understand_doc_instruction() tool to get the instructions for understanding the document.
     </cited_context_handling>
 
     <tool_calling>

@@ -36,11 +36,12 @@ class DocManagementTool(BaseAPIClient):
         text_editor_tool=None,
         model_client: Optional[anthropic.Anthropic] = None,
         config: Optional[Dict[str, Any]] = None,
-        memory_manager=None  # NEW: For working context registration
+        memory_manager=None,  # NEW: For working context registration
+        working_context=None  # NEW: For accessing cited documents
     ):
         """
         Initialize DocManagementTool with API access.
-        
+
         Args:
             postgres_client_wrapper: An object with attributes `org_slug` (organization name)
             user_id: Optional user ID used for attribution (falls back to AI_AGENT_ID if None)
@@ -50,6 +51,7 @@ class DocManagementTool(BaseAPIClient):
             text_editor_tool: Optional text editor tool function for file editing
             model_client: Optional Anthropic client for token counting API
             config: Optional workflow configuration (uses defaults from DOC_WORKFLOW_CONFIG if not provided)
+            working_context: Optional WorkingContext instance for accessing cited documents
         """
         # Get org_slug from wrapper (use client_name as fallback)
         org_slug = getattr(postgres_client_wrapper, 'org_slug', None)
@@ -80,7 +82,126 @@ class DocManagementTool(BaseAPIClient):
 
         # Store memory manager and working context reference
         self.memory_manager = memory_manager
-        self.working_context = memory_manager.working_context if memory_manager else None
+        # Use provided working_context, or fall back to memory_manager's working_context
+        self.working_context = working_context or (memory_manager.working_context if memory_manager else None)
+
+    # ============================================================================
+    # Working Context Query Tool
+    # ============================================================================
+
+    @property
+    def query_working_context_property(self):
+        description = f"""
+        Query working context to discover what resources have been loaded in this session.
+
+        Working context tracks:
+        - Documents loaded via get_doc (stored as files when large)
+        - Temporary files created by tools
+        - DuckDB response databases
+        - Document IDs from cited context
+
+        Use this tool to:
+        - Check if a document has already been loaded
+        - Find file paths for previously loaded content
+        - Discover what resources are available without re-fetching
+
+        Parameters:
+        - resource_type (optional): Filter by type ('tool_response_file', 'document_id', 'temp_file', 'storage_ref')
+        - doc_id (optional): Find resources related to a specific document ID
+        - search_metadata (optional): Search metadata fields (dict of key-value pairs)
+
+        Returns:
+        - List of resources with: resource_id, type, path, metadata (including doc_ids, tool, created_via), last_used
+        - Empty list if no matching resources found
+
+        Example queries:
+        - query_working_context(resource_type='tool_response_file') → All loaded files
+        - query_working_context(doc_id='57e6a9f7-...') → Resources for specific document
+        - query_working_context(search_metadata={{'tool': 'get_doc'}}) → Files from get_doc calls
+        """
+        return {
+            "type": "custom",
+            "name": "query_working_context",
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "resource_type": {
+                        "type": "string",
+                        "enum": ["tool_response_file", "document_id", "temp_file", "storage_ref"],
+                        "description": "Filter by resource type"
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Find resources related to this document ID"
+                    },
+                    "search_metadata": {
+                        "type": "object",
+                        "description": "Search by metadata fields (e.g., {'tool': 'get_doc'})"
+                    }
+                }
+            }
+        }
+
+    def query_working_context(
+        self,
+        resource_type: Optional[str] = None,
+        doc_id: Optional[str] = None,
+        search_metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Query working context for available resources"""
+
+        if not self.working_context:
+            return {
+                "error": "Working context not available",
+                "resources": []
+            }
+
+        # Handle doc_id query specially
+        if doc_id:
+            # Find all resources with this doc_id in metadata
+            all_resources = self.working_context.list_resources()
+            matching = []
+            for resource in all_resources:
+                metadata = resource.get('metadata', {})
+                doc_ids = metadata.get('doc_ids', [])
+                if doc_id in doc_ids:
+                    matching.append(resource)
+
+            if matching:
+                # Sort by most recently used
+                matching.sort(key=lambda x: x.get('last_used'), reverse=True)
+                return {
+                    "found": True,
+                    "count": len(matching),
+                    "resources": matching
+                }
+            else:
+                return {
+                    "found": False,
+                    "message": f"No resources found for document ID: {doc_id}",
+                    "resources": []
+                }
+
+        # Use working context query methods
+        if resource_type or search_metadata:
+            metadata_filters = search_metadata or {}
+            resources = self.working_context.find_resources_by_metadata(
+                resource_type=resource_type,
+                metadata_filters=metadata_filters
+            )
+        else:
+            # Get all resources
+            resources = self.working_context.list_resources()
+
+        # Sort by most recently used
+        resources.sort(key=lambda x: x.get('last_used'), reverse=True)
+
+        return {
+            "found": len(resources) > 0,
+            "count": len(resources),
+            "resources": resources
+        }
         
         # Load workflow configuration
         if config is None:
@@ -368,21 +489,24 @@ class DocManagementTool(BaseAPIClient):
     def get_doc_property(self):
         description = f"""
         Get one or more documents by their IDs from the docs table for org `{self.org_slug}`.
-        
+
         This tool retrieves full document content and all properties for the specified document IDs.
         Use this to read document content when you need the full text, not just a preview.
-        
+
+        IMPORTANT: This tool can only be called after get_create_doc_instruction, get_understand_doc_instruction, or get_update_doc_instruction tools.
+
         Parameters:
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
-        
+
         Returns:
-        - Success: List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success (large response): File path and summary. Access content using tools from <core_tools_reference> in system prompt. Semantic search available after RAG indexing completes.
         - Error: Dictionary with error message
-        
-        Note: Content is returned as HTML format (converted from TipTap JSON stored in database). Documents are stored in TipTap JSON format internally, but are automatically converted to HTML for the agent.
-        
+
+        Note: Content is always returned as HTML format (converted from TipTap JSON stored in database). Large responses are automatically handled by the system.
+
         Example Use Cases:
-        - Read a specific document's full content
+        - Read a specific document's full content for editing
         - Get multiple documents at once
         - Retrieve document details and content for analysis
         """
@@ -402,18 +526,59 @@ class DocManagementTool(BaseAPIClient):
                 "required": ["docIds"]
             }
         }
-    
+
+    @property
+    def summarize_doc_property(self):
+        """Property definition for summarize_doc tool."""
+        return {
+            "type": "custom",
+            "name": "summarize_doc",
+            "description": f"""
+Summarize a large document by processing it chunk-by-chunk for org `{self.org_slug}`.
+
+WHEN TO USE: Use this tool when get_doc returns a large document (file path instead of content)
+and you need to create a summary of the entire document.
+
+WHAT IT DOES:
+- Splits large document into manageable chunks
+- Returns chunks for you to process and synthesize into a complete summary
+
+PARAMETERS:
+- docId (required): The document ID to summarize
+- file_path (required): The file path returned by get_doc for large documents
+
+NOTE: For small documents (content returned directly), summarize the content directly.
+For large documents (file path returned), use this tool.
+""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {
+                        "type": "string",
+                        "description": "Document ID to summarize"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "File path returned by get_doc (for large documents)"
+                    }
+                },
+                "required": ["docId", "file_path"]
+            }
+        }
+
     def get_doc(
         self,
         docIds: List[str],
+        format: str = 'html',
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
         Get one or more documents by their IDs via API.
-        
+
         Args:
             docIds: List of document IDs to retrieve
-            
+            format: Content format ('html' or 'json', default: 'html')
+
         Returns:
             List of document dictionaries with full content, or error dictionary
         """
@@ -435,13 +600,16 @@ class DocManagementTool(BaseAPIClient):
             for doc_id in docIds:
                 try:
                     # Call API to get document
-                    doc = self._make_request('GET', f'/api/docs/{doc_id}')
+                    doc = self._make_request('GET', f'/api/docs/{doc_id}', params={'format': format})
                     
                     if doc:
-                        # Convert content from TipTap JSON (or legacy HTML) to HTML
+                        # Handle content format based on requested format
                         if 'content' in doc and doc['content']:
                             content = doc['content']
-                            doc['content'] = self._convert_content_to_html(content)
+                            if format == 'html':
+                                # Convert TipTap JSON to HTML
+                                doc['content'] = self._convert_content_to_html(content)
+                            # If format == 'json', keep raw content as-is
                         
                         # Normalize field names (API returns camelCase, but we want consistency)
                         if 'ownerEmail' in doc:
@@ -477,7 +645,103 @@ class DocManagementTool(BaseAPIClient):
             return {"error": error_msg}
     
     
-    
+
+    def summarize_doc(
+        self,
+        docId: str,
+        file_path: str,
+        **kwargs
+    ) -> str:
+        """
+        Summarize a large document by returning chunks for processing.
+
+        Args:
+            docId: Document ID
+            file_path: Path to document file (from get_doc response)
+
+        Returns:
+            Formatted chunks for LLM to summarize
+        """
+        try:
+            logger.info(f"Summarizing large document: {docId} from {file_path}")
+
+            # Read file content
+            if not os.path.exists(file_path):
+                return f"Error: File not found at {file_path}"
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Split into chunks (smart paragraph boundaries)
+            chunks = self._split_content_into_chunks(content, chunk_size=4000)
+
+            # Format chunks for LLM processing
+            formatted_chunks = []
+            for i, chunk in enumerate(chunks, 1):
+                formatted_chunks.append(f"""
+=== CHUNK {i} OF {len(chunks)} ===
+{chunk}
+====================
+""")
+
+            result = f"""Document split into {len(chunks)} chunks for summarization.
+
+{chr(10).join(formatted_chunks)}
+
+INSTRUCTIONS FOR SUMMARIZATION:
+1. Read and summarize each chunk above
+2. Combine the chunk summaries into a coherent overall summary
+3. Identify key themes, main points, and important details
+4. Structure: Overview + Key Sections + Conclusion
+
+Document ID: {docId}
+"""
+
+            logger.info(f"Returning {len(chunks)} chunks for document {docId}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error summarizing document {docId}: {e}")
+            return f"Error: {str(e)}"
+
+    def _split_content_into_chunks(self, content: str, chunk_size: int) -> List[str]:
+        """
+        Split content into chunks with smart paragraph boundaries.
+
+        Args:
+            content: Text content to split
+            chunk_size: Target size per chunk in characters
+
+        Returns:
+            List of text chunks
+        """
+        # Try to split on paragraph boundaries
+        paragraphs = content.split('\n\n')
+        chunks = []
+        current_chunk = []
+        current_size = 0
+
+        for para in paragraphs:
+            para_size = len(para)
+
+            # If adding this paragraph exceeds chunk size and we have content, start new chunk
+            if current_size + para_size > chunk_size and current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+                current_chunk = [para]
+                current_size = para_size
+            else:
+                current_chunk.append(para)
+                current_size += para_size
+
+        # Add remaining content
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+
+        return chunks if chunks else [content]  # Fallback to full content if no splits
+
+
+
+
     def update_doc(
         self,
         docId: str,
@@ -1593,8 +1857,8 @@ class DocManagementTool(BaseAPIClient):
         as a precise search target for editing operations.
         
         When the user provides selected text context (cited_context with selectedText),
-        HTML positions (htmlFrom, htmlTo) are automatically converted from ProseMirror
-        positions and made available. Use this tool to extract the exact text at those
+        Web app sends both ProseMirror positions (from, to) and HTML positions
+        (htmlFrom, htmlTo). Use this tool to extract the exact text at those HTML
         positions for accurate editing.
         
         Parameters:
@@ -2187,28 +2451,16 @@ class DocManagementTool(BaseAPIClient):
         return {
             "type": "custom",
             "name": "get_create_doc_instruction",
-            "description": f"""Create a new document using TOC-first workflow for org `{self.org_slug}`.
-            
-This initiates an intelligent document creation workflow:
-1. Analyzes requirements (clear vs exploratory)
-2. Generates Table of Contents with Document Contract
-3. Guides section-by-section drafting with context sandwiches
-4. Runs quality passes (continuity, formatting, compression)
+            "description": f"""
+WHEN TO USE: This tool should be the very first document management tool to call when the user asks to create a new document.
 
-Use this for complex documents that need structured, token-safe creation.""",
+WHAT IT RETURNS:
+Detailed workflow instructions for creating a new document.
+""",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Document title"},
-                    "requirements": {"type": "string", "description": "User requirements/description for the document"},
-                    "projectId": {"type": "string", "description": "Optional project ID"},
-                    "teamId": {"type": "string", "description": "Optional team ID"},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
-                    "visibility": {"type": "string", "enum": ["all_members", "specific_members"], "description": "Document visibility"},
-                    "visibleToMembers": {"type": "array", "items": {"type": "string"}, "description": "Optional list of email addresses"},
-                    "metadata": {"type": "object", "description": "Optional metadata"}
-                },
-                "required": ["title", "requirements"]
+                "properties": {},
+                "required": []
             }
         }
     
@@ -2218,20 +2470,39 @@ Use this for complex documents that need structured, token-safe creation.""",
         return {
             "type": "custom",
             "name": "get_update_doc_instruction",
-            "description": f"""Get instructions for updating documents using intelligent workflow for org `{self.org_slug}`.
+            "description": f"""
 
-Automatically detects document size from conversation history and provides guidance on update strategies:
-- Direct update (< 30K tokens)
-- Targeted edit (specific location in large doc)
-- Broad update (general changes in large doc)
+WHEN TO USE: This tool should be the very first document management tool to call when the user asks to update, edit, or modify an existing document (especially with selected text).
 
-Returns comprehensive workflow instructions.""",
+WHAT IT RETURNS:
+Detailed workflow instructions for updating/modifying an existing document.
+""",
             "input_schema": {
                 "type": "object",
-                "properties": {}
+                "properties": {},
+                "required": []
             }
         }
-    
+
+    @property
+    def get_understand_doc_instruction_property(self):
+        """Property definition for get_understand_doc_instruction tool."""
+        return {
+            "type": "custom",
+            "name": "get_understand_doc_instruction",
+            "description": f"""
+WHEN TO USE: This tool should be the first document management tool to call when the user asks to read, view, understand, analyze, or review an existing document WITHOUT making changes.
+
+WHAT IT RETURNS:
+Detailed workflow instructions for reading and understanding document content (both small and large documents).
+""",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+
     @property
     def generate_toc_property(self):
         """Property definition for generate_toc tool."""
@@ -2364,12 +2635,8 @@ Returns quality report with issues and suggestions.""",
             }
         }
     
-    @property
-
     def get_create_doc_instruction(
-        self,
-        title: str,
-        requirements: str
+        self
     ) -> Dict[str, Any]:
         """
         Get instructions for creating a new document using TOC-first workflow.
@@ -2383,50 +2650,38 @@ Returns quality report with issues and suggestions.""",
         Args:
             title: Document title
             requirements: User requirements/description for the document
-            projectId: Optional project association
-            teamId: Optional team association
-            tags: Optional tags
-            visibility: Document visibility
-            visibleToMembers: Optional list of emails for specific visibility
-            metadata: Optional metadata
-            **kwargs: Additional arguments
             
         Returns:
-            Dictionary with created document info or error
+            Dictionary with document creation instructions
         """
         try:
-            logger.debug(f"Starting TOC-first document creation: {title}")
+            logger.debug("Starting TOC-first document creation")
             
             # This is a placeholder that will return instructions for the agent
             # The actual workflow will be driven by agent interactions
-            return {
-                "workflow_initiated": True,
-                "title": title,
-                "next_step": "generate_toc",
-                "instructions": """Document creation workflow initiated.
+            return """Document creation workflow initiated.
 
-TOC-FIRST APPROACH:
-1. Analyze the requirements to determine if they provide clear structure or just a topic
-2. Generate a Table of Contents including:
-   - Document Contract (purpose, audience, scope, non-goals, evidence rule)
+WORKFLOW:
+1. Generate Table of Contents (use generate_toc tool)
+   - Include Document Contract (purpose, audience, scope, non-goals, evidence rule)
    - Major sections (H1) with subsections (H2, optionally H3)
    - Max 3 heading levels
-3. Show the TOC for confirmation before drafting content
-4. Once confirmed, draft sections iteratively with context sandwiches (bridge-in, main content, bridge-out)
-5. Run quality passes after all sections are complete (continuity, formatting, compression)
-6. Create the final document with create_doc(file_path="/path/to/workspace/file")
+2. Show TOC for confirmation before drafting
+3. Draft sections iteratively with context awareness (bridge-in, main content, bridge-out)
+4. Run quality validation (use run_quality_passes tool)
+5. Create final document (use create_doc with file_path parameter)
 
 STANDARDS:
 - Evidence: Never invent facts. Use TODO/ASSUMPTION tags. Cite sources.
-- Quality: Max 3 heading levels (H1→H2→H3), consistent terminology, bridge sentences between sections, valid internal references, maintain change log.
+- Quality: Max 3 heading levels, consistent terminology, bridge sentences, valid references
 
-Please proceed with generating the TOC based on these requirements.""",
-                "requirements": requirements
-            }
+For tool syntax and file operations, see <core_tools_reference> and <workspace_reference> in system prompt.
+
+Please proceed with generating the TOC based on these requirements."""
             
         except Exception as e:
-            logger.error(f"Error in create_doc_with_workflow: {str(e)}")
-            return {"error": str(e)}
+            logger.error(f"Error in get_create_doc_instruction: {str(e)}")
+            return f"Error getting create instructions: {str(e)}"
     
     def get_update_doc_instruction(
         self
@@ -2440,57 +2695,152 @@ Please proceed with generating the TOC based on these requirements.""",
         try:
             logger.debug("Starting document update instructions")
 
-            return """Document update instructions initiated.
-
-IMPORTANT: Documents follow the same READ strategies as large response handling, but ADD editing capabilities.
+            return """Document update workflow initiated.
 
 STEP 1: Load Document
-- Call get_doc([docId]) to fetch document content
-- get_doc automatically converts from TipTap JSON to HTML format
-- For large documents (>30K tokens), treated as PLAIN TEXT in large response handling:
-  * Automatically saved to /workspace/ directory
-  * File path provided in response
-  * Background RAG indexing initiated
+- Call get_doc([docId]) to fetch content
 
-STEP 2: READ - Use Large Response Handling Strategies
+STEP 2: Choose Workflow Based on Response
 
-Follow <large_tool_response_handling> PLAIN TEXT section for reading:
+WORKFLOW A: SMALL DOCUMENT (content returned directly)
+- Edit content string in memory
+- Apply all requested changes
+- Preserve HTML structure
+- Save: update_doc(docId, content=modified_html)
 
-EXACT MATCHING (when user provides exact text/positions via cited_context.selectedText):
-  - If HTML positions available (htmlFrom, htmlTo): Use text_editor view_range FIRST to see the exact area
-    Example: text_editor(command="view", path="/workspace/doc.html", view_range=[start_line, end_line])
-  - Use bash grep as backup: bash("grep -n 'exact text' /workspace/doc_file.html")
-  - Note: bash executes in Docker, use /workspace/ paths
-  - If grep fails, fallback to RAG semantic search
+WORKFLOW B: LARGE DOCUMENT (file path returned)
+- Locate content to edit:
+  * EXACT TEXT: Use grep to find line numbers (see <core_tools_reference>)
+  * SECTION DESCRIBED: Use search_tool_response_in_vectorstore, then grep
+- Edit file using text_editor (see <core_tools_reference>)
+- For multiple edits, repeat for each change
+- Save: update_doc(docId, file_path="/workspace/doc.html")
 
-SEMANTIC SEARCH (when user provides abstract description):
-  - Use RAG FIRST: search_tool_response_in_vectordb(query, document_id)
-  - Then verify exact position with bash grep
-  - Follow HYBRID WORKFLOW from <working_with_large_files>
-
-STEP 3: WRITE - Edit Document (Document-Specific)
-- Use text_editor for targeted edits:
-  - str_replace: text_editor(command="str_replace", path="/workspace/doc.html", old_str="...", new_str="...")
-  - insert: text_editor(command="insert", path="/workspace/doc.html", insert_line=N, new_str="...")
-- Use bash for complex edits (sed, awk, etc.)
-- All file operations use Docker paths: /workspace/filename.html
-
-STEP 4: WRITE - Save Changes (Document-Specific)
-- Call update_doc(docId=docId, file_path="/workspace/doc.html")
-- update_doc automatically converts HTML back to TipTap JSON for storage
-- ALWAYS use file_path parameter, NOT content parameter
-
-KEY DIFFERENCES FROM TOOL RESPONSES:
-- Tool responses: READ ONLY (view, search, analyze)
-- Documents: READ + WRITE (view, search, edit, save)
-- Documents reuse all read strategies but add editing operations
+KEY DIFFERENCE: Small docs use content parameter, large docs use file_path parameter.
 
 Please proceed with this workflow."""
 
         except Exception as e:
             logger.error(f"Error in get_update_doc_instruction: {str(e)}")
             return f"Error getting update instructions: {str(e)}"
-    
+
+    def get_understand_doc_instruction(self) -> str:
+        """
+        Get instructions for reading/understanding an existing document.
+        Returns instructions with two distinct tracks: Summarization and Q&A.
+        """
+        try:
+            logger.debug("Starting document understand instructions")
+
+            # Check for cited documents in working context
+            cited_docs = self.get_cited_documents()
+
+            if cited_docs:
+                # Build instructions with specific cited documents
+                doc_list = []
+                for doc in cited_docs:
+                    doc_id = doc.get('doc_id')
+                    title = doc.get('title', 'Unknown')
+                    if doc.get('has_selected_text'):
+                        doc_list.append(f"- {doc_id} ({title}) - HAS SELECTED TEXT")
+                    else:
+                        doc_list.append(f"- {doc_id} ({title})")
+
+                cited_docs_text = "\n".join(doc_list)
+
+                return f"""Document understanding workflow initiated.
+
+AVAILABLE CITED DOCUMENTS:
+{cited_docs_text}
+
+Choose your workflow based on the user's request:
+
+═══════════════════════════════════════════════════════════════
+TRACK 1: SUMMARIZATION WORKFLOW
+═══════════════════════════════════════════════════════════════
+Use when user wants: summary, overview, key points, what the document is about
+
+STEP 1: Load Document
+- Call get_doc([{cited_docs[0]['doc_id'] if cited_docs else 'docId'}])
+
+STEP 2: Check Response Type
+
+FOR SMALL DOCUMENTS (content returned directly):
+- Content is available in full
+- Summarize the content directly
+- Identify key points and themes
+
+FOR LARGE DOCUMENTS (file path returned):
+- Call summarize_doc(docId='...', file_path='...')
+- Process the chunks returned by the tool
+- Synthesize chunk summaries into complete overview
+- Focus on main themes and key points
+
+═══════════════════════════════════════════════════════════════
+TRACK 2: Q&A / SPECIFIC QUESTIONS WORKFLOW
+═══════════════════════════════════════════════════════════════
+Use when user asks: specific questions, "what does it say about X", find information
+
+STEP 1: Load Document
+- Call get_doc([{cited_docs[0]['doc_id'] if cited_docs else 'docId'}])
+
+STEP 2: Check Response Type
+
+FOR SMALL DOCUMENTS (content returned directly):
+- Content is available in full
+- Answer question directly from content
+
+FOR LARGE DOCUMENTS (file path + RAG info returned):
+- Document is being indexed for semantic search
+- Wait for "RAG indexing complete" notification
+- Use search_tool_response_in_vectorstore(query='...', document_id='...')
+- Answer based on relevant sections retrieved
+
+FALLBACK (if RAG unavailable):
+- Use grep to search file: grep -i "keyword" file_path
+- Use text_editor to read specific sections
+
+═══════════════════════════════════════════════════════════════
+
+Please proceed with the appropriate workflow for the user's request."""
+            else:
+                # No cited documents - provide generic instructions
+                return """Document understanding workflow initiated.
+
+Choose your workflow based on the user's request:
+
+═══════════════════════════════════════════════════════════════
+TRACK 1: SUMMARIZATION WORKFLOW
+═══════════════════════════════════════════════════════════════
+Use when user wants: summary, overview, key points
+
+STEP 1: Load Document
+- Call get_doc([docId])
+
+STEP 2: Summarize Based on Size
+- SMALL DOC (content returned): Summarize directly
+- LARGE DOC (file path returned): Call summarize_doc(docId='...', file_path='...')
+
+═══════════════════════════════════════════════════════════════
+TRACK 2: Q&A / SPECIFIC QUESTIONS WORKFLOW
+═══════════════════════════════════════════════════════════════
+Use when user asks: specific questions about document content
+
+STEP 1: Load Document
+- Call get_doc([docId])
+
+STEP 2: Answer Based on Size
+- SMALL DOC (content returned): Answer directly
+- LARGE DOC (file path returned): Wait for RAG, then use search_tool_response_in_vectorstore
+
+═══════════════════════════════════════════════════════════════
+
+Please proceed with the appropriate workflow."""
+
+        except Exception as e:
+            logger.error(f"Error in get_understand_doc_instruction: {str(e)}")
+            return f"Error getting understand instructions: {str(e)}"
+
     # ============================================================================
     # TOC Generation and Document Structure
     # ============================================================================
@@ -3861,7 +4211,36 @@ The document is large and requires broad updates. Use structure-first workflow:
     # Cleanup
     # ============================================================================
 
-    def cleanup_temp_files(self):
+    def get_cited_documents(self) -> List[Dict[str, Any]]:
+        """
+        Get list of cited documents from working context.
+
+        Returns:
+            List of cited document dictionaries with doc_id, title, and metadata
+        """
+        if not self.working_context:
+            logger.debug("No working context available for cited documents")
+            return []
+
+        cited_docs = self.working_context.find_resources_by_metadata(
+            resource_type="document_id",
+            metadata_filters={"source": ["cited_context", "selected_text"]}
+        )
+
+        # Format for easier use
+        result = []
+        for doc in cited_docs:
+            result.append({
+                "doc_id": doc.get("metadata", {}).get("doc_id"),
+                "title": doc.get("metadata", {}).get("title") or doc.get("path", ""),
+                "source": doc.get("metadata", {}).get("source"),
+                "has_selected_text": doc.get("metadata", {}).get("has_selected_text", False)
+            })
+
+        logger.debug(f"Found {len(result)} cited documents: {[d['doc_id'] for d in result if d['doc_id']]}")
+        return result
+
+    def cleanup_workflow_temp_files(self):
         """Clean up any temporary files created during workflows."""
         for temp_file in self._workflow_temp_files:
             try:
@@ -3870,7 +4249,7 @@ The document is large and requires broad updates. Use structure-first workflow:
                     logger.debug(f"Removed temp file: {temp_file}")
             except Exception as e:
                 logger.warning(f"Failed to remove temp file {temp_file}: {e}")
-        
+
         self._workflow_temp_files.clear()
     
     def __del__(self):

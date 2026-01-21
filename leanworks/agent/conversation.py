@@ -279,11 +279,11 @@ class ConversationManager:
 
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
-                        
+
                         # Log tool call result preview
                         result_preview = self._get_result_preview(result)
-                        logger.debug(f"Tool call result for {tool_name}: {result_preview}")
-                        
+                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+
                         # If tool returns an error object, surface just the error message
                         if isinstance(result, dict) and "error" in result:
                             tool_results.append({
@@ -393,13 +393,16 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
+                        # Log client-side tool call at INFO level
+                        logger.info(f"Client tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)}")
+
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
-                        
+
                         # Log tool call result preview
                         result_preview = self._get_result_preview(result)
-                        logger.debug(f"Tool call result for {tool_name}: {result_preview}")
-                        
+                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+
                         # Check if response is large and needs special handling
                         from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
                         from leanworks.setting import LARGE_RESPONSE_CONFIG
@@ -409,8 +412,12 @@ class ConversationManager:
                         
                         # Classify response
                         response_type, is_large = LargeResponseHandler.classify_response(result)
-                        
+
+                        # Log classification results
+                        logger.info(f"Response classification for {tool_name}: type={response_type.value}, is_large={is_large}, auto_store_enabled={LARGE_RESPONSE_CONFIG.get('auto_store_enabled', True)}")
+
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
+                            logger.info(f"Large response detected for {tool_name}, routing to storage handler")
                             # Extract doc IDs for doc tools (preprocessing moved to storage handler)
                             doc_ids = []
                             if self._is_doc_content_tool(tool_name):
@@ -421,8 +428,11 @@ class ConversationManager:
                             formatted_result = self.handle_large_response(
                                 result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
                             )
+                            logger.info(f"Large response storage completed for {tool_name}. Final result content: {formatted_result.get('content', '')[:200]}...")
                             tool_results.append(formatted_result)
                             continue
+                        else:
+                            logger.info(f"Response is small or auto-store disabled for {tool_name}, using direct response")
                         
                         # Track data sources based on tool type
                         if tool_name == "query_postgres":
@@ -632,28 +642,29 @@ class ConversationManager:
             logger.warning(f"handle_large_response called with small response: {response_type}")
             return self._truncate_response(result, tool_use_id)
 
-        logger.debug(f"Routing large response for {tool_name}: type={response_type.value}")
+        logger.info(f"Routing large response for {tool_name}: type={response_type.value}")
 
         # Route to appropriate handler based on classification
         if response_type == ResponseType.STRUCTURED_SIMPLE:
-            # Simple JSON → DuckDB
+            logger.info(f"Storing {tool_name} response in DuckDB")
             return self._handle_large_structured_response(
                 result, tool_name, tool_input, tool_use_id, data_sources
             )
 
         elif response_type == ResponseType.STRUCTURED_COMPLEX:
-            # Complex JSON → jq + file
+            logger.info(f"Storing {tool_name} complex JSON response in file with jq access")
             return self._handle_json_file_storage(
                 result, tool_name, tool_input, tool_use_id, data_sources
             )
 
         elif response_type == ResponseType.UNSTRUCTURED:
-            # Text → hybrid file + background RAG
+            logger.info(f"Storing {tool_name} unstructured text response with hybrid file + RAG indexing")
             return self._handle_hybrid_text_and_rag_storage(
                 result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
             )
 
         elif response_type == ResponseType.MIXED:
+            logger.info(f"Storing {tool_name} mixed response - splitting into structured and unstructured parts")
             # Split and handle both parts
             structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
             results = []
@@ -721,7 +732,7 @@ class ConversationManager:
             # Track data source
             data_sources.append(f"DuckDB response database: {response_id}")
             
-            logger.debug(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
+            logger.info(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
             
             return {
                 "type": "tool_result",
@@ -776,19 +787,14 @@ class ConversationManager:
 - Total keys: {complexity_info['key_count']}
 - Structure: {summary.get('type', 'unknown')}
 
-Query with jq via bash tool:
-- View all: jq '.' {container_path}
-- Navigate: jq '.path.to.field' {container_path}
-- Filter: jq '.items[] | select(.key == "value")' {container_path}
-- Count items: jq '.items | length' {container_path}
-
-All operations use: {container_path}
+Query with jq via bash tool (see <core_tools_reference> in system prompt for syntax):
+- File path: {container_path}
 """
 
         # Track data source
         data_sources.append(f"JSON file: {container_path}")
 
-        logger.debug(f"Stored complex JSON: host={host_path}, container={container_path}")
+        logger.info(f"Stored complex JSON: host={host_path}, container={container_path}")
 
         return {
             "type": "tool_result",
@@ -806,17 +812,15 @@ All operations use: {container_path}
         doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Store large unstructured response with hybrid approach:
-        1. Convert result to content string if needed (preprocessing for doc tools)
-        2. Save text file immediately (synchronous)
-        3. Start background RAG indexing (asynchronous, non-blocking)
-        4. Return immediately with both access methods
+        Store large unstructured response with RAG indexing.
+        For Q&A workflow: Wait for RAG completion before returning.
         """
-        # STEP 0: Convert result to content string (preprocessing for doc tools)
+        # Convert result to content string
         if self._is_doc_content_tool(tool_name):
             content = self._preprocess_doc_response(result, tool_name)
         else:
             content = str(result) if not isinstance(result, str) else result
+
         import uuid
 
         # STEP 1: Save text file to Docker workspace (synchronous)
@@ -830,7 +834,7 @@ All operations use: {container_path}
 
         document_id = str(uuid.uuid4())
 
-        # STEP 2: Start background RAG indexing (asynchronous)
+        # STEP 2: Start RAG indexing and WAIT for completion
         job_id = None
         indexing_status = "disabled"
 
@@ -838,6 +842,7 @@ All operations use: {container_path}
             rag_storage = self._get_rag_storage_tool()
             if rag_storage and self.background_indexing_manager:
                 try:
+                    # Submit indexing job
                     job_id = self.background_indexing_manager.submit_indexing_job(
                         content=content,
                         tool_name=tool_name,
@@ -845,31 +850,77 @@ All operations use: {container_path}
                         document_id=document_id,
                         rag_storage=rag_storage
                     )
-                    indexing_status = "in_progress"
-                    logger.debug(f"Background RAG indexing started: job_id={job_id}, document_id={document_id}")
+                    logger.info(f"RAG indexing started: job_id={job_id}")
+
+                    # WAIT for completion with timeout
+                    import time
+                    max_wait = 45  # seconds
+                    check_interval = 1  # second
+                    elapsed = 0
+
+                    while elapsed < max_wait:
+                        status = self.background_indexing_manager.get_job_status(job_id)
+
+                        if status == "completed":
+                            logger.info(f"RAG indexing completed in {elapsed}s")
+                            indexing_status = "completed"
+                            break
+                        elif status == "failed":
+                            logger.error("RAG indexing failed")
+                            indexing_status = "failed"
+                            break
+
+                        time.sleep(check_interval)
+                        elapsed += check_interval
+
+                    if elapsed >= max_wait and indexing_status not in ["completed", "failed"]:
+                        logger.warning(f"RAG indexing timeout after {max_wait}s")
+                        indexing_status = "timeout"
+
                 except Exception as e:
-                    logger.error(f"Failed to start background RAG indexing: {e}")
+                    logger.error(f"Failed to start/wait for RAG indexing: {e}")
                     indexing_status = "failed"
 
         # STEP 3: Generate summary
         summary = self._generate_text_summary(content)
 
-        # STEP 4: Format response with BOTH access methods (use CONTAINER path for grep)
-        formatted_result = self._format_hybrid_storage_summary(
-            container_path=container_path,
-            host_path=host_path,
-            document_id=document_id,
-            job_id=job_id,
-            indexing_status=indexing_status,
-            summary=summary
-        )
+        # STEP 4: Format response based on indexing status
+        if indexing_status == "completed":
+            formatted_result = f"""Large document stored and indexed successfully.
+
+Document Summary:
+{summary}
+
+FILE PATH: {container_path}
+DOCUMENT ID: {document_id}
+
+RAG INDEXING: ✓ Complete
+Use search_tool_response_in_vectorstore(query='your question', document_id='{document_id}') to find specific information.
+
+For summarization requests, use: summarize_doc(docId='...', file_path='{container_path}')
+"""
+        else:
+            # Fallback message if RAG failed/timeout
+            formatted_result = f"""Large document stored (RAG indexing {indexing_status}).
+
+Document Summary:
+{summary}
+
+FILE PATH: {container_path}
+DOCUMENT ID: {document_id}
+
+FALLBACK ACCESS (RAG unavailable):
+- Use grep for text search: grep -i "keyword" {container_path}
+- Use text_editor to read sections
+- For summarization: summarize_doc(docId='...', file_path='{container_path}')
+"""
 
         # Track data source
         data_sources.append(f"Text file: {container_path}")
-        if indexing_status == "in_progress":
-            data_sources.append(f"RAG indexing: {document_id} (background)")
+        if indexing_status == "completed":
+            data_sources.append(f"RAG indexed: {document_id}")
 
-        logger.debug(f"Hybrid storage complete: container={container_path}, host={host_path}, document={document_id}, indexing={indexing_status}")
+        logger.info(f"Document processing complete: file={container_path}, rag_status={indexing_status}")
 
         return {
             "type": "tool_result",
@@ -919,22 +970,14 @@ All operations use: {container_path}
 - Size: {summary.split('characters,')[0].strip()} characters
 - Lines: {summary.split('words')[0].split(',')[1].strip() if ',' in summary else 'N/A'}
 
-IMMEDIATE ACCESS via bash tool (grep):
-- Find text: grep -n 'pattern' {container_path}
-- With context: grep -n -A 5 -B 5 'pattern' {container_path}
-- Case insensitive: grep -in 'pattern' {container_path}
-
-Then view specific sections with text_editor:
-- Use bash grep output to find line numbers
-- View with: text_editor(path='{container_path}', view_range=[start, end])
+IMMEDIATE ACCESS:
+- Use grep and text_editor (see <core_tools_reference> in system prompt)
+- File path: {container_path}
 
 SEMANTIC SEARCH (background RAG indexing):
 - Document ID: {document_id}
 - {indexing_msg}
 - Once ready, use: search_tool_response_in_vectorstore(query='...', document_id='{document_id}')
-- Best for: Conceptual searches without exact keywords
-
-All operations use: {container_path}
 
 NOTE: {rag_note}
 """
@@ -1014,7 +1057,7 @@ NOTE: {rag_note}
                 # Track data source
                 data_sources.append(f"Text file: {file_path}")
                 
-                logger.debug(f"Stored large unstructured response in text file: {file_path}")
+                logger.info(f"Stored large unstructured response in text file: {file_path}")
                 
                 return {
                     "type": "tool_result",

@@ -98,25 +98,18 @@ Examples:
             "instructions": """
 USER IDENTITY MATCHING GUIDANCE:
 
-Default Tools (PostgreSQL, Search, DuckDB, Firestore):
+Internal Tools (PostgreSQL, Search, DuckDB, Firestore):
 - Use user_id from {USER_INFO} directly - no matching needed
 
 External Tools (Outlook, Atlassian, GitHub, Linear):
-- User IDs may not match external systems
-- CRITICAL: Before any user-related action, verify the user exists using the appropriate search_users tool (jira_search_users, github_search_users, linear_search_users)
-- If no users found, inform the user and ask for the correct identifier - do NOT proceed
+- Verify user exists using search_users tool (jira_search_users, github_search_users, linear_search_users)
+- If no match found, ask user for correct identifier - do NOT proceed
 
-Matching Process:
-- Use search_users tools to find users by name, email, or username
-- HIGH confidence (≥0.9): Exact/close match - proceed directly
-- MEDIUM confidence (0.7-0.9): Multiple matches - present options for user confirmation
-- LOW confidence (<0.7) or NO MATCH: Ask user for correct identifier - do NOT proceed
+Confidence Thresholds:
+- HIGH (≥0.9): Proceed automatically
+- MEDIUM (0.7-0.9): Present options for confirmation
+- LOW (<0.7) or NO MATCH: Ask user for identifier
 
-After verification: Remember the mapping for the conversation duration. If already verified, skip re-verification.
-
-Error Handling:
-- If tools return errors with "suggestion" or "match_result" fields, present options to user
-- High confidence matches (≥0.9) proceed automatically
-- For authentication/user-not-found errors without suggestions, use search_users tool first, then ask user if still no match
+Remember mappings for conversation duration. Skip re-verification if already confirmed.
             """
         }

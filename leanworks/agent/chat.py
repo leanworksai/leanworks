@@ -6,6 +6,7 @@ from leanworks.agent.conversation import ConversationManager
 from leanworks.agent.memory import MemoryManager
 from leanworks.agent.tool_registry import ToolRegistry
 from leanworks.agent.tool_response_handler import ToolResponseHandlerFactory
+from leanworks.agent.working_context import WorkingContext
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 from google.cloud import firestore, secretmanager
 from typing import Dict, Any, List
@@ -70,9 +71,12 @@ class ChatAgent:
         
         # Initialize selected text context (for position-based document editing)
         self.selected_text_context = None
-        
+
+        # Initialize working context for tracking cited documents and resources
+        self.working_context = WorkingContext()
+
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path)
+        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path, working_context=self.working_context)
         
 
         
@@ -380,12 +384,19 @@ class ChatAgent:
                 # Structured format - extract selectedText and format for LLM
                 selected_text = cited_context.get("selectedText")
                 if selected_text:
-                    # Store for tools to access
+                    # Web app now sends HTML positions directly
+                    # Store selected text context as-is (contains both ProseMirror and HTML positions)
                     self.selected_text_context = selected_text
-                    logger.debug(f"Stored selected text context: docId={selected_text.get('docId')}, htmlFrom={selected_text.get('htmlFrom')}, htmlTo={selected_text.get('htmlTo')}")
+
                     doc_id = selected_text.get("docId")
+                    from_pos = selected_text.get("from")
+                    to_pos = selected_text.get("to")
                     html_from = selected_text.get("htmlFrom")
                     html_to = selected_text.get("htmlTo")
+
+                    logger.debug(f"Stored selected text context: docId={doc_id}, from={from_pos}, to={to_pos}, htmlFrom={html_from}, htmlTo={html_to}")
+
+                    # Store HTML positions for document tool if available
                     if doc_id and html_from is not None and html_to is not None:
                         try:
                             doc_tool = self.tool_use.doc_management_tool
@@ -400,20 +411,76 @@ class ChatAgent:
                 # Add projects if present
                 projects = cited_context.get("projects", [])
                 if projects:
-                    project_names = [p.get("name", p.get("id", "")) for p in projects]
-                    context_parts.append(f"Cited projects: {', '.join(project_names)}")
-                
+                    project_info = [f"{p.get('name', 'Unnamed')} (id: {p.get('id', 'unknown')})" for p in projects]
+                    context_parts.append(f"Cited projects: {', '.join(project_info)}")
+
                 # Add tasks if present
                 tasks = cited_context.get("tasks", [])
                 if tasks:
-                    task_titles = [t.get("title", t.get("id", "")) for t in tasks]
-                    context_parts.append(f"Cited tasks: {', '.join(task_titles)}")
-                
+                    task_info = [f"{t.get('title', 'Untitled')} (id: {t.get('id', 'unknown')})" for t in tasks]
+                    context_parts.append(f"Cited tasks: {', '.join(task_info)}")
+
                 # Add docs if present
                 docs = cited_context.get("docs", [])
                 if docs:
-                    doc_titles = [d.get("title", d.get("id", "")) for d in docs]
-                    context_parts.append(f"Cited documents: {', '.join(doc_titles)}")
+                    doc_info = [f"{d.get('title', 'Untitled')} (id: {d.get('id', 'unknown')})" for d in docs]
+                    context_parts.append(f"Cited documents: {', '.join(doc_info)}")
+
+                    # Register cited documents in working context for tool access
+                    for doc in docs:
+                        doc_id = doc.get("id")
+                        doc_title = doc.get("title", "")
+                        if doc_id:
+                            self.working_context.register_resource(
+                                resource_id=f"cited_doc_{doc_id}",
+                                resource_type="document_id",
+                                path=doc_title or doc_id,
+                                metadata={
+                                    "doc_id": doc_id,
+                                    "title": doc_title,
+                                    "source": "cited_context",
+                                    "data": doc  # Store full doc data safely in nested field
+                                }
+                            )
+                            logger.debug(f"Registered cited document in working context: {doc_id} - {doc_title}")
+
+                # Register cited projects in working context for tool access
+                if projects:
+                    for project in projects:
+                        project_id = project.get("id")
+                        project_name = project.get("name", "")
+                        if project_id:
+                            self.working_context.register_resource(
+                                resource_id=f"cited_project_{project_id}",
+                                resource_type="project_id",
+                                path=project_name or project_id,
+                                metadata={
+                                    "project_id": project_id,
+                                    "name": project_name,
+                                    "source": "cited_context",
+                                    "data": project  # Store full project data safely in nested field
+                                }
+                            )
+                            logger.debug(f"Registered cited project in working context: {project_id} - {project_name}")
+
+                # Register cited tasks in working context for tool access
+                if tasks:
+                    for task in tasks:
+                        task_id = task.get("id")
+                        task_title = task.get("title", "")
+                        if task_id:
+                            self.working_context.register_resource(
+                                resource_id=f"cited_task_{task_id}",
+                                resource_type="task_id",
+                                path=task_title or task_id,
+                                metadata={
+                                    "task_id": task_id,
+                                    "title": task_title,
+                                    "source": "cited_context",
+                                    "data": task  # Store full task data safely in nested field
+                                }
+                            )
+                            logger.debug(f"Registered cited task in working context: {task_id} - {task_title}")
                 
                 # Add selected text if present
                 if selected_text:
@@ -421,6 +488,20 @@ class ChatAgent:
                     doc_id = selected_text.get("docId", "")
                     if text:
                         context_parts.append(f"Selected text from document {doc_id}: {text[:200]}{'...' if len(text) > 200 else ''}")
+
+                    # Register selected text document in working context if not already registered
+                    if doc_id and not any(d.get("id") == doc_id for d in docs):
+                        self.working_context.register_resource(
+                            resource_id=f"cited_doc_{doc_id}",
+                            resource_type="document_id",
+                            path=f"Document {doc_id}",
+                            metadata={
+                                "doc_id": doc_id,
+                                "source": "selected_text",
+                                "has_selected_text": True
+                            }
+                        )
+                        logger.debug(f"Registered selected text document in working context: {doc_id}")
                 
                 cited_context_str = "\n".join(context_parts) if context_parts else None
             else:
@@ -493,37 +574,53 @@ class ChatAgent:
             self.conversation.add_user_message_multimodal(content_blocks, include_in_slim=True)
         else:
             self.conversation.add_user_message(user_message, include_in_slim=True)
-        
-        # If using memory manager, update API params with memory context
+
+        # Build enhanced system prompt with all contextual additions
+        enhanced_system_prompt = self.system_prompt
+
+        # Collect all sections to inject
+        injections = []
+
+        # Memory context (inject before <communication> section)
+        memory_context = None
         if self.memory_manager:
             memory_context, _ = self.memory_manager.get_context_for_inference()
-            
-            # Update system prompt to include memory context in the optimal position
             if memory_context:
+                injections.append(('memory', memory_context, 'before_communication'))
+                logger.debug("Will inject memory context before <communication> section")
+
+        # Apply injections in order
+        for injection_name, injection_content, injection_position in injections:
+            if injection_position == 'prepend':
+                # Inject at the very beginning (most prominent)
+                enhanced_system_prompt = f"{injection_content}\n\n{enhanced_system_prompt}"
+                logger.info(f"Injected {injection_name} at the beginning of system prompt")
+                
+            elif injection_position == 'before_communication':
                 # Find the split point before <communication> section
-                communication_start = self.system_prompt.find('<communication>')
+                communication_start = enhanced_system_prompt.find('<communication>')
                 if communication_start != -1:
-                    # Insert memory context before <communication> for better logical flow
-                    before_communication = self.system_prompt[:communication_start].rstrip()
-                    after_communication = self.system_prompt[communication_start:]
-                    enhanced_system_prompt = f"{before_communication}\n\n{memory_context}\n\n{after_communication}"
-                    logger.debug("Injected memory context before <communication> section")
+                    # Insert before <communication> for better logical flow
+                    before_communication = enhanced_system_prompt[:communication_start].rstrip()
+                    after_communication = enhanced_system_prompt[communication_start:]
+                    enhanced_system_prompt = f"{before_communication}\n\n{injection_content}\n\n{after_communication}"
+                    logger.info(f"Injected {injection_name} before <communication> section")
                 else:
                     # Fallback to appending if <communication> section not found
-                    enhanced_system_prompt = f"{self.system_prompt}\n\n{memory_context}"
-                    logger.debug("Appended memory context at end (communication section not found)")
-            else:
-                enhanced_system_prompt = self.system_prompt
-                logger.debug("No memory context to add")
-            
+                    enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{injection_content}"
+                    logger.info(f"Appended {injection_name} at end (communication section not found)")
+        
+        # Update API params with enhanced system prompt
+        if enhanced_system_prompt != self.system_prompt:
             # IMPORTANT: Don't replace messages with memory messages during processing
             # We'll use current conversation messages but with enhanced system prompt
             self.api_params.update({
                 "system": enhanced_system_prompt
                 # Do NOT update messages here - use current conversation during tool loops
             })
-            
-            logger.debug(f"Updated API params with memory context. Enhanced system prompt length: {len(enhanced_system_prompt)}")
+            logger.debug(f"Updated system prompt with memory context. Enhanced length: {len(enhanced_system_prompt)}")
+        else:
+            logger.debug("No system prompt enhancements needed")
         
         # Maximum number of iterations to prevent infinite loops
         unanswered_count = 0
@@ -561,7 +658,23 @@ class ChatAgent:
                 # Check stop_reason to understand why Claude stopped
                 stop_reason = getattr(response, 'stop_reason', None)
                 logger.info(f"Response stop_reason: {stop_reason}")
-                
+
+                # Log tool usage details at INFO level when tools are called
+                if stop_reason == "tool_use":
+                    tool_calls = []
+                    for block in response.content:
+                        if hasattr(block, 'type') and block.type == "tool_use":
+                            tool_name = getattr(block, 'name', 'unknown_tool')
+                            tool_input = getattr(block, 'input', {})
+                            tool_calls.append(f"{tool_name}({tool_input})")
+                        elif isinstance(block, dict) and block.get('type') == "tool_use":
+                            tool_name = block.get('name', 'unknown_tool')
+                            tool_input = block.get('input', {})
+                            tool_calls.append(f"{tool_name}({tool_input})")
+
+                    if tool_calls:
+                        logger.info(f"Tool calls: {', '.join(tool_calls)}")
+
                 # Handle different stop reasons
                 if stop_reason == "refusal":
                     logger.warning("Claude refused to respond")

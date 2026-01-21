@@ -25,7 +25,6 @@ from app.services.database import query_org_one, get_domain_from_email, save_fil
 from app.services.anthropic_files import AnthropicFilesService
 from app.utils.cache import clear_cache
 from leanworks.setting import MAX_FILES_PER_REQUEST, MAX_FILE_SIZE_MB
-from leanworks.utils.tiptap_mapper import convert_selected_text_positions
 
 logger = logging.getLogger(__name__)
 
@@ -358,68 +357,7 @@ async def ask():
         logger.info(f"Ask API - Tools being used: {json.dumps(filtered_tools if filtered_tools else available_tools, default=str)}")
         print(f"Filtered tools: {filtered_tools}")
         
-        # Convert ProseMirror positions to HTML positions if cited_context contains selectedText
-        if cited_context and isinstance(cited_context, dict) and "selectedText" in cited_context:
-            selected_text = cited_context.get("selectedText", {})
-            doc_id = selected_text.get("docId")
-            
-            if doc_id:
-                try:
-                    logger.info(f"Converting ProseMirror positions to HTML for docId: {doc_id}")
-                    
-                    # Fetch document content from leanworks-hub API
-                    base_url = os.getenv('LEANWORKS_HUB_URL', 'http://localhost:3001')
-                    doc_url = f"{base_url}/api/docs/{doc_id}"
-                    
-                    # Get API key for authentication (same pattern as BaseAPIClient)
-                    api_key = os.getenv('LEANWORKS_API_KEY')
-                    if not api_key:
-                        try:
-                            from app.services.client import get_cached_api_key
-                            for secret_name in ["api-key", "API_KEY"]:
-                                try:
-                                    api_key = get_cached_api_key(secret_name)
-                                    if api_key:
-                                        break
-                                except Exception:
-                                    continue
-                        except ImportError:
-                            pass
-                    
-                    headers = {
-                        'Content-Type': 'application/json',
-                        'X-Org-Id': org_slug
-                    }
-                    if api_key:
-                        headers['X-API-Key'] = api_key
-                        if user_id:
-                            headers['X-User-Email'] = user_id
-                    
-                    # Fetch document
-                    response = requests.get(doc_url, headers=headers, timeout=10)
-                    response.raise_for_status()
-                    doc_data = response.json()
-                    
-                    if doc_data and 'content' in doc_data:
-                        doc_content = doc_data['content']
-                        
-                        # Convert positions
-                        converted = convert_selected_text_positions(selected_text, doc_content)
-                        
-                        # Update cited_context with HTML positions
-                        cited_context["selectedText"] = converted
-                        
-                        logger.info(f"Successfully converted positions: htmlFrom={converted.get('htmlFrom')}, htmlTo={converted.get('htmlTo')}")
-                    else:
-                        logger.warning(f"Document {doc_id} not found or missing content")
-                        
-                except requests.RequestException as e:
-                    logger.error(f"Error fetching document {doc_id} for position conversion: {str(e)}")
-                    # Continue without conversion - original positions will be used
-                except Exception as e:
-                    logger.error(f"Error converting positions for document {doc_id}: {str(e)}")
-                    traceback.print_exc()
-                    # Continue without conversion - original positions will be used
+        # Web app now sends HTML positions directly - no conversion needed
         
         # Performance optimization: Initialize Agent with pre-initialized clients (using keyword arguments like test file)
         agent = ChatAgent(
@@ -1368,68 +1306,7 @@ async def generate_message_response():
                 cited_str = str(cited_context)
                 logger.info(f"Cited context received in request: {cited_str[:200]}{'...' if len(cited_str) > 200 else ''}")
         
-        # Convert ProseMirror positions to HTML positions if cited_context contains selectedText
-        if cited_context and isinstance(cited_context, dict) and "selectedText" in cited_context:
-            selected_text = cited_context.get("selectedText", {})
-            doc_id = selected_text.get("docId")
-            
-            if doc_id:
-                try:
-                    logger.info(f"Converting ProseMirror positions to HTML for docId: {doc_id}")
-                    
-                    # Fetch document content from leanworks-hub API
-                    base_url = os.getenv('LEANWORKS_HUB_URL', 'http://localhost:3001')
-                    doc_url = f"{base_url}/api/docs/{doc_id}"
-                    
-                    # Get API key for authentication (same pattern as BaseAPIClient)
-                    api_key = os.getenv('LEANWORKS_API_KEY')
-                    if not api_key:
-                        try:
-                            from app.services.client import get_cached_api_key
-                            for secret_name in ["api-key", "API_KEY"]:
-                                try:
-                                    api_key = get_cached_api_key(secret_name)
-                                    if api_key:
-                                        break
-                                except Exception:
-                                    continue
-                        except ImportError:
-                            pass
-                    
-                    headers = {
-                        'Content-Type': 'application/json',
-                        'X-Org-Id': org_slug
-                    }
-                    if api_key:
-                        headers['X-API-Key'] = api_key
-                        if user_id:
-                            headers['X-User-Email'] = user_id
-                    
-                    # Fetch document
-                    response = requests.get(doc_url, headers=headers, timeout=10)
-                    response.raise_for_status()
-                    doc_data = response.json()
-                    
-                    if doc_data and 'content' in doc_data:
-                        doc_content = doc_data['content']
-                        
-                        # Convert positions
-                        converted = convert_selected_text_positions(selected_text, doc_content)
-                        
-                        # Update cited_context with HTML positions
-                        cited_context["selectedText"] = converted
-                        
-                        logger.info(f"Successfully converted positions: htmlFrom={converted.get('htmlFrom')}, htmlTo={converted.get('htmlTo')}")
-                    else:
-                        logger.warning(f"Document {doc_id} not found or missing content")
-                        
-                except requests.RequestException as e:
-                    logger.error(f"Error fetching document {doc_id} for position conversion: {str(e)}")
-                    # Continue without conversion - original positions will be used
-                except Exception as e:
-                    logger.error(f"Error converting positions for document {doc_id}: {str(e)}")
-                    traceback.print_exc()
-                    # Continue without conversion - original positions will be used
+        # Web app now sends HTML positions directly - no conversion needed
         
         # Add chat context if available (for project/team channels) - this can be added to the message
         if chat_id:
