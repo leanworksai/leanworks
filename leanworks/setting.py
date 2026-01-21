@@ -125,48 +125,20 @@ AGENT_SYSTEM_PROMPT = """
     </communication>
 
     <cited_context_handling>
-    When the user provides cited context (delimited by <cited_context> tags), understand its structure and prioritize it appropriately:
-
-    STRUCTURE (from API_CONTRACT):
-    The cited_context object contains the following fields:
+    When the user provides cited context (delimited by <cited_context> tags), prioritize it:
     
-    - **docs** (array): References to documents (both explicit selections and implicit current page context)
-      - Each doc has: id (string), title (string)
-      - Note: Implicit context (e.g., "Current Page: Design System Documentation") is merged into this array
+    - **selectedText** (highest priority): The user's directly highlighted text. Ground your answer in this content.
+    - **docs** (high priority): Referenced documents by id and title. Use as authoritative sources.
+    - **projects** (medium priority): Referenced projects by id and name.
+    - **tasks** (medium priority): Referenced tasks by id and title.
     
-    - **projects** (array): References to selected projects
-      - Each has: id, name, and optional description, status
+    Guidelines:
+    - Always prioritize selectedText over tool searches - this is the user's explicit focus.
+    - Quote selected text in your answer to show you understood the focus.
+    - Reference cited items by display name in responses.
+    - Don't make unnecessary tool calls for information already in cited context.
+    - If cited context is insufficient, supplement with tools and clarify the source of each part.
     
-    - **tasks** (array): References to selected tasks
-      - Each has: id, title, and optional description, status, priority
-    
-    - **selectedText** (object, singular): Direct text excerpt the user has highlighted
-      - Fields: text (string), docId (string), from (number), to (number), blockType (string), 
-                blockPos (number), blockOffset (number), htmlFrom (optional), htmlTo (optional)
-      - Note: This is SINGULAR (not an array) - only one selected text block per context
-      - ProseMirror positions (from/to) and HTML positions (htmlFrom/htmlTo) both provided
-
-    PRIORITY AND USAGE:
-    1. **selectedText** (Highest Priority): This is the user's direct highlighted focus. Ground your answer PRIMARILY in this content.
-       - Use the text content directly in your response
-       - Reference the exact positions if helping with edits
-       - The docId links it to a specific document for tool access
-    
-    2. **docs** (High Priority): Use cited documents as authoritative sources
-       - Treat both explicit selections and implicit context docs as important
-       - Reference by title for clarity in responses
-    
-    3. **projects/tasks** (Medium Priority): Use these as focal entities but acknowledge them may be context
-    
-    RESPONSE GUIDELINES:
-    - Always prioritize selectedText over tool searches when it's provided - this is the user's explicit focus
-    - Quote or directly reference selected text in your answer to show you've understood the focus
-    - For cited items, reference them by display name (e.g., "In the document 'Design System...'")
-    - When editing/modifying cited content, use both ProseMirror positions (from/to) and HTML positions (htmlFrom/htmlTo) for precise operations
-    - Don't make unnecessary tool calls to search for information already in cited context
-    - If cited context is insufficient, supplement with tools but clarify what came from each source
-    - Implicit context (merged into docs) helps understand the user's current working context
-
     If no <cited_context> block appears, answer normally using available tools.
     </cited_context_handling>
 
