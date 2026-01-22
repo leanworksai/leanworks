@@ -19,6 +19,8 @@ class ChatAgent:
     """
     A class that handles the chat interaction with Claude, including
     tool calls, verification, and conversation management.
+
+    User information is retrieved via API-based tools instead of direct database queries.
     """
     
     def __init__(self, 
@@ -77,7 +79,10 @@ class ChatAgent:
 
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
         self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path, working_context=self.working_context)
-        
+
+        # Initialize UserManagementTool for user info retrieval
+        self.user_management_tool = self.tool_use.user_management_tool
+
 
         
         # Initialize memory management (always enabled)
@@ -186,9 +191,9 @@ class ChatAgent:
 
     def _get_user_info(self):
         """
-        Get user information from the organization database (users table).
+        Get user information from the UserManagementTool API.
         Falls back to default values if user not found or query fails.
-        
+
         Returns:
             dict: User information dictionary with user_id, org_slug, timezone, and other fields
         """
@@ -203,32 +208,38 @@ class ChatAgent:
             "work_style": ""
         }
         
-        # Try to fetch user info from organization database
+        # Try to fetch user info from UserManagementTool API
         if not self.user_id or not self.org_slug:
             return default_info
         
         try:
-            from app.services.database import query_org_one
-            
-            user_data = query_org_one(
-                self.org_slug,
-                "SELECT email, first_name, last_name, job_title, timezone, responsibilities FROM users WHERE email = %s",
-                (self.user_id.lower(),)
+            # Use UserManagementTool API instead of direct database queries
+            user_data_list = self.user_management_tool.query_users(
+                searchTerm=self.user_id.lower(),
+                limit=1
             )
+
+            # Check for API errors
+            if isinstance(user_data_list, dict) and "error" in user_data_list:
+                logger.warning(f"UserManagementTool API error: {user_data_list['error']}")
+                user_data = None
+            else:
+                # Extract user data from API response (list)
+                user_data = user_data_list[0] if isinstance(user_data_list, list) and len(user_data_list) > 0 else None
             
             if user_data:
                 return {
                     "user_id": self.user_id or "Unknown",
-                    "first_name": user_data.get("first_name", ""),
-                    "last_name": user_data.get("last_name", ""),
-                    "job_title": user_data.get("job_title", ""),
+                    "first_name": user_data.get("firstName", ""),
+                    "last_name": user_data.get("lastName", ""),
+                    "job_title": user_data.get("jobTitle", ""),
                     "responsibilities": user_data.get("responsibilities", ""),
                     "org_slug": self.org_slug or "",
                     "timezone": user_data.get("timezone", "UTC") or "UTC",  # Fallback to UTC if None
                     "work_style": ""
                 }
         except Exception as e:
-            logger.warning(f"Could not fetch user info from org database for {self.user_id} (org: {self.org_slug}): {str(e)}")
+            logger.warning(f"Could not fetch user info from UserManagementTool API for {self.user_id} (org: {self.org_slug}): {str(e)}")
             # Fall back to default info
         
         return default_info

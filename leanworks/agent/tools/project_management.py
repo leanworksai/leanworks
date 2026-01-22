@@ -346,13 +346,22 @@ Examples:
             if '@' in assignee_input:
                 return assignee_input.lower()
 
+            # If it's empty or None, return None
+            if not assignee_input or assignee_input.strip() == '':
+                return None
+
+            # Skip resolution for org slugs (they should not be used as assignees)
+            assignee_lower = assignee_input.lower().strip()
+            if assignee_lower.startswith('personal_') or len(assignee_lower) > 50:
+                logger.warning(f"Skipping assignee resolution for suspected org slug: '{assignee_input}'")
+                return None
+
             # Query users endpoint to find matching user
             users = self._make_request('GET', '/api/users')
             if not isinstance(users, list):
                 return None
 
             # Search for user by name (case-insensitive)
-            assignee_lower = assignee_input.lower()
             for user in users:
                 email = user.get('email', '').lower()
                 first_name = user.get('first_name', '').lower()
@@ -440,7 +449,7 @@ Examples:
             "description": """
 Execute SQL queries against project management data.
 
-Use this tool to query tasks, projects, events, users, and related data using SQL.
+Use this tool to query tasks, projects, events, users, and related data using SQL. You can ONLY use this tool after you understand table schemas.
 This provides flexible querying capabilities for complex data retrieval needs.
 
 Parameters:
@@ -448,17 +457,6 @@ Parameters:
 - params: Array of parameterized query values (default: [])
 - timeout: Query timeout in milliseconds (1000-60000, default: 30000)
 - maxRows: Maximum rows to return (1-10000, default: 1000)
-
-Available Tables:
-- users: Organization user profiles and roles
-- tasks: Task management data (status, priority, assignments)
-- projects: Project information and metadata
-- task_progress_updates: Task update history and progress notes
-- task_comments: Comments on tasks
-- project_progress_updates: Project update summaries
-- project_members: Project membership and roles
-- project_comments: Comments on projects
-- events: Calendar events and meetings
 
 Security:
 - Only SELECT and WITH (CTE) queries allowed
@@ -558,12 +556,12 @@ Best Practices:
 Get schema information for queryable tables.
 
 Use this tool to understand table structures before writing SQL queries.
-Returns column names, data types, nullability, and defaults.
+Returns column names, data types, nullability, defaults, and column comments.
 
 Parameters:
 - table: Specific table name to get schema for (optional)
 
-If table is specified, returns detailed column information.
+If table is specified, returns detailed column information including comments.
 If table is omitted, returns list of all available tables.
 
 Available Tables:
@@ -595,10 +593,12 @@ Examples:
             table: Specific table name (optional)
 
         Returns:
-            Dictionary with schema information
+            Dictionary with schema information including column comments
         """
         try:
             params = {"table": table} if table else {}
+            # Always request column comments in the schema
+            params["includeComments"] = True
             result = self._make_request('GET', '/api/query/schema', params=params)
 
             if result.get('success'):

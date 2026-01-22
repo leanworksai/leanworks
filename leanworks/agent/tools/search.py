@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from openai import OpenAI
 import logging
+from typing import List, Dict, Any
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
 from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.rag.vectordb import PineconeHybridIndex
@@ -75,6 +76,9 @@ class SearchTool:
             org_slug=org_slug,
             model_client=model_client
         )
+        # Store org_slug for namespace calculations
+        self.org_slug = org_slug
+        self.tool_responses_namespace = f"{org_slug}_tool_responses"
         # Shared deduplication set used across searches
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
     
@@ -141,21 +145,22 @@ class SearchTool:
     @property
     def search_documents_property(self):
         description = """
-        Search for relevant documents using the team's knowledge base, based on the query. The response will be a list of documents ordered by relevance to the query, most relevant first.
-        You can filter results by data source and date range using the optional parameters.
-        You should use this tool as when any of these conditions occur:
+        Search for relevant information using the team's knowledge base and stored tool responses.
+
+        This tool searches across two types of content:
+        1. Knowledge base documents (Confluence, Jira, GitHub, Slack, etc.)
+        2. Stored tool responses (large outputs from previous tool executions)
+
+        The response will be a list of results ordered by relevance, most relevant first.
+
+        Use this tool when:
         - Other tools are not suitable to answer the question
         - Other tools return empty, error or insufficient results
-        - You have used the search_documents tool before and the answer is still not satisfactory. 
+        - You need to find information from previous tool responses
         - You have ANY uncertainty about the quality of your answer
-        - More detailed information is needed to answer the question
-        - You need to perform search for details of a specific data source when the corresponding tool result is too large to display
-        - You need to search for documents within a specific time period when the query contains specific dates or time references
-        When you use this tool, find what are the missing information from the last response (if any) and try to search (call search_documents tool) with a different query 
-        so that it can surface more information to help refine your answer.
-        You might need to use this tool multiple times with different queries to fully answer the question.
-        NEVER skip this tool if the above conditions are met.
-        Do not reflect on the quality of the returned search results in your response
+        - More detailed information is needed
+
+        You might need to use this tool multiple times with different queries or scopes.
         """
         return {
             "type": "custom",
@@ -166,26 +171,36 @@ class SearchTool:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Query to search the knowledge base"
+                        "description": "Query to search for relevant information"
+                    },
+                    "search_scope": {
+                        "type": "string",
+                        "enum": ["all", "knowledge_base", "tool_responses"],
+                        "description": "Scope of search: 'all' (default) searches both knowledge base and tool responses, 'knowledge_base' searches only documents, 'tool_responses' searches only stored tool outputs",
+                        "default": "all"
                     },
                     "data_source": {
                         "type": "string",
-                        "description": "Optional data source name to filter documents. Can only be one of the following: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
+                        "description": "Optional data source filter (knowledge_base only). One of: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Optional tool name filter (tool_responses only). Filter results to specific tool outputs"
                     },
                     "start_date": {
                         "type": "string",
-                        "description": "Optional start date for filtering documents by timestamp."
+                        "description": "Optional start date for filtering by timestamp (YYYY-MM-DD)"
                     },
                     "end_date": {
-                        "type": "string", 
-                        "description": "Optional end date for filtering documents by timestamp."
+                        "type": "string",
+                        "description": "Optional end date for filtering by timestamp (YYYY-MM-DD)"
                     }
                 },
                 "required": ["query"]
             }
         }
 
-    async def async_search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None):
+    async def async_search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "all", tool_name: str = None):
         # Retrieve context
         context = []
         data_sources = []
@@ -209,42 +224,59 @@ class SearchTool:
                 logger.info(f"Query rewrites for '{query}': {rewrites}")
             except Exception as e:
                 logger.error(f"Error getting query rewrites: {str(e)}")
-                    
-            
-            # Build filters from explicit arguments
-            filters = {}
-            if data_source:
-                filters["data_source"] = {"$eq": data_source}
-            
-            # Add timestamp filters only if dates are explicitly provided
-            if start_date or end_date:
-                timestamp_filter = {}
-                if start_date:
-                    start_timestamp = self._convert_date_to_timestamp(start_date)
-                    if start_timestamp is not None:
-                        timestamp_filter["$gte"] = start_timestamp
-                        logger.info(f"Applied start timestamp filter: {start_timestamp}")
-                
-                if end_date:
-                    end_timestamp = self._convert_date_to_timestamp(end_date)
-                    if end_timestamp is not None:
-                        timestamp_filter["$lte"] = end_timestamp
-                        logger.info(f"Applied end timestamp filter: {end_timestamp}")
-                
-                # Only add timestamp filter if we have at least one valid timestamp
-                if timestamp_filter:
-                    filters["timestamp"] = timestamp_filter
-                    logger.info(f"Applied timestamp filtering with {len(timestamp_filter)} conditions")
+
+            # Prepare search tasks based on scope
+            search_tasks = []
+
+            if search_scope in ["all", "knowledge_base"]:
+                # Build filters for knowledge base
+                kb_filters = {}
+                if data_source:
+                    kb_filters["data_source"] = {"$eq": data_source}
+                if start_date or end_date:
+                    kb_filters["timestamp"] = self._build_timestamp_filter(start_date, end_date)
+
+                # Search knowledge base namespace
+                kb_task = self._search_namespace(
+                    all_queries,
+                    self.org_slug,  # Main namespace
+                    top_k=RETRIEVE_TOP_K,
+                    filters=kb_filters
+                )
+                search_tasks.append(("knowledge_base", kb_task))
+
+            if search_scope in ["all", "tool_responses"]:
+                # Build filters for tool responses
+                tr_filters = {"type": {"$eq": "tool_response"}}
+                if tool_name:
+                    tr_filters["tool_name"] = {"$eq": tool_name}
+                if start_date or end_date:
+                    tr_filters["timestamp"] = self._build_timestamp_filter(start_date, end_date)
+
+                # Search tool responses namespace
+                tr_task = self._search_namespace(
+                    all_queries,
+                    self.tool_responses_namespace,
+                    top_k=RETRIEVE_TOP_K,
+                    filters=tr_filters
+                )
+                search_tasks.append(("tool_responses", tr_task))
+
+            # Execute searches in parallel
+            results_by_source = {}
+            for source_type, task in search_tasks:
+                try:
+                    results = await task
+                    results_by_source[source_type] = results
+                except Exception as e:
+                    logger.error(f"Error searching {source_type}: {e}")
+                    results_by_source[source_type] = []
+
+            # Merge results if searching both
+            if len(results_by_source) > 1:
+                nodes = self._merge_search_results(results_by_source)
             else:
-                logger.info("No date parameters provided, skipping timestamp filtering")
-            
-            logger.info(f"Search filters: {filters}")
-            # Retrieve nodes (running in executor since retrieve_nodes is not async)
-            loop = asyncio.get_event_loop()
-            nodes = await loop.run_in_executor(
-                None, 
-                lambda: self.chat.retrieve_nodes(all_queries, top_k=RETRIEVE_TOP_K, filters=filters)
-            )
+                nodes = list(results_by_source.values())[0] if results_by_source else type('obj', (object,), {'matches': []})()
             logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
             
             # Use async postprocessing with non-blocking reranking and deduplication
@@ -316,17 +348,126 @@ class SearchTool:
             "formatted_context": formatted_context,
             "data_sources": data_sources
         }
-        
-    def search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None):
+
+    def _search_namespace(
+        self,
+        queries: List[str],
+        namespace: str,
+        top_k: int,
+        filters: dict = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search a specific namespace with given queries.
+
+        Args:
+            queries: List of query strings (original + rewrites)
+            namespace: Pinecone namespace to search
+            top_k: Number of results to retrieve
+            filters: Optional metadata filters
+
+        Returns:
+            List of search results with metadata
+        """
+        loop = asyncio.get_event_loop()
+        nodes = loop.run_until_complete(
+            asyncio.gather(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.chat.retrieve_nodes(
+                        queries,
+                        top_k=top_k,
+                        filters=filters,
+                        namespace=namespace
+                    )
+                )
+            )
+        )[0]
+        return nodes
+
+    def _merge_search_results(
+        self,
+        results_by_source: Dict[str, List]
+    ) -> List:
+        """
+        Merge results from multiple namespaces using Reciprocal Rank Fusion.
+
+        Args:
+            results_by_source: Dict mapping source_type to list of results
+
+        Returns:
+            Merged and ranked list of results
+        """
+        from collections import defaultdict
+
+        # RRF scoring: score = sum(1 / (k + rank)) for each source
+        k = 60  # RRF constant
+        rrf_scores = defaultdict(float)
+        all_results = {}
+
+        for source_type, results in results_by_source.items():
+            for rank, result in enumerate(results.matches if hasattr(results, 'matches') else results, start=1):
+                result_id = result.id
+                rrf_scores[result_id] += 1.0 / (k + rank)
+
+                # Store result with source type metadata
+                if result_id not in all_results:
+                    # Add source_type to metadata
+                    if hasattr(result, 'metadata'):
+                        result.metadata['source_type'] = source_type
+                    all_results[result_id] = result
+
+        # Sort by RRF score
+        sorted_results = sorted(
+            all_results.values(),
+            key=lambda x: rrf_scores[x.id],
+            reverse=True
+        )
+
+        # Return as SimpleNamespace to match expected format
+        from types import SimpleNamespace
+        return SimpleNamespace(matches=sorted_results)
+
+    def _build_timestamp_filter(self, start_date: str = None, end_date: str = None) -> dict:
+        """
+        Build timestamp filter for search queries.
+
+        Args:
+            start_date: Optional start date string
+            end_date: Optional end date string
+
+        Returns:
+            Timestamp filter dict or empty dict if no valid dates
+        """
+        timestamp_filter = {}
+        if start_date:
+            start_timestamp = self._convert_date_to_timestamp(start_date)
+            if start_timestamp is not None:
+                timestamp_filter["$gte"] = start_timestamp
+                logger.info(f"Applied start timestamp filter: {start_timestamp}")
+
+        if end_date:
+            end_timestamp = self._convert_date_to_timestamp(end_date)
+            if end_timestamp is not None:
+                timestamp_filter["$lte"] = end_timestamp
+                logger.info(f"Applied end timestamp filter: {end_timestamp}")
+
+        if timestamp_filter:
+            logger.info(f"Applied timestamp filtering with {len(timestamp_filter)} conditions")
+
+        return timestamp_filter
+
+    def search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "all", tool_name: str = None):
         """
         Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
-        
+
         Args:
             query: The search query
             data_source: Optional data source name to filter
             start_date: Optional start date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
             end_date: Optional end date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
+            search_scope: Scope of search ("all", "knowledge_base", or "tool_responses")
+            tool_name: Optional tool name filter for tool responses
         """
         try:
             logger.info(f"Executing search_documents with query: {query}")
@@ -348,7 +489,9 @@ class SearchTool:
                             query=query,
                             data_source=data_source,
                             start_date=start_date,
-                            end_date=end_date
+                            end_date=end_date,
+                            search_scope=search_scope,
+                            tool_name=tool_name
                         ))
                     finally:
                         new_loop.close()
@@ -372,7 +515,9 @@ class SearchTool:
                     query=query,
                     data_source=data_source,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    search_scope=search_scope,
+                    tool_name=tool_name
                 ))
             
             # If async layer returned an error, surface it directly

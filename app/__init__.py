@@ -14,17 +14,12 @@ from google.oauth2 import service_account
 # Write to stdout instead of stderr so GKE doesn't treat all logs as errors
 # GKE/Cloud Logging interprets stderr as errors regardless of log level
 import sys
-# Configure logging to write to stdout only
+# Configure logging to write to stdout only (for GKE compatibility)
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
 )
-
-# Add a stream handler to also log to stdout (for GKE compatibility)
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logging.getLogger().addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 # Suppress verbose loggers while keeping essential tool/response logs

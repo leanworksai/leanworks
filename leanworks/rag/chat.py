@@ -153,16 +153,18 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         return None
 
-    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA) -> SimpleNamespace:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA, namespace: str = None) -> SimpleNamespace:
         """
         Retrieve relevant context using hybrid search for one or multiple queries.
-        
+
         Args:
-            query: The user query or list of queries. If a list is provided, hybrid search is 
+            query: The user query or list of queries. If a list is provided, hybrid search is
                   performed for each query and results are combined.
             top_k: Number of context chunks to retrieve (default from settings)
             filters: Dictionary of filters to apply to the query (default None)
-            
+            alpha: Hybrid search alpha parameter (default from settings)
+            namespace: Optional namespace override (defaults to self.org_slug)
+
         Returns:
             SimpleNamespace with 'matches' attribute containing hybrid search results
         """
@@ -171,16 +173,16 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         if not queries:
             logger.warning("No queries provided to retrieve_nodes")
             return SimpleNamespace(matches=[])
-            
+
         logger.info(f"Retrieving nodes using hybrid search for {len(queries)} queries with top_k={top_k}")
-        
+
         # Results container
         all_matches = []
-        
+
         # Perform hybrid search for each query
         try:
-            # Use org_slug directly as namespace (can contain underscores)
-            namespace = self.org_slug if self.org_slug else ""
+            # Use provided namespace or default to org_slug
+            search_namespace = namespace if namespace is not None else (self.org_slug if self.org_slug else "")
             
             for q in queries:
                 # Use hybrid search from PineconeHybridIndex
@@ -188,7 +190,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                     query=q,
                     top_k=top_k,
                     alpha=alpha,
-                    namespace=namespace,
+                    namespace=search_namespace,
                     filter=filters
                 )
                 

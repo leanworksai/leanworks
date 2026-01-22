@@ -1,7 +1,19 @@
 """
-Event Management Tool - Domain-specific tool for calendar/event operations via leanworks-hub API.
-Replaces PostgresTool for event-related operations.
+Event Management Tool - DEPRECATED
+
+This tool has been consolidated into ProjectManagementTool.
+This file is kept for reference only and will be removed in a future version.
+
+Use ProjectManagementTool instead:
+- from leanworks.agent.tools.project_management import ProjectManagementTool
 """
+import warnings
+warnings.warn(
+    "EventManagementTool is deprecated. Use ProjectManagementTool instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 from typing import Dict, List, Any, Optional
 from .base_api_client import BaseAPIClient
 import logging
@@ -20,6 +32,8 @@ class EventManagementTool(BaseAPIClient):
             "name": "query_events",
             "description": """
 Query calendar events with flexible filtering.
+
+NOTE: For complex queries or joins with other tables, consider using execute_sql_query instead.
 
 Use this to check user availability, find free time slots, understand scheduling conflicts, 
 and see upcoming meetings.

@@ -10,9 +10,7 @@ from leanworks.agent.tools.notion import NotionTool
 from leanworks.agent.tools.clickup import ClickUpTool
 from leanworks.agent.tools.linear import LinearTool
 # New domain-specific management tools (API-based)
-from leanworks.agent.tools.task_management import TaskManagementTool
 from leanworks.agent.tools.project_management import ProjectManagementTool
-from leanworks.agent.tools.event_management import EventManagementTool
 from leanworks.agent.tools.user_management import UserManagementTool
 from leanworks.agent.tools.chat_management import ChatManagementTool
 from leanworks.agent.helpers import AgentHelpers
@@ -45,8 +43,8 @@ class ToolUse:
             secret_manager_client: Secret Manager client
             model_client: Anthropic model client for token counting and other operations
             read_document_ids: Set of document IDs already read for deduplication
-            tools: List of tools to enable. Internal tools ['search', 'postgres', 'duckdb'] are always available.
-                   External tools (e.g., 'outlook') should be explicitly provided in this list.
+            tools: List of tools to enable. Internal tools ['search', 'duckdb', 'task_management', 'project_management', 'event_management', 'user_management', 'chat_management', 'doc_management'] are always available.
+                    External tools (e.g., 'outlook') should be explicitly provided in this list.
             credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
             working_context: WorkingContext instance for tracking cited documents and resources
         """
@@ -73,6 +71,7 @@ class ToolUse:
         # Internal tools that are always available
         internal_tools = [
             'search',
+            'query_management',
             'task_management',
             'project_management',
             'event_management',
@@ -92,6 +91,10 @@ class ToolUse:
         
         self.requested_tools = requested_tools
         logger.info(f"Final enabled tools: {self.requested_tools}")
+
+        # Deprecation warning for postgres tool
+        if tools and 'postgres' in tools:
+            logger.warning("The 'postgres' tool is deprecated and no longer included in the default toolkit. It will be removed in a future version. Use 'doc_management' for document management functionality.")
         
         # Tool instance cache - tools are initialized only when first accessed
         self._tool_cache = {}
@@ -228,29 +231,6 @@ class ToolUse:
     # ============================================================================
     # NEW DOMAIN-SPECIFIC MANAGEMENT TOOLS (API-BASED)
     # ============================================================================
-    
-    @property
-    def task_management_tool(self):
-        """Lazy-load Task Management tool on first access."""
-        if 'task_management_tool' not in self._tool_cache:
-            if 'task_management' in self.requested_tools and self.org_slug:
-                try:
-                    self._tool_cache['task_management_tool'] = TaskManagementTool(
-                        org_slug=self.org_slug,
-                        user_id=self.user_id
-                    )
-                    if 'task_management' not in self.enabled_tools:
-                        self.enabled_tools.append('task_management')
-                    logger.debug("TaskManagementTool initialized successfully (lazy)")
-                except Exception as e:
-                    logger.error(f"Failed to initialize TaskManagementTool: {str(e)}")
-                    self._tool_cache['task_management_tool'] = None
-            elif 'task_management' in self.requested_tools:
-                logger.warning("TaskManagementTool not initialized: missing org_slug")
-                self._tool_cache['task_management_tool'] = None
-            else:
-                self._tool_cache['task_management_tool'] = None
-        return self._tool_cache['task_management_tool']
     
     @property
     def project_management_tool(self):
@@ -1300,26 +1280,17 @@ EOF"""
                 self._tools_cache.append(self.search_tool.search_documents_property)
                 logger.info("search_documents tool added to tools list (lazy)")
             
-            # Add NEW Domain-Specific Management Tools (API-based)
-            if self.task_management_tool:
-                self._tools_cache.extend([
-                    self.task_management_tool.query_tasks_property,
-                    self.task_management_tool.create_task_property,
-                    self.task_management_tool.update_task_property,
-                ])
-                logger.info("TaskManagementTool tools added to tools list (lazy)")
-            
+            # Add UNIFIED Project Management Tools (API-based)
             if self.project_management_tool:
                 self._tools_cache.extend([
-                    self.project_management_tool.query_projects_property,
+                    # Task management
+                    self.project_management_tool.create_task_property,
+                    self.project_management_tool.update_task_property,
+                    # SQL query operations
+                    self.project_management_tool.execute_sql_query_property,
+                    self.project_management_tool.get_table_schema_property,
                 ])
-                logger.info("ProjectManagementTool tools added to tools list (lazy)")
-            
-            if self.event_management_tool:
-                self._tools_cache.extend([
-                    self.event_management_tool.query_events_property,
-                ])
-                logger.info("EventManagementTool tools added to tools list (lazy)")
+                logger.info("ProjectManagementTool (unified) tools added to tools list (lazy)")
             
             if self.user_management_tool:
                 self._tools_cache.extend([
@@ -1480,26 +1451,17 @@ EOF"""
                 self._function_map_cache["search_documents"] = self.search_tool.search_documents
                 logger.info("search_documents function added to function_map (lazy)")
             
-            # Add NEW Domain-Specific Management Tool functions (API-based)
-            if self.task_management_tool:
-                self._function_map_cache.update({
-                    "query_tasks": self.task_management_tool.query_tasks,
-                    "create_task": self.task_management_tool.create_task,
-                    "update_task": self.task_management_tool.update_task,
-                })
-                logger.info("TaskManagementTool functions added to function_map (lazy)")
-            
+            # Add UNIFIED Project Management Tool functions (API-based)
             if self.project_management_tool:
                 self._function_map_cache.update({
-                    "query_projects": self.project_management_tool.query_projects,
+                    # Task management
+                    "create_task": self.project_management_tool.create_task,
+                    "update_task": self.project_management_tool.update_task,
+                    # SQL query operations
+                    "execute_sql_query": self.project_management_tool.execute_sql_query,
+                    "get_table_schema": self.project_management_tool.get_table_schema,
                 })
-                logger.info("ProjectManagementTool functions added to function_map (lazy)")
-            
-            if self.event_management_tool:
-                self._function_map_cache.update({
-                    "query_events": self.event_management_tool.query_events,
-                })
-                logger.info("EventManagementTool functions added to function_map (lazy)")
+                logger.info("ProjectManagementTool (unified) functions added to function_map (lazy)")
             
             if self.user_management_tool:
                 self._function_map_cache.update({

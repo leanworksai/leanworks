@@ -58,13 +58,13 @@ class BaseAPIClient:
     def _get_headers(self) -> Dict[str, str]:
         """
         Get authentication headers based on environment.
-        
+
         Returns:
             Dictionary of HTTP headers
         """
         headers = {
             'Content-Type': 'application/json',
-            'X-Org-Id': self.org_slug  # Always include org context
+            'X-Org-Identifier': self.org_slug  # Organization identifier (slug or ID)
         }
         
         # Prefer API key for local development

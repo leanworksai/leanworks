@@ -21,6 +21,8 @@ class UserManagementTool(BaseAPIClient):
             "description": """
 Query organization users with flexible filtering.
 
+NOTE: For complex queries or joins with other tables, consider using execute_sql_query instead.
+
 Parameters:
 - status: Filter by status (active, inactive)
 - role: Filter by role (owner, admin, member)

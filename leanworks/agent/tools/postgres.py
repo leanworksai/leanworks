@@ -19,14 +19,16 @@ AI_AGENT_ID = 'lean@leanworks.ai'
 
 class PostgresTool:
     """
+    DEPRECATED: This class is deprecated in favor of API-based tools. It will be removed in a future version.
+
     PostgreSQL tool for querying Cloud SQL databases.
-    
+
     Fully automated deployment detection:
     - k8s deployment: Auto-detects /cloudsql directory and uses Unix socket path
                       (/cloudsql/PROJECT_ID:REGION:INSTANCE_NAME) via Cloud SQL Proxy sidecar
     - Local development: Auto-detects absence of /cloudsql and uses TCP connection
                          (127.0.0.1:5432) via local Cloud SQL Proxy
-    
+
     Environment variables (all optional - auto-detection handles defaults):
     - DB_HOST: Database host (optional - auto-detected based on environment)
     - DB_PORT: Database port (default: 5432)
@@ -34,7 +36,7 @@ class PostgresTool:
     - DB_REGION: Cloud SQL region (default: us-west1)
     - DB_INSTANCE: Cloud SQL instance name (default: leanworks-prod)
     - DB_PASSWORD: Database password (fallback if Secret Manager fails)
-    
+
     Note: No manual configuration needed - the tool automatically detects k8s vs local environment.
     """
     # Class-level PostgreSQL connection pools (per database/domain)
