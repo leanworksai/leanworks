@@ -83,7 +83,7 @@ class MemoryManager:
         self._last_token_calculation_turns = 0  # Track when we last calculated
         self._shutdown = False  # Track shutdown state
 
-        # Add working context (in-memory only, no persistence)
+        # Add working context (persisted per session)
         from leanworks.agent.working_context import WorkingContext
         self.working_context = WorkingContext()
 
@@ -344,7 +344,22 @@ class MemoryManager:
                         except (ValueError, TypeError):
                             last_update_count = 0
                     self._last_profile_update_turn_count = last_update_count
-                    
+
+                    # Restore working context from persisted session data
+                    working_context_data = state.get("working_context")
+                    if working_context_data and isinstance(working_context_data, dict):
+                        try:
+                            from leanworks.agent.working_context import WorkingContext
+                            self.working_context = WorkingContext.from_dict(working_context_data)
+                            # Validate restored resources (check if files still exist)
+                            removed_count = self.working_context.validate_resources()
+                            if removed_count > 0:
+                                logger.debug(f"Validated working context - removed {removed_count} missing resources")
+                            logger.debug(f"Restored working context with {self.working_context.get_resource_count()} resources")
+                        except Exception as e:
+                            logger.warning(f"Failed to restore working context from persisted data: {e}")
+                            # Keep the fresh WorkingContext instance created in __init__
+
                     logger.debug(f"Loaded session memory with {len(self.conversation_turns)} turns and summary length {len(self.running_summary)}")
                 else:
                     logger.debug("No existing session memory found, starting fresh")
@@ -445,7 +460,7 @@ class MemoryManager:
                     "system_prompt": self.system_prompt,
                     "last_profile_update_turn_count": self._last_profile_update_turn_count,
                     "last_updated": datetime.now().isoformat(),
-                    "working_context": self.working_context.to_dict()
+                    "working_context": self.working_context.to_dict_filtered()
                 }
                 
                 file_ref = self.firestore_client.collection('orgs').document(self.org_slug).collection('files').document(self.memory_path)
@@ -555,19 +570,28 @@ class MemoryManager:
             return estimated_tokens
     
     def _calculate_current_tokens_sync(self) -> int:
-        """Synchronous token calculation (original implementation)."""
-        # Build the complete context as it would be sent to Claude
+        """
+        Synchronous token calculation (original implementation).
+        
+        Note: System prompt is NOT included here as it's managed by ChatAgent.
+        We only count memory context (profile + summary + working context) + messages.
+        ChatAgent will add the system prompt separately.
+        """
+        # Build the memory context (not system prompt - that's managed by ChatAgent)
         context_parts = []
         
-        # System prompt with user profile and summary
-        if self.system_prompt:
-            context_parts.append(f"System: {self.system_prompt}")
-        
+        # User profile
         if self.user_profile:
             context_parts.append(f"User Profile: {self.user_profile}")
         
+        # Running summary
         if self.running_summary:
             context_parts.append(f"Previous Conversation Summary: {self.running_summary}")
+        
+        # Working context
+        working_resources = self.working_context.get_active_resources()
+        if working_resources:
+            context_parts.append(working_resources)
         
         combined_system_prompt = "\n\n".join(context_parts) if context_parts else ""
         
@@ -586,16 +610,24 @@ class MemoryManager:
             return self.estimate_tokens(combined_system_prompt)
     
     def _estimate_current_tokens_fast(self) -> int:
-        """Fast token estimation for immediate use."""
+        """
+        Fast token estimation for immediate use.
+        
+        Note: System prompt is NOT included as it's managed by ChatAgent.
+        Only estimates memory context (profile + summary + working context) + messages.
+        """
         total_tokens = 0
         
-        # System context estimation
-        if self.system_prompt:
-            total_tokens += self.estimate_tokens(self.system_prompt)
+        # Memory context estimation (no system prompt)
         if self.user_profile:
             total_tokens += self.estimate_tokens(self.user_profile)
         if self.running_summary:
             total_tokens += self.estimate_tokens(self.running_summary)
+        
+        # Working context estimation
+        working_resources = self.working_context.get_active_resources()
+        if working_resources:
+            total_tokens += self.estimate_tokens(working_resources)
         
         # Conversation turns estimation
         for turn in self.conversation_turns:
@@ -832,12 +864,16 @@ Provide updated running summary:"""
         """
         Get the context for model inference.
         Returns: (combined_context_text, recent_messages_list)
+        
+        Note: Does NOT include system prompt - that should be managed by ChatAgent.
+        Only returns: user profile, running summary, working context.
         """
         context_parts = []
         
-        # Add system prompt if available
-        if self.system_prompt:
-            context_parts.append(f"System: {self.system_prompt}")
+        # REMOVED: System prompt should not be in memory context as it causes duplication
+        # The ChatAgent builds the system prompt fresh and injects memory context into it
+        # if self.system_prompt:
+        #     context_parts.append(f"System: {self.system_prompt}")
         
         # Add user profile if available
         if self.user_profile:

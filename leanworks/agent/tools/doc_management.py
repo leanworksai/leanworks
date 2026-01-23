@@ -10,7 +10,9 @@ import anthropic
 from datetime import datetime, timezone
 
 from .base_api_client import BaseAPIClient
-from .postgres import AI_AGENT_ID
+
+# Default AI agent ID for attribution when user_id is not provided
+AI_AGENT_ID = "leanworks-ai-agent"
 
 logger = logging.getLogger(__name__)
 
@@ -89,121 +91,7 @@ class DocManagementTool(BaseAPIClient):
     # Working Context Query Tool
     # ============================================================================
 
-    @property
-    def query_working_context_property(self):
-        description = f"""
-        Query working context to discover what resources have been loaded in this session.
-
-        Working context tracks:
-        - Documents loaded via get_doc (stored as files when large)
-        - Temporary files created by tools
-        - DuckDB response databases
-        - Document IDs from cited context
-
-        Use this tool to:
-        - Check if a document has already been loaded
-        - Find file paths for previously loaded content
-        - Discover what resources are available without re-fetching
-
-        Parameters:
-        - resource_type (optional): Filter by type ('tool_response_file', 'document_id', 'temp_file', 'storage_ref')
-        - doc_id (optional): Find resources related to a specific document ID
-        - search_metadata (optional): Search metadata fields (dict of key-value pairs)
-
-        Returns:
-        - List of resources with: resource_id, type, path, metadata (including doc_ids, tool, created_via), last_used
-        - Empty list if no matching resources found
-
-        Example queries:
-        - query_working_context(resource_type='tool_response_file') → All loaded files
-        - query_working_context(doc_id='57e6a9f7-...') → Resources for specific document
-        - query_working_context(search_metadata={{'tool': 'get_doc'}}) → Files from get_doc calls
-        """
-        return {
-            "type": "custom",
-            "name": "query_working_context",
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "resource_type": {
-                        "type": "string",
-                        "enum": ["tool_response_file", "document_id", "temp_file", "storage_ref"],
-                        "description": "Filter by resource type"
-                    },
-                    "doc_id": {
-                        "type": "string",
-                        "description": "Find resources related to this document ID"
-                    },
-                    "search_metadata": {
-                        "type": "object",
-                        "description": "Search by metadata fields (e.g., {'tool': 'get_doc'})"
-                    }
-                }
-            }
-        }
-
-    def query_working_context(
-        self,
-        resource_type: Optional[str] = None,
-        doc_id: Optional[str] = None,
-        search_metadata: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Query working context for available resources"""
-
-        if not self.working_context:
-            return {
-                "error": "Working context not available",
-                "resources": []
-            }
-
-        # Handle doc_id query specially
-        if doc_id:
-            # Find all resources with this doc_id in metadata
-            all_resources = self.working_context.list_resources()
-            matching = []
-            for resource in all_resources:
-                metadata = resource.get('metadata', {})
-                doc_ids = metadata.get('doc_ids', [])
-                if doc_id in doc_ids:
-                    matching.append(resource)
-
-            if matching:
-                # Sort by most recently used
-                matching.sort(key=lambda x: x.get('last_used'), reverse=True)
-                return {
-                    "found": True,
-                    "count": len(matching),
-                    "resources": matching
-                }
-            else:
-                return {
-                    "found": False,
-                    "message": f"No resources found for document ID: {doc_id}",
-                    "resources": []
-                }
-
-        # Use working context query methods
-        if resource_type or search_metadata:
-            metadata_filters = search_metadata or {}
-            resources = self.working_context.find_resources_by_metadata(
-                resource_type=resource_type,
-                metadata_filters=metadata_filters
-            )
-        else:
-            # Get all resources
-            resources = self.working_context.list_resources()
-
-        # Sort by most recently used
-        resources.sort(key=lambda x: x.get('last_used'), reverse=True)
-
-        return {
-            "found": len(resources) > 0,
-            "count": len(resources),
-            "resources": resources
-        }
-        
-        # Load workflow configuration
+    # Load workflow configuration
         if config is None:
             from leanworks.setting import DOC_WORKFLOW_CONFIG
             self.config = DOC_WORKFLOW_CONFIG.copy()

@@ -8,7 +8,7 @@ This tool consolidates:
 - Event management (calendar queries)
 - SQL query operations (direct database access)
 """
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from .base_api_client import BaseAPIClient
 import logging
 
@@ -456,22 +456,24 @@ Parameters:
 - sql (required): SQL SELECT or WITH query (max 10,000 characters)
 - params: Array of parameterized query values (default: [])
 - timeout: Query timeout in milliseconds (1000-60000, default: 30000)
-- maxRows: Maximum rows to return (1-10000, default: 1000)
+- maxRows: Maximum rows to return (1-10000, default: 1000) - acts as upper bound for LIMIT clauses
 
 Security:
 - Only SELECT and WITH (CTE) queries allowed
 - Parameterized queries recommended for dynamic values
+- All LIMIT clauses are validated against maxRows parameter
 
-Examples:
+SQL Query Best Practices:
+1. Include LIMIT clauses in your SQL for precise control (will be validated against maxRows)
+2. Use parameterized queries ($1, $2) for dynamic values
+3. Prefer joining tables in a single SQL statement (using JOIN) over querying different tables separately, as this is more efficient and enables richer queries.
+4. Use appropriate timeout for complex queries
+5. Check for truncated results in metadata
+
+Basic Examples:
 - execute_sql_query(sql="SELECT * FROM tasks WHERE status = $1 LIMIT 10", params=["completed"])
-- execute_sql_query(sql="SELECT * FROM tasks WHERE assignee_id = $1", params=["user@example.com"])
+- execute_sql_query(sql="SELECT * FROM tasks WHERE assignee_id = $1 LIMIT 5", params=["user@example.com"])
 - execute_sql_query(sql="SELECT p.name, COUNT(t.id) as task_count FROM projects p LEFT JOIN tasks t ON p.id = t.project_id GROUP BY p.id, p.name ORDER BY task_count DESC LIMIT 5")
-
-Best Practices:
-- Use LIMIT clauses to control result size
-- Use parameterized queries ($1, $2) for dynamic values
-- Use appropriate timeouts for complex queries
-- Check schema first for complex queries
             """,
             "input_schema": {
                 "type": "object",
@@ -555,14 +557,62 @@ Best Practices:
             "description": """
 Get schema information for queryable tables.
 
-Use this tool to understand table structures before writing SQL queries.
-Returns column names, data types, nullability, defaults, and column comments.
+ALWAYS call this tool BEFORE execute_sql_query to understand table structures and column names/types.
+
+RESPONSE FORMAT:
+
+1. Without table parameter:
+   {
+     "success": true,
+     "data": {
+       "tables": ["users", "tasks", "projects", "task_progress_updates", "task_comments", "project_progress_updates", "project_members", "project_comments", "events"],
+       "note": "Use ?table=<table_name> or ?table[]=table1&table[]=table2 to get detailed schema for specific table(s)"
+     }
+   }
+
+2. With single table parameter (e.g., table="tasks"):
+   {
+     "success": true,
+     "data": {
+       "table": "tasks",
+       "columns": [
+         {"column_name": "id", "data_type": "TEXT", "is_nullable": false, "column_default": null, "column_description": "Task ID (primary key)"},
+         {"column_name": "title", "data_type": "TEXT", "is_nullable": true, "column_default": null, "column_description": "Task name/title"},
+         ...
+       ]
+     }
+   }
+
+3. With multiple tables parameter (e.g., table=["tasks", "projects"]):
+   {
+     "success": true,
+     "data": {
+       "tables": {
+         "tasks": {
+           "table": "tasks",
+           "columns": [...]
+         },
+         "projects": {
+           "table": "projects",
+           "columns": [...]
+         }
+       },
+       "note": "Retrieved schemas for 2 tables: tasks, projects"
+     }
+   }
+
+USAGE STRATEGY:
+1. Call without parameters to see list of available tables
+2. Call with specific table name(s) to get detailed column information
+3. For multiple tables, pass a list to minimize API calls
+4. Use the column_name values when writing SQL queries
+5. Check data_type and is_nullable to understand constraints
 
 Parameters:
-- table: Specific table name to get schema for (optional)
-
-If table is specified, returns detailed column information including comments.
-If table is omitted, returns list of all available tables.
+- table: Table name(s) to get schema for (optional)
+  - If omitted: returns list of all available tables
+  - If string: returns detailed schema for single table
+  - If array: returns detailed schemas for multiple tables
 
 Available Tables:
 - users, tasks, projects, events
@@ -571,38 +621,104 @@ Available Tables:
 
 Examples:
 - get_table_schema() - List all available tables
-- get_table_schema(table="tasks") - Get detailed schema for tasks table
-- get_table_schema(table="users") - Get detailed schema for users table
+- get_table_schema(table="tasks") - Get schema for tasks table only
+- get_table_schema(table=["tasks", "projects"]) - Get schemas for both tasks and projects tables
+- get_table_schema(table=["project_progress_updates", "task_progress_updates"]) - Get schemas for progress update tables
+
+IMPORTANT NOTES:
+- Always verify column names from schema before writing SQL queries
+- Use column_name exactly as returned (watch for snake_case like "project_id", "created_at", "date_id")
+- Check data_type to use correct PostgreSQL functions (BIGINT vs DATE vs TEXT)
+- If you see "BIGINT" type with milliseconds, use that for date filtering, NOT PostgreSQL date functions
+- Pass multiple tables as array to reduce API round trips
             """,
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "table": {
-                        "type": "string",
-                        "description": "Specific table name to get schema for (optional)"
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "description": "Single table name to get schema for"
+                            },
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "List of table names to get schemas for"
+                            }
+                        ],
+                        "description": "Table name(s) to get schema for (optional - if omitted, returns list of all available tables)"
                     }
                 }
             }
         }
 
-    def get_table_schema(self, table: Optional[str] = None) -> Dict[str, Any]:
+    def get_table_schema(self, table: Optional[Union[str, List[str]]] = None) -> Dict[str, Any]:
         """
         Get table schema information via Query API.
 
         Args:
-            table: Specific table name (optional)
+            table: Table name(s) - can be a single string, list of strings, or None
 
         Returns:
             Dictionary with schema information including column comments
         """
         try:
-            params = {"table": table} if table else {}
+            params = {}
+            if table:
+                # Handle both single table string and list of tables
+                if isinstance(table, list):
+                    params["table"] = table
+                else:
+                    params["table"] = table
+
             # Always request column comments in the schema
             params["includeComments"] = True
             result = self._make_request('GET', '/api/query/schema', params=params)
 
             if result.get('success'):
-                logger.info(f"get_table_schema successful for table: {table or 'all'}")
+                data = result.get('data', {})
+
+                # Validate response structure
+                if table:
+                    if isinstance(table, list):
+                        # When requesting multiple tables, we should get 'tables' object
+                        if 'tables' not in data:
+                            logger.error(f"get_table_schema returned invalid response for tables {table}: missing 'tables' field. Got: {list(data.keys())}")
+                            return {
+                                "success": False,
+                                "error": {
+                                    "code": "VALIDATION_ERROR",
+                                    "message": f"API returned unexpected response format for tables {table}. Expected 'tables' field, got: {list(data.keys())}"
+                                }
+                            }
+                    else:
+                        # When requesting a single table, we should get 'columns' array
+                        if 'columns' not in data:
+                            logger.error(f"get_table_schema returned invalid response for table '{table}': missing 'columns' field. Got: {list(data.keys())}")
+                            return {
+                                "success": False,
+                                "error": {
+                                    "code": "VALIDATION_ERROR",
+                                    "message": f"API returned unexpected response format for table '{table}'. Expected 'columns' field, got: {list(data.keys())}"
+                                }
+                            }
+                else:
+                    # When requesting all tables, we should get tables array
+                    if 'tables' not in data:
+                        logger.error(f"get_table_schema returned invalid response: missing 'tables' field. Got: {list(data.keys())}")
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "VALIDATION_ERROR",
+                                "message": "API returned unexpected response format. Expected 'tables' field."
+                            }
+                        }
+
+                table_desc = table if isinstance(table, str) else (f"{len(table)} tables" if isinstance(table, list) else "all")
+                logger.info(f"get_table_schema successful for table: {table_desc}")
                 return result
             else:
                 logger.error(f"get_table_schema failed: {result.get('error', {}).get('message')}")

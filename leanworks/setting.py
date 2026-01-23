@@ -144,6 +144,7 @@ AGENT_SYSTEM_PROMPT = """
     Internal project collaboration tools:
     - User management tools: query_users
     - Document management tools: create_doc, update_doc, get_doc, list_docs, get_create_doc_instruction, get_understand_doc_instruction, get_update_doc_instruction, generate_toc, create_toc_file, prepare_section_context, upsert_section_to_file, draft_document_iteratively, run_quality_passes, extract_text_at_html_positions
+    - Working context tools: query_working_context
     - Project management tools: create_task, update_task, execute_sql_query, get_table_schema
     - Chat management tools: query_messages
 
@@ -162,6 +163,7 @@ AGENT_SYSTEM_PROMPT = """
 
     Tool Usage Guidelines:
     - Document management tools: Always call the appropriate instruction tool first (get_understand_doc_instruction, get_create_doc_instruction, or get_update_doc_instruction) before calling get_doc
+    - NEVER assume table schemas when calling execute_sql_query. Always call get_table_schema first to get the schema if you are unsure about the schema.
     - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. See <workspace_reference> and <core_tools_reference> for usage details.
     - str_replace_editor (text editor) tool allows reading, writing, and editing text files. See <workspace_reference> and <core_tools_reference> for usage details.
     - Server tools are used to search the web for current information, news, or data from the internet. Use this when you need up-to-date information not available in the knowledge base. When the user asks about a website URL (like https://leanworks.ai) or requests information from the internet, you MUST immediately call the web_search tool with a search query. Do NOT just say you will search - you MUST actually call the tool.
@@ -274,35 +276,6 @@ AGENT_SYSTEM_PROMPT = """
     All file paths follow <workspace_reference> conventions.
     </document_workflows>
     
-    <sql_query_guidelines>
-    When to use execute_sql_query vs specialized query tools:
-
-    USE execute_sql_query when:
-    - Joining multiple tables (tasks + projects, tasks + users, etc.)
-    - Complex aggregations (COUNT, SUM, AVG, GROUP BY)
-    - Advanced filtering not supported by specialized tools
-    - Analytics and reporting queries
-    - Cross-entity queries requiring data from multiple sources
-
-    USE specialized query tools (query_tasks, query_projects, etc.) when:
-    - Simple single-table queries
-    - Standard filtering by common fields
-    - Quick lookups by ID or status
-    - User prefers simpler interface
-
-    SQL Query Best Practices:
-    1. Always use LIMIT clause to control result size
-    2. Use parameterized queries ($1, $2) for dynamic values
-    3. Call get_table_schema first for complex queries
-    4. Use appropriate timeout for complex queries
-    5. Handle rate limits gracefully (100 queries per 15 min)
-    6. Check for truncated results in metadata
-
-    Example Queries:
-    - Tasks by project: "SELECT t.*, p.name as project_name FROM tasks t JOIN projects p ON t.project_id = p.id WHERE p.name = $1"
-    - User workload: "SELECT assignee_id, COUNT(*) as task_count FROM tasks WHERE status != 'completed' GROUP BY assignee_id"
-    - Project progress: "SELECT p.name, COUNT(t.id) as total_tasks, SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed FROM projects p LEFT JOIN tasks t ON p.id = t.project_id GROUP BY p.id, p.name"
-    </sql_query_guidelines>
 
     <user_identity_matching>
     When you need to identify or match users across systems, call get_user_identification_instruction() for detailed guidance on verification and confidence thresholds.
@@ -543,125 +516,3 @@ def _get_firestore_client():
                     logger.error(f"Failed to initialize Firestore: {e}")
                     raise
     return _firestore_db
-
-# PostgreSQL table schemas template in string format (PostgreSQL tables with snake_case fields)
-# Use {dataset_id} as placeholder for the actual dataset name (for backward compatibility)
-# All tables are in the PostgreSQL database (no path structure)
-TABLE_SCHEMAS = """
-**Table: tasks**
-  Description: Stores task/action items for projects
-  Primary Key: id field
-  - id (TEXT) - Task ID (primary key)
-  - title (TEXT) - Task name/title
-  - assignee_id (TEXT) - User ID assigned to this task (user email)
-  - project_id (TEXT) - Project ID this task belongs to (project name)
-  - created_at (BIGINT) - Creation timestamp in milliseconds
-  - created_date (TEXT) - Creation date in YYYY-MM-DD format
-  - updated_at (BIGINT) - Last update timestamp in milliseconds
-  - due_date (TEXT) - Deadline in YYYY-MM-DD format
-  - status (TEXT) - Task status: 'todo', 'in-progress', 'completed', 'blocked'
-  - description (TEXT) - Detailed task description
-  - priority (TEXT) - Priority level: 'high', 'medium', 'low'
-  - reason (TEXT) - Reason for task creation/update
-  - tags (JSONB/ARRAY) - Optional tags
-  - progress_updates (JSONB/ARRAY) - Optional progress updates
-  - comments (JSONB/ARRAY) - Optional comments
-  - estimated_hours (NUMERIC) - Optional estimated hours
-  - actual_hours (NUMERIC) - Optional actual hours spent
-  - teams (JSONB/ARRAY) - Optional team associations
-  - created_by (TEXT) - Optional creator ID
-  - assignee_avatar (TEXT) - Optional assignee avatar URL
-  - project (TEXT) - Optional project name
-
-**Table: task_progress_updates**
-  Description: Stores work updates/progress reports for team members
-  Primary Key: update_id field
-  - update_id (TEXT) - Unique update ID (primary key)
-  - date_id (TEXT) - Date in YYYY-MM-DD format
-  - project_id (TEXT) - Project ID (project name)
-  - user_id (TEXT) - User ID who made the update (user email)
-  - timestamp (BIGINT) - Update timestamp in milliseconds
-  - update (TEXT) - Update description/content
-  - associated_tasks (TEXT) - JSON string array of task IDs (e.g., '["task1", "task2"]')
-  - reason (TEXT) - Supporting evidence/reason for the update
-
-**Table: project_progress_updates**
-  Description: Stores aggregated summaries of updates per project per day
-  Primary Key: project_id, date_id (composite)
-  - project_id (TEXT) - Project ID (project name)
-  - date_id (TEXT) - Date in YYYY-MM-DD format
-  - update_summary (TEXT) - AI-generated summary of all updates
-  - created_at (BIGINT) - Optional timestamp in milliseconds when summary was created
-
-**Table: users**
-  Description: Stores user information
-  Primary Key: email field
-  - email (TEXT) - User email (primary key, also used as user_id internally)
-  - first_name (TEXT) - User's first name
-  - last_name (TEXT) - User's last name
-  - job_title (TEXT) - Optional user's job title
-  - job_responsibilities (TEXT) - Optional user's job responsibilities
-  - timezone (TEXT) - Optional timezone (e.g., 'America/New_York')
-
-**Table: projects**
-  Description: Stores project information
-  Primary Key: name field (or id field)
-  - id (TEXT/UUID) - Project ID (primary key)
-  - name (TEXT) - Project name
-  - description (TEXT) - Project description
-  - collaborators (JSONB/ARRAY) - Array of user IDs (emails)
-  - detailed_description (TEXT) - Optional extended project description
-  - created_by (TEXT) - Optional creator email
-  - created_at (BIGINT) - Optional creation timestamp in milliseconds
-
-**Table: integrations**
-  Description: Stores external integration configurations
-  Primary Key: integration name (e.g., 'gitlab', 'atlassian', 'jira')
-  - connected (BOOLEAN) - Whether the integration is enabled
-  - sub_tools (JSONB) - Sub-tool configurations
-  - Additional integration-specific configuration fields
-
-**Table: teams**
-  Description: Team information and membership (optional table)
-  Primary Key: id field
-  - id (TEXT) - Team ID (primary key)
-  - name (TEXT) - The team name
-  - description (TEXT) - Team description
-  - members (JSONB/ARRAY) - List of user emails who are team members
-  - created_by (TEXT) - Email of the user who created the team
-  - created_at (BIGINT) - Unix timestamp in milliseconds
-  - team_name (TEXT) - The team name (alternative field name)
-  - projects (JSONB/ARRAY) - List of project IDs associated with the team
-  - leads (JSONB/ARRAY) - List of user emails who are team leads
-  - settings (JSONB) - Team-specific settings and configurations
-
-**Table: events**
-  Description: Stores calendar events and meetings for users
-  Primary Key: id field
-  - id (TEXT) - Event ID (primary key)
-  - title (TEXT) - Event title/name
-  - description (TEXT) - Event description/details
-  - start_date (TIMESTAMP) - Event start date and time
-  - end_date (TIMESTAMP) - Event end date and time
-  - all_day (BOOLEAN) - Whether the event is all-day (default: false)
-  - location (TEXT) - Event location
-  - attendees (JSONB/ARRAY) - Array of user emails who are attendees
-  - created_by (TEXT) - Email of the user who created the event
-  - visibility (TEXT) - Visibility setting: 'all_members' or 'specific_members' (default: 'all_members')
-  - visible_to_members (JSONB/ARRAY) - Array of user emails who can see this event (if visibility='specific_members')
-  - created_at (BIGINT) - Creation timestamp in milliseconds
-  - updated_at (TIMESTAMP) - Last update timestamp
-"""
-
-def get_tables_and_schemas(dataset_id: str) -> str:
-    """
-    Get formatted table schemas for a given dataset_id.
-    
-    Args:
-        dataset_id: The dataset identifier (e.g., 'leanworks')
-        
-    Returns:
-        Formatted string with table schemas
-    """
-    # Replace {dataset_id} placeholder with actual dataset_id
-    return TABLE_SCHEMAS.format(dataset_id=dataset_id)

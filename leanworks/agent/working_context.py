@@ -288,12 +288,38 @@ class WorkingContext:
     def to_dict(self) -> Dict[str, Any]:
         """
         Serialize working context for persistence.
-        
+
         Returns:
             Dictionary representation of working context
         """
         return {
             "resources": self.resources,
+            "default_ttl_hours": self.default_ttl_hours,
+            "ttl_config": self.ttl_config
+        }
+
+    def to_dict_filtered(self) -> Dict[str, Any]:
+        """
+        Serialize only cited context and large response file references for persistence.
+
+        Note: Only stores references (IDs, paths, metadata), NOT actual file contents or resource data.
+
+        Returns:
+            Dictionary representation containing only relevant resources for persistence
+        """
+        # Filter to only include cited context, large response files, and project/task references
+        filtered_resources = {}
+
+        for resource_id, resource_info in self.resources.items():
+            resource_type = resource_info.get('type', '')
+            # Include document_id (cited context), tool_response_file (large response files),
+            # workflow_file (doc workflow files), project_id (cited projects), and task_id (cited tasks)
+            # These store ONLY references (paths, IDs, metadata), NOT contents
+            if resource_type in ['document_id', 'tool_response_file', 'workflow_file', 'project_id', 'task_id']:
+                filtered_resources[resource_id] = resource_info
+
+        return {
+            "resources": filtered_resources,
             "default_ttl_hours": self.default_ttl_hours,
             "ttl_config": self.ttl_config
         }

@@ -150,9 +150,10 @@ class ChatAgent:
             USER_TIMEZONE=user_timezone_str
         )
         
-        # Set the system prompt and user profile for memory manager
+        # Set user profile for memory manager
+        # Note: System prompt is NOT stored in memory manager to avoid duplication.
+        # ChatAgent builds fresh system prompts with memory context injected each time.
         if self.memory_manager:
-            self.memory_manager.set_system_prompt(self.system_prompt)
             # Pass user_info as dict so it can be updated later
             self.memory_manager.set_user_profile(user_info)
         
@@ -587,7 +588,26 @@ class ChatAgent:
             self.conversation.add_user_message(user_message, include_in_slim=True)
 
         # Build enhanced system prompt with all contextual additions
-        enhanced_system_prompt = self.system_prompt
+        # Always start with fresh base prompt to avoid duplication
+        from leanworks.setting import AGENT_SYSTEM_PROMPT
+        from datetime import datetime
+        import pytz
+
+        # Get fresh user info like the original __init__ code did
+        user_info = self._get_user_info()
+        user_timezone_str = user_info.get("timezone", "UTC") or "UTC"
+        try:
+            user_timezone = pytz.timezone(user_timezone_str)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.warning(f"Unknown timezone '{user_timezone_str}' for user {self.user_id}, defaulting to UTC")
+            user_timezone = pytz.UTC
+
+        base_system_prompt = AGENT_SYSTEM_PROMPT.format(
+            USER_INFO=user_info,
+            CURRENT_DATE_LOCAL=datetime.now(user_timezone).isoformat(),
+            USER_TIMEZONE=user_timezone_str
+        )
+        enhanced_system_prompt = base_system_prompt
 
         # Collect all sections to inject
         injections = []
@@ -622,7 +642,7 @@ class ChatAgent:
                     logger.info(f"Appended {injection_name} at end (communication section not found)")
         
         # Update API params with enhanced system prompt
-        if enhanced_system_prompt != self.system_prompt:
+        if enhanced_system_prompt != base_system_prompt:
             # IMPORTANT: Don't replace messages with memory messages during processing
             # We'll use current conversation messages but with enhanced system prompt
             self.api_params.update({
@@ -663,7 +683,10 @@ class ChatAgent:
                 if tools_in_request:
                     tool_names = [tool.get("name", tool.get("type", "unknown")) for tool in tools_in_request[:5]]
                     logger.debug(f"Sample tools in request: {tool_names}")
-                
+
+                # Log conversation being sent to model
+                logger.info(f"Sending conversation to model with {len(self.conversation.conversation)} messages")
+
                 response = self.model_client.messages.create(**current_params)
                 
                 # Check stop_reason to understand why Claude stopped

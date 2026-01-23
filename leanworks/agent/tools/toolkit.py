@@ -1,4 +1,3 @@
-from leanworks.agent.tools.postgres import PostgresTool
 from leanworks.agent.tools.doc_management import DocManagementTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
@@ -13,6 +12,7 @@ from leanworks.agent.tools.linear import LinearTool
 from leanworks.agent.tools.project_management import ProjectManagementTool
 from leanworks.agent.tools.user_management import UserManagementTool
 from leanworks.agent.tools.chat_management import ChatManagementTool
+from leanworks.agent.tools.working_context_tool import WorkingContextTool
 from leanworks.agent.helpers import AgentHelpers
 from google.cloud import storage
 import logging
@@ -126,10 +126,6 @@ class ToolUse:
         if 'doc_management_tool' not in self._tool_cache:
             if 'doc_management' in self.requested_tools and self.postgres_client_wrapper:
                 try:
-                    # Set Secret Manager client for PostgresTool (needed for connection pool)
-                    if self.secret_manager_client:
-                        PostgresTool.set_secret_manager(self.secret_manager_client, self.credential_path)
-                    
                     # Import config from settings for workflow features
                     from leanworks.setting import DOC_WORKFLOW_CONFIG
                     
@@ -158,7 +154,24 @@ class ToolUse:
             else:
                 self._tool_cache['doc_management_tool'] = None
         return self._tool_cache['doc_management_tool']
-    
+
+    @property
+    def working_context_tool(self):
+        """Lazy-load WorkingContextTool on first access."""
+        if 'working_context_tool' not in self._tool_cache:
+            # Working context tool is always available as it's part of core functionality
+            try:
+                self._tool_cache['working_context_tool'] = WorkingContextTool(
+                    org_slug=self.org_slug,
+                    working_context=self.working_context,
+                    user_id=self.user_id
+                )
+                logger.debug("WorkingContextTool initialized successfully (lazy)")
+            except Exception as e:
+                logger.error(f"Failed to initialize WorkingContextTool: {str(e)}")
+                self._tool_cache['working_context_tool'] = None
+        return self._tool_cache['working_context_tool']
+
     @property
     def search_tool(self):
         """Lazy-load Search tool on first access."""
@@ -1272,6 +1285,8 @@ EOF"""
                     self.doc_management_tool.draft_document_iteratively_property,
                     self.doc_management_tool.run_quality_passes_property,
                     self.doc_management_tool.extract_text_at_html_positions_property,
+                    # Working context tools
+                    self.working_context_tool.query_working_context_property,
                 ])
                 logger.info("Doc Management tools (including workflow) added to tools list (lazy)")
             
@@ -1443,6 +1458,8 @@ EOF"""
                     "draft_document_iteratively": self.doc_management_tool.draft_document_iteratively,
                     "run_quality_passes": self.doc_management_tool.run_quality_passes,
                     "extract_text_at_html_positions": self.doc_management_tool.extract_text_at_html_positions,
+                    # Working context functions
+                    "query_working_context": self.working_context_tool.query_working_context,
                 })
                 logger.info("Doc Management functions (including workflow) added to function_map (lazy)")
             
