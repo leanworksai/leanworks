@@ -1,11 +1,11 @@
 from leanworks.rag.chat import Chat, AsyncChat
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.embedding import GoogleEmbedding
-from leanworks.storage.gcs import CloudStorage
 from google import genai
 import uuid
 from openai import OpenAI
-from leanworks.secret import GCPSecretLoader
+from google.cloud import secretmanager
+from google.oauth2 import service_account
 import time
 import asyncio
 import logging
@@ -19,26 +19,40 @@ logger = logging.getLogger(__name__)
 # query = "how was the interview with Alan"
 query = "give me a summary of iOS app progress so far"
 def test_sync_chat():
-    storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
-    secret_client = GCPSecretLoader("gcp_credential.json")
-    embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
-    model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+    # Load credentials and initialize secret manager
+    credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+    secret_client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+
+    # Load project ID
+    with open("gcp_credential.json", "r") as f:
+        import json
+        credential_data = json.load(f)
+    project_id = credential_data["project_id"]
+
+    # Get secrets
+    def get_secret(name):
+        full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+        response = secret_client.access_secret_version(name=full_name)
+        return response.payload.data.decode("UTF-8")
+
+    embedding_model_api_key = get_secret("gemini-api-key")
+    model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
     # session_id = str(uuid.uuid4())
     session_id = "cwjhh[fp984]"
 
     # Initialize embedding model
     embedding_model = GoogleEmbedding(embedding_model_api_key)
-    
+
     # Initialize vector database client
     vectordb_client = PineconeHybridIndex(
-        pinecone_key=secret_client.get("PINECONE_API_KEY"),
+        pinecone_key=get_secret("pinecone-api-key"),
         embedding_client=embedding_model
     )
-    
+
     # Load hybrid indexes
     vectordb_client.load_hybrid_index(
-        dense_index_name=secret_client.get("DENSE_INDEX_NAME", "dense-index"),
-        sparse_index_name=secret_client.get("SPARSE_INDEX_NAME", "sparse-index")
+        dense_index_name=get_secret("dense-index-name") if get_secret("dense-index-name") else "leanworks-dense",
+        sparse_index_name=get_secret("sparse-index-name") if get_secret("sparse-index-name") else "leanworks-sparse"
     )
     
     # Initialize RAG
@@ -58,26 +72,40 @@ def test_sync_chat():
     print("\n" + "-"*50 + "\n")
 
 async def test_async_chat():
-    storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
-    secret_client = GCPSecretLoader("gcp_credential.json")
-    embedding_model_api_key=secret_client.get("GEMINI_API_KEY")
-    model_client = OpenAI(api_key=secret_client.get("CLAUDE_API_KEY"), base_url="https://api.anthropic.com/v1")
+    # Load credentials and initialize secret manager
+    credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+    secret_client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+
+    # Load project ID
+    with open("gcp_credential.json", "r") as f:
+        import json
+        credential_data = json.load(f)
+    project_id = credential_data["project_id"]
+
+    # Get secrets
+    def get_secret(name):
+        full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+        response = secret_client.access_secret_version(name=full_name)
+        return response.payload.data.decode("UTF-8")
+
+    embedding_model_api_key = get_secret("gemini-api-key")
+    model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
     session_id = str(uuid.uuid4())
     # session_id = "deu2tp892fhg"
 
     # Initialize embedding model
     embedding_model = GoogleEmbedding(embedding_model_api_key)
-    
+
     # Initialize vector database client
     vectordb_client = PineconeHybridIndex(
-        pinecone_key=secret_client.get("PINECONE_API_KEY"),
+        pinecone_key=get_secret("pinecone-api-key"),
         embedding_client=embedding_model
     )
-    
+
     # Load hybrid indexes
     vectordb_client.load_hybrid_index(
-        dense_index_name=secret_client.get("DENSE_INDEX_NAME", "dense-index"),
-        sparse_index_name=secret_client.get("SPARSE_INDEX_NAME", "sparse-index")
+        dense_index_name=get_secret("dense-index-name") if get_secret("dense-index-name") else "leanworks-dense",
+        sparse_index_name=get_secret("sparse-index-name") if get_secret("sparse-index-name") else "leanworks-sparse"
     )
     
     # Initialize AsyncRAG

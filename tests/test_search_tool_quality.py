@@ -17,8 +17,8 @@ from typing import Dict, List, Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from leanworks.agent.tools.search import SearchTool
-from leanworks.storage.gcs import CloudStorage
-from leanworks.secret import GCPSecretLoader
+from google.cloud import secretmanager
+from google.oauth2 import service_account
 from google.cloud import bigquery
 
 # Configure logging
@@ -39,23 +39,27 @@ class SearchToolQualityTester:
     async def setup(self):
         """Initialize the search tool for testing"""
         try:
+            # Load credentials
+            credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+
             # Initialize BigQuery client with credentials
-            bq_client = bigquery.Client.from_service_account_json("gcp_credential.json")
-            
-            # Initialize storage and secret clients
-            storage_client = CloudStorage("gcp_credential.json", org_slug="leanworks.ai")
-            secret_client = GCPSecretLoader("gcp_credential.json")
-            
-            # Initialize search tool
+            bq_client = bigquery.Client(credentials=credentials)
+
+            # Initialize Secret Manager client
+            secret_manager_client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+
+            # Initialize search tool with correct parameters
             self.search_tool = SearchTool(
-                storage_client=storage_client,
-                secret_client=secret_client,
-                read_document_ids=set()
+                firestore_client=bq_client,
+                org_slug="leanworks.ai",
+                secret_manager_client=secret_manager_client,
+                read_document_ids=set(),
+                credential_path="gcp_credential.json"
             )
-            
+
             logger.info("✅ Search tool initialized successfully")
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to initialize search tool: {e}")
             return False

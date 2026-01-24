@@ -31,8 +31,8 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user (without home directory to save space)
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Create non-root user with home directory for library caches
+RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser appuser
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
@@ -53,7 +53,8 @@ RUN find /usr/local -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || tr
 # Switch to non-root user
 USER appuser
 
-# Add user's local bin to PATH (though we're using /usr/local now)
+# Set HOME environment variable explicitly
+ENV HOME="/home/appuser"
 ENV PATH="/usr/local/bin:${PATH}"
 
 EXPOSE 8000
