@@ -240,6 +240,20 @@ class WorkingContext:
         for resource_id, resource_info in self.resources.items():
             ttl_hours = resource_info['ttl_hours']
             last_used = resource_info['last_used']
+            
+            # Handle both offset-naive and offset-aware datetimes
+            # If last_used is a string (from deserialization), parse it
+            if isinstance(last_used, str):
+                try:
+                    from datetime import datetime as dt
+                    last_used = dt.fromisoformat(last_used.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    logger.warning(f"Could not parse datetime string for resource {resource_id}, skipping expiry check")
+                    continue
+            
+            # Ensure both datetimes are offset-naive for comparison
+            if hasattr(last_used, 'tzinfo') and last_used.tzinfo is not None:
+                last_used = last_used.replace(tzinfo=None)
 
             if now - last_used > timedelta(hours=ttl_hours):
                 expired_ids.append(resource_id)
@@ -339,6 +353,22 @@ class WorkingContext:
             default_ttl_hours=data.get('default_ttl_hours', 24),
             resources_data=data.get('resources', {})
         )
+        
+        # Convert serialized datetime strings back to datetime objects
+        for resource_id, resource_info in instance.resources.items():
+            for datetime_field in ['created_at', 'last_used']:
+                if datetime_field in resource_info and isinstance(resource_info[datetime_field], str):
+                    try:
+                        # Parse ISO format datetime string
+                        resource_info[datetime_field] = datetime.fromisoformat(
+                            resource_info[datetime_field].replace('Z', '+00:00')
+                        )
+                        # Convert to offset-naive for consistency
+                        if hasattr(resource_info[datetime_field], 'tzinfo') and resource_info[datetime_field].tzinfo is not None:
+                            resource_info[datetime_field] = resource_info[datetime_field].replace(tzinfo=None)
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Could not parse datetime for {resource_id}.{datetime_field}: {e}, using current time")
+                        resource_info[datetime_field] = datetime.now()
         
         # Update TTL config if provided
         if 'ttl_config' in data:
