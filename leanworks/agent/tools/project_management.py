@@ -452,6 +452,12 @@ Execute SQL queries against project management data.
 Use this tool to query tasks, projects, events, users, and related data using SQL. You can ONLY use this tool after you understand table schemas.
 This provides flexible querying capabilities for complex data retrieval needs.
 
+Special Case - Searching Progress Updates:
+When searching for progress updates, the task_progress_updates table may not contain all necessary information. Consider using search_documents in conjunction with this tool to:
+1. Query the database for structured progress data
+2. Search for additional context from tool responses and knowledge base
+This combined approach ensures more complete information retrieval.
+
 Parameters:
 - sql (required): SQL SELECT or WITH query (max 10,000 characters)
 - params: Array of parameterized query values (default: [])
