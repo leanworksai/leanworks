@@ -239,18 +239,33 @@ class CrossEncoderReranker(BaseReranker):
                 prompt += f"CRITICAL: Your response must contain exactly {len(documents)} comma-separated numbers. No more, no less.\n"
                 prompt += "DO NOT include any other text or explanation in your response."
                 
-                response = self.model_client.chat.completions.create(
-                    model=RERANK_MODEL,
-                    max_tokens=256,
-                    temperature=0.0,  # Use deterministic output
-                    messages=[
-                        {"role": "system", "content": "You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response."},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
+                # Check if this is an Anthropic client (has messages attribute) or OpenAI client
+                if hasattr(self.model_client, 'messages'):
+                    # Anthropic client
+                    response = self.model_client.messages.create(
+                        model=RERANK_MODEL,
+                        max_tokens=256,
+                        temperature=0.0,  # Use deterministic output
+                        system="You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response.",
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    answer = response.content[0].text
+                else:
+                    # OpenAI client (fallback)
+                    response = self.model_client.chat.completions.create(
+                        model=RERANK_MODEL,
+                        max_tokens=256,
+                        temperature=0.0,  # Use deterministic output
+                        messages=[
+                            {"role": "system", "content": "You are a document ranking assistant. Your task is to rate how relevant each document is to the given query on a scale of 0-10. You must respond ONLY with comma-separated numerical scores (e.g., '8, 7, 9, 6'). Do not include any other text, explanations, or formatting in your response."},
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    answer = response.choices[0].message.content
                 
                 # Parse scores from response
-                answer = response.choices[0].message.content
                 logger.debug(f"Raw reranking response received (length: {len(answer) if answer else 0} chars)")
                 
                 # Quick validation: count commas to estimate number of scores

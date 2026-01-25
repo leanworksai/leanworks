@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
-from openai import OpenAI
+from anthropic import Anthropic
 import logging
 from typing import List, Dict, Any
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
@@ -52,7 +52,7 @@ class SearchTool:
             response = secret_manager_client.access_secret_version(name=full_name)
             return response.payload.data.decode("UTF-8")
         
-        model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
+        model_client = Anthropic(api_key=get_secret("claude-api-key"))
         
         # Use the module-level imports directly
         embedding_model_client = GoogleEmbedding(get_secret("gemini-api-key"))
@@ -349,7 +349,7 @@ class SearchTool:
             "data_sources": data_sources
         }
 
-    def _search_namespace(
+    async def _search_namespace(
         self,
         queries: List[str],
         namespace: str,
@@ -368,20 +368,17 @@ class SearchTool:
         Returns:
             List of search results with metadata
         """
+        # Run the synchronous retrieve_nodes in an executor to make it non-blocking
         loop = asyncio.get_event_loop()
-        nodes = loop.run_until_complete(
-            asyncio.gather(
-                loop.run_in_executor(
-                    None,
-                    lambda: self.chat.retrieve_nodes(
-                        queries,
-                        top_k=top_k,
-                        filters=filters,
-                        namespace=namespace
-                    )
-                )
+        nodes = await loop.run_in_executor(
+            None,
+            lambda: self.chat.retrieve_nodes(
+                queries,
+                top_k=top_k,
+                filters=filters,
+                namespace=namespace
             )
-        )[0]
+        )
         return nodes
 
     def _merge_search_results(

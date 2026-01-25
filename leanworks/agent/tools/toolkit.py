@@ -597,19 +597,22 @@ class ToolUse:
                     )
                     
                     if result.returncode != 0:
+                        logger.info(f"Failed to create Docker container: {result.stderr}")
                         raise Exception(f"Failed to create Docker container: {result.stderr}")
                     
                     self.container_id = result.stdout.strip()
                     self.session_temp_dir = session_temp_dir
                     self.container_workspace_path = container_mount_path
-                    logger.debug(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
+                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
                     
                 except FileNotFoundError:
+                    logger.info("Docker is not installed or not in PATH")
                     raise Exception("Docker is not installed or not in PATH")
                 except subprocess.TimeoutExpired:
+                    logger.info("Docker container creation timed out after 10 seconds")
                     raise Exception("Docker container creation timed out")
                 except Exception as e:
-                    logger.error(f"Error creating Docker container: {e}")
+                    logger.info(f"Error creating Docker container: {e}")
                     raise
         
         # Get session_id from ToolUse instance (assuming it's available)
@@ -694,15 +697,20 @@ class ToolUse:
             
             if check_result.returncode != 0 or check_result.stdout.strip() != 'true':
                 # Container stopped, create a new one
-                logger.warning(f"Container {session.container_name} is not running, recreating...")
+                logger.info(f"Container {session.container_name} is not running (return_code: {check_result.returncode}, state: {check_result.stdout.strip()}), recreating...")
                 try:
                     # Try to remove old container if it exists
-                    subprocess.run(['docker', 'rm', '-f', session.container_name],
-                                 capture_output=True, timeout=5)
-                except:
-                    pass
+                    rm_result = subprocess.run(['docker', 'rm', '-f', session.container_name],
+                                 capture_output=True, text=True, timeout=5)
+                    if rm_result.returncode != 0:
+                        logger.info(f"Failed to remove old container {session.container_name}: {rm_result.stderr}")
+                    else:
+                        logger.info(f"Successfully removed old container {session.container_name}")
+                except Exception as e:
+                    logger.info(f"Exception while removing old container {session.container_name}: {str(e)}")
                 self._bash_session = self._create_bash_session()
                 session = self._bash_session
+                logger.info(f"Successfully recreated container {session.container_name}")
             
             # Translate file paths from host temp directory to container mount path
             translated_command = self._translate_path_for_container(command, session)
@@ -740,12 +748,16 @@ class ToolUse:
                         timeout=timeout
                     )
                     
+                    if result.returncode != 0:
+                        logger.info(f"Bash command execution failed in container {session.container_name}: return_code={result.returncode}, stderr={result.stderr[:200]}")
+                    
                     return {
                         "output": result.stdout,
                         "error": result.stderr,
                         "return_code": result.returncode
                     }
                 except subprocess.TimeoutExpired:
+                    logger.info(f"Bash command timed out after {timeout} seconds in container {session.container_name}")
                     # Kill the command if it times out
                     try:
                         subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
@@ -760,7 +772,7 @@ class ToolUse:
                     }
                 
         except Exception as e:
-            logger.error(f"Error executing bash command in Docker: {e}")
+            logger.info(f"Error executing bash command in Docker container {session.container_name}: {str(e)}")
             return {
                 "output": "",
                 "error": f"Error executing command: {str(e)}",
@@ -895,6 +907,7 @@ class ToolUse:
     def bash(self, command: str = None, restart: bool = False) -> str:
         """Execute a bash command or restart the session."""
         if restart:
+            logger.info("Bash session restart requested")
             # Restart the bash session (stop and remove Docker container)
             if hasattr(self, '_bash_session') and self._bash_session is not None:
                 try:
@@ -906,8 +919,9 @@ class ToolUse:
                                  capture_output=True, timeout=10)
                     logger.info(f"Stopped and removed Docker container {session.container_name}")
                 except Exception as e:
-                    logger.warning(f"Error stopping Docker container: {e}")
+                    logger.info(f"Error stopping Docker container during restart: {e}")
             self._bash_session = None
+            logger.info("Bash session restarted successfully")
             return "Bash session restarted"
         
         if not command:
@@ -926,8 +940,11 @@ class ToolUse:
         # Use persistent session if available, otherwise create one
         if not hasattr(self, '_bash_session') or self._bash_session is None:
             try:
+                logger.info("Creating new bash session with Docker container")
                 self._bash_session = self._create_bash_session()
+                logger.info(f"New bash session created successfully with container {self._bash_session.container_name}")
             except Exception as e:
+                logger.info(f"Error creating Docker container: {str(e)}")
                 return f"Error creating Docker container: {str(e)}. Make sure Docker is installed and running."
         
         result = self._execute_bash_command_in_session(command)
@@ -1719,14 +1736,23 @@ EOF"""
             try:
                 session = self._bash_session
                 # Stop and remove the container
-                subprocess.run(['docker', 'stop', session.container_name],
-                             capture_output=True, timeout=10)
-                subprocess.run(['docker', 'rm', '-f', session.container_name],
-                             capture_output=True, timeout=10)
-                logger.debug(f"Cleaned up Docker container {session.container_name}")
+                stop_result = subprocess.run(['docker', 'stop', session.container_name],
+                             capture_output=True, text=True, timeout=10)
+                if stop_result.returncode != 0:
+                    logger.info(f"Failed to stop Docker container {session.container_name}: {stop_result.stderr}")
+                else:
+                    logger.info(f"Successfully stopped Docker container {session.container_name}")
+                
+                rm_result = subprocess.run(['docker', 'rm', '-f', session.container_name],
+                             capture_output=True, text=True, timeout=10)
+                if rm_result.returncode != 0:
+                    logger.info(f"Failed to remove Docker container {session.container_name}: {rm_result.stderr}")
+                else:
+                    logger.info(f"Successfully removed Docker container {session.container_name}")
+                
                 self._bash_session = None
             except Exception as e:
-                logger.warning(f"Error cleaning up Docker container: {e}")
+                logger.info(f"Error cleaning up Docker container {session.container_name}: {e}")
     
     def __del__(self):
         """Cleanup on deletion."""

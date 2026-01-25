@@ -1,5 +1,4 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from leanworks.agent.tools.duckdb import cleanup_responses, clear_session_response_ids
 from leanworks.agent.helpers import AgentHelpers
 from datetime import datetime, timezone
 from leanworks.agent.conversation import ConversationManager
@@ -110,7 +109,8 @@ class ChatAgent:
             self.user_id,
             self.session_id,
             memory_manager=self.memory_manager,
-            tool_use=self.tool_use  # Pass tool_use for Docker access
+            tool_use=self.tool_use,  # Pass tool_use for Docker access
+            large_response_vectordb_client=self.tool_use.large_response_vectordb_client  # Pass large response vectordb client
         )
         
         if clear_conversation:
@@ -375,9 +375,6 @@ class ChatAgent:
         
         # Reset data sources for new message
         self.data_sources = []
-        
-        # Clear any previously tracked response IDs for cleanup
-        clear_session_response_ids()
         
         # Store the original user query for evaluation (before adding cited context)
         self.original_user_query = actual_user_message
@@ -1008,22 +1005,11 @@ class ChatAgent:
             "content": response_text,
             "data_sources": unique_sources
         }
-        try:
-            cleanup_responses()
-        except Exception:
-            pass
         return result
     
     def cleanup(self):
         """Clean up resources and shutdown background threads."""
         try:
-            # Cleanup DuckDB temporary files
-            try:
-                cleanup_responses()
-                logger.debug("Cleaned up DuckDB response files")
-            except Exception as e:
-                logger.warning(f"Error cleaning up DuckDB files: {e}")
-            
             # Cleanup RAG namespace data for this session
             if hasattr(self, 'tool_use') and self.tool_use and self.session_id:
                 try:

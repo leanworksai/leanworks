@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 class RAGStorageTool:
     """Store unstructured tool responses in vector database for RAG retrieval"""
 
-    def __init__(self, vectordb_client, embedding_client, org_slug: str, chunk_size: int = 512, chunk_overlap: int = 128):
+    def __init__(self, vectordb_client, embedding_client, org_slug: str, chunk_size: int = 512, chunk_overlap: int = 128,
+                 use_large_response_indexes: bool = False, large_response_dense_index: Optional[Any] = None,
+                 large_response_sparse_index: Optional[Any] = None):
         """
         Initialize RAG storage tool.
 
@@ -22,13 +24,28 @@ class RAGStorageTool:
             org_slug: Organization slug for namespace
             chunk_size: Size of text chunks for vector storage
             chunk_overlap: Overlap between chunks
+            use_large_response_indexes: Whether to use separate large response indexes
+            large_response_dense_index: Separate dense index for large responses
+            large_response_sparse_index: Separate sparse index for large responses
         """
         self.vectordb_client = vectordb_client
         self.embedding_client = embedding_client
         self.org_slug = org_slug
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.namespace = f"{org_slug}_tool_responses"
+        self.use_large_response_indexes = use_large_response_indexes
+        
+        # Set namespace based on index type
+        if use_large_response_indexes:
+            self.namespace = f"{org_slug}_large_responses"
+            # Use the provided large response indexes
+            self.dense_index = large_response_dense_index
+            self.sparse_index = large_response_sparse_index
+        else:
+            self.namespace = f"{org_slug}_tool_responses"
+            # Use the vectordb_client indexes
+            self.dense_index = None
+            self.sparse_index = None
 
     def store_tool_response_in_vectorstore(
         self,
@@ -87,11 +104,15 @@ class RAGStorageTool:
                 chunks, chunk_metadata_list
             )
 
+            # Get the appropriate indexes to use
+            dense_index = self.dense_index if self.use_large_response_indexes else self.vectordb_client.dense_index
+            sparse_index = self.sparse_index if self.use_large_response_indexes else self.vectordb_client.sparse_index
+            
             # Batch and upsert vectors in parallel for better performance
             def upsert_dense_batch(batch_vectors):
                 """Upsert a batch of dense vectors."""
                 if batch_vectors:
-                    self.vectordb_client.dense_index.upsert(
+                    dense_index.upsert(
                         vectors=batch_vectors,
                         namespace=self.namespace
                     )
@@ -99,7 +120,7 @@ class RAGStorageTool:
             def upsert_sparse_batch(batch_vectors):
                 """Upsert a batch of sparse vectors."""
                 if batch_vectors:
-                    self.vectordb_client.sparse_index.upsert(
+                    sparse_index.upsert(
                         vectors=batch_vectors,
                         namespace=self.namespace
                     )

@@ -482,16 +482,31 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         logger.info(f"User prompt: {prompt}")
 
         try:
-            response = self.model_client.chat.completions.create(
-                model=model,
-                max_tokens=256,  # Allow for longer responses
-                messages=[
-                    {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0
-            )
-            answer = response.choices[0].message.content
+            # Check if this is an Anthropic client (has messages attribute) or OpenAI client
+            if hasattr(self.model_client, 'messages'):
+                # Anthropic client
+                response = self.model_client.messages.create(
+                    model=model,
+                    max_tokens=256,  # Allow for longer responses
+                    system=GENERATION_MODEL_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0
+                )
+                answer = response.content[0].text
+            else:
+                # OpenAI client (fallback)
+                response = self.model_client.chat.completions.create(
+                    model=model,
+                    max_tokens=256,  # Allow for longer responses
+                    messages=[
+                        {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0
+                )
+                answer = response.choices[0].message.content
             
             # Log a preview of the model's response
             logger.info(f"Model {model} response: {answer}")
@@ -827,23 +842,43 @@ class AsyncChat(Chat):
         logger.info(f"User prompt: {prompt}")
 
         try:
-            # Call the model asynchronously
-            response_future = loop.run_in_executor(
-                None,
-                lambda: self.model_client.chat.completions.create(
-                    model=model,
-                    max_tokens=256,
-                    messages=[
-                        {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt}
+            # Check if this is an Anthropic client (has messages attribute) or OpenAI client
+            if hasattr(self.model_client, 'messages'):
+                # Anthropic client
+                response_future = loop.run_in_executor(
+                    None,
+                    lambda: self.model_client.messages.create(
+                        model=model,
+                        max_tokens=256,
+                        system=GENERATION_MODEL_SYSTEM_PROMPT,
+                        messages=[
+                            {"role": "user", "content": prompt}
                         ],
-                    temperature=0.0
+                        temperature=0.0
+                    )
                 )
-            )
-            
-            # Wait for result with timeout
-            response = await asyncio.wait_for(response_future, timeout=90)
-            answer = response.choices[0].message.content
+                
+                # Wait for result with timeout
+                response = await asyncio.wait_for(response_future, timeout=90)
+                answer = response.content[0].text
+            else:
+                # OpenAI client (fallback)
+                response_future = loop.run_in_executor(
+                    None,
+                    lambda: self.model_client.chat.completions.create(
+                        model=model,
+                        max_tokens=256,
+                        messages=[
+                            {"role": "system", "content": GENERATION_MODEL_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.0
+                    )
+                )
+                
+                # Wait for result with timeout
+                response = await asyncio.wait_for(response_future, timeout=90)
+                answer = response.choices[0].message.content
             
             # Log a preview of the model's response
             logger.info(f"Model {model} response: {answer}")

@@ -52,7 +52,24 @@ class QueryRewriter:
                     ],
                     temperature=0.7,  # Use some temperature for diversity
                     max_tokens=1000,
-                    response_format={"type": "json_schema"}
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "query_rewrites",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "rewrites": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                },
+                                "required": ["rewrites"],
+                                "additionalProperties": False
+                            }
+                        }
+                    }
                 )
                 result = response.content[0].text
             else:
@@ -64,7 +81,24 @@ class QueryRewriter:
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.7,  # Use some temperature for diversity
-                    response_format={"type": "json_schema"}
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "query_rewrites",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "rewrites": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                },
+                                "required": ["rewrites"],
+                                "additionalProperties": False
+                            }
+                        }
+                    }
                 )
                 result = response.choices[0].message.content
 
@@ -124,7 +158,22 @@ class QueryRewriter:
                         ],
                         temperature=0.7,  # Use same temperature as sync version
                         max_tokens=1000,
-                        response_format={"type": "json_schema"}
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "query_rewrites",
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rewrites": {
+                                            "type": "array",
+                                            "items": {"type": "string"}
+                                        }
+                                    },
+                                    "required": ["rewrites"]
+                                }
+                            }
+                        }
                     )
                 )
                 result = response.content[0].text
@@ -139,7 +188,22 @@ class QueryRewriter:
                             {"role": "user", "content": user_prompt}
                         ],
                         temperature=0.7,  # Use same temperature as sync version
-                        response_format={"type": "json_schema"}
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "query_rewrites",
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rewrites": {
+                                            "type": "array",
+                                            "items": {"type": "string"}
+                                        }
+                                    },
+                                    "required": ["rewrites"]
+                                }
+                            }
+                        }
                     )
                 )
                 result = response.choices[0].message.content

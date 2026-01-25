@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     """Class for managing conversation history with Claude"""
     
-    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None, memory_manager=None, tool_use=None):
+    def __init__(self, model_client, firestore_client, org_slug, user_id=None, session_id=None, memory_manager=None, tool_use=None,
+                 large_response_vectordb_client=None):
         self.model_client = model_client
         self.firestore_client = firestore_client
         self.org_slug = org_slug
@@ -20,6 +21,7 @@ class ConversationManager:
         self.session_id = session_id
         self.memory_manager = memory_manager
         self.tool_use = tool_use  # Store tool_use reference
+        self.large_response_vectordb_client = large_response_vectordb_client
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
 
@@ -645,16 +647,10 @@ class ConversationManager:
         logger.info(f"Routing large response for {tool_name}: type={response_type.value}")
 
         # Route to appropriate handler based on classification
-        if response_type == ResponseType.STRUCTURED_SIMPLE:
-            logger.info(f"Storing {tool_name} response in DuckDB")
-            return self._handle_large_structured_response(
-                result, tool_name, tool_input, tool_use_id, data_sources
-            )
-
-        elif response_type == ResponseType.STRUCTURED_COMPLEX:
-            logger.info(f"Storing {tool_name} complex JSON response in file with jq access")
-            return self._handle_json_file_storage(
-                result, tool_name, tool_input, tool_use_id, data_sources
+        if response_type in [ResponseType.STRUCTURED_SIMPLE, ResponseType.STRUCTURED_COMPLEX]:
+            logger.info(f"Storing {tool_name} structured response as JSON file (no vectordb indexing)")
+            return self._handle_structured_response(
+                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
             )
 
         elif response_type == ResponseType.UNSTRUCTURED:
@@ -669,9 +665,9 @@ class ConversationManager:
             structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
             results = []
 
-            # Handle structured part (use simple DuckDB for mixed responses)
+            # Handle structured part (use unified JSON handler)
             if structured_part:
-                structured_result = self._handle_large_structured_response(
+                structured_result = self._handle_structured_response(
                     structured_part, tool_name, tool_input, tool_use_id, data_sources
                 )
                 results.append(structured_result)
@@ -691,116 +687,69 @@ class ConversationManager:
             logger.warning(f"Unknown response type: {response_type}")
             return self._truncate_response(result, tool_use_id)
 
-    def _handle_large_structured_response(
+    def _handle_structured_response(
         self,
         result: Any,
         tool_name: str,
         tool_input: Dict[str, Any],
         tool_use_id: str,
-        data_sources: List[str]
-    ) -> Dict[str, Any]:
-        """Store large structured response in DuckDB and return summary"""
-        from leanworks.agent.tools.duckdb import save_data
-        import uuid
-        
-        try:
-            # Generate response_id
-            response_id = str(uuid.uuid4())
-            
-            # Determine table name
-            table_name = self._get_table_name_for_tool(tool_name, tool_input)
-            
-            # Save to DuckDB
-            save_data(
-                data=result,
-                table_name=table_name,
-                response_id=response_id,
-                if_exists="replace"
-            )
-            
-            # Generate summary
-            summary = self._generate_response_summary(result, tool_name)
-            
-            # Format summary with storage info
-            formatted_result = self._format_large_structured_summary(
-                summary=summary,
-                response_id=response_id,
-                table_name=table_name,
-                tool_name=tool_name
-            )
-            
-            # Track data source
-            data_sources.append(f"DuckDB response database: {response_id}")
-            
-            logger.info(f"Stored large structured response in DuckDB: {response_id}, table: {table_name}")
-            
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": formatted_result
-            }
-        except Exception as e:
-            logger.error(f"Failed to store large structured response in DuckDB: {e}")
-            # Fallback to truncation
-            return self._truncate_response(result, tool_use_id)
-
-    def _handle_json_file_storage(
-        self,
-        result: Any,
-        tool_name: str,
-        tool_input: Dict[str, Any],
-        tool_use_id: str,
-        data_sources: List[str]
+        data_sources: List[str],
+        doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Store complex JSON in file for jq access.
-
+        Handle ALL structured responses (SIMPLE and COMPLEX):
+        Save as JSON file only (no vectordb indexing).
+        Users access via jq, grep, or direct viewing.
+        
         Args:
-            result: Complex JSON data to store
+            result: Structured data to store
             tool_name: Name of the tool that generated this
             tool_input: Input parameters to the tool
             tool_use_id: Tool use ID for tracking
             data_sources: List to append data source info
-
+            doc_ids: Optional document IDs (unused for structured data)
+            
         Returns:
-            Formatted result with file path for jq access
+            Formatted result with jq/grep instructions
         """
         import json
-
-        # 1. Save JSON to Docker workspace (mounted directory)
+        
+        # Save JSON file (pretty-printed)
+        json_content = json.dumps(result, indent=2, default=str, ensure_ascii=False)
         host_path, container_path = self._save_file_to_docker_workspace(
-            json.dumps(result, indent=2),
+            json_content,
             tool_name,
-            suffix='.json'
+            suffix='.json',
+            doc_ids=doc_ids
         )
-
-        # 2. Analyze JSON structure for summary
-        from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
-        complexity_info = JSONComplexityAnalyzer.analyze(result)
-
-        # 3. Generate summary
+        
+        # Generate summary
         summary = self._generate_response_summary(result, tool_name)
+        
+        # Return formatted result with jq/grep instructions
+        formatted_result = f"""Large structured response saved as JSON file.
 
-        # 4. Format response with jq instructions (use CONTAINER path)
-        formatted_result = f"""Complex JSON saved to: {container_path}
-- Max depth: {complexity_info['max_depth']} levels
-- Total keys: {complexity_info['key_count']}
-- Structure: {summary.get('type', 'unknown')}
+Document Summary:
+{summary}
 
-Query with jq via bash tool (see <core_tools_reference> in system prompt for syntax):
-- File path: {container_path}
+JSON FILE: {container_path}
+
+FILE ACCESS:
+- Use jq via bash tool for structured queries (e.g., jq '.field' {container_path})
+- Use grep for keyword search (e.g., grep "keyword" {container_path})
+- Use text_editor or cat to view the file
+
+Examples:
+  jq '.[] | select(.age > 30)' {container_path}  # Filter records
+  jq '.user.profile.name' {container_path}       # Navigate nested data
+  grep -i "alice" {container_path}                # Text search
 """
-
-        # Track data source
+        
         data_sources.append(f"JSON file: {container_path}")
-
-        logger.info(f"Stored complex JSON: host={host_path}, container={container_path}")
-
-        return {
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": formatted_result
-        }
+        
+        logger.info(f"Stored structured response as JSON: {container_path}")
+        
+        return {"type": "tool_result", "tool_use_id": tool_use_id, "content": formatted_result}
 
     def _handle_hybrid_text_and_rag_storage(
         self,
@@ -938,8 +887,33 @@ FALLBACK ACCESS (RAG unavailable):
         )
 
     def _get_rag_storage_tool(self):
-        """Get RAG storage tool if available"""
-        # Check if tool_use has access to rag_storage_tool
+        """Get RAG storage tool for large responses"""
+        # If we have a large response vectordb client, use it for large response RAG storage
+        if self.large_response_vectordb_client and hasattr(self, 'tool_use') and self.tool_use:
+            # Get embedding client from tool_use
+            embedding_client = getattr(self.tool_use, 'embedding_client', None)
+            if embedding_client:
+                from leanworks.agent.tools.rag_storage import RAGStorageTool
+                from leanworks.setting import LARGE_RESPONSE_CONFIG
+                
+                config = LARGE_RESPONSE_CONFIG
+                large_response_config = config.get("large_response_indexes", {})
+                
+                # Create RAG storage tool with large response indexes
+                rag_storage = RAGStorageTool(
+                    vectordb_client=self.large_response_vectordb_client,
+                    embedding_client=embedding_client,
+                    org_slug=self.org_slug,
+                    chunk_size=config.get("rag_chunk_size", 512),
+                    chunk_overlap=config.get("rag_chunk_overlap", 128),
+                    use_large_response_indexes=True,
+                    large_response_dense_index=self.large_response_vectordb_client.dense_index,
+                    large_response_sparse_index=self.large_response_vectordb_client.sparse_index
+                )
+                logger.info(f"Using large response RAG storage with namespace: {rag_storage.namespace}")
+                return rag_storage
+        
+        # Fallback: Check if tool_use has access to rag_storage_tool
         if hasattr(self, 'tool_use') and self.tool_use:
             return getattr(self.tool_use, 'rag_storage_tool', None)
         return None

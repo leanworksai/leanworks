@@ -3,7 +3,7 @@ from google.oauth2 import service_account
 from leanworks.rag.chat import Chat
 from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.embedding import GoogleEmbedding
-from openai import OpenAI
+from anthropic import Anthropic
 import logging
 import traceback
 import json
@@ -34,7 +34,7 @@ def main():
             response = secret_client.access_secret_version(name=full_name)
             return response.payload.data.decode("UTF-8")
 
-        model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
+        model_client = Anthropic(api_key=get_secret("claude-api-key"))
 
         # Initialize embedding model
         embedding_model = GoogleEmbedding(get_secret("gemini-api-key"))

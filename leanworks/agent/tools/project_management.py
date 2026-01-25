@@ -610,20 +610,26 @@ USAGE STRATEGY:
 
 Parameters:
 - table: Table name(s) to get schema for (optional)
-  - If omitted: returns list of all available tables
-  - If string: returns detailed schema for single table
-  - If array: returns detailed schemas for multiple tables
+  - If omitted: returns list of all available tables WITH descriptions
+  - If string: returns detailed column schema for single table (columns only, no table description)
+  - If array: returns detailed column schemas for multiple tables (columns only)
 
-Available Tables:
-- users, tasks, projects, events
-- task_progress_updates, task_comments
-- project_progress_updates, project_members, project_comments
+Available Tables with Descriptions:
+- users: Organization user profiles and roles
+- tasks: Task management data including status, priority, and assignments
+- projects: Project information and metadata
+- events: Calendar events and meetings
+- task_progress_updates: Task progress updates history
+- task_comments: Comments and discussions on tasks
+- project_progress_updates: Project progress updates history
+- project_members: Project membership and roles
+- project_comments: Comments and discussions on projects
 
 Examples:
-- get_table_schema() - List all available tables
-- get_table_schema(table="tasks") - Get schema for tasks table only
-- get_table_schema(table=["tasks", "projects"]) - Get schemas for both tasks and projects tables
-- get_table_schema(table=["project_progress_updates", "task_progress_updates"]) - Get schemas for progress update tables
+- get_table_schema() - List all available tables WITH descriptions
+- get_table_schema(table="tasks") - Get detailed column schema for tasks table only
+- get_table_schema(table=["tasks", "projects"]) - Get detailed column schemas for both tasks and projects tables
+- get_table_schema(table=["project_progress_updates", "task_progress_updates"]) - Get detailed column schemas for progress update tables
 
 IMPORTANT NOTES:
 - Always verify column names from schema before writing SQL queries
@@ -663,16 +669,25 @@ IMPORTANT NOTES:
             table: Table name(s) - can be a single string, list of strings, or None
 
         Returns:
-            Dictionary with schema information including column comments
+            Dictionary with schema information including column comments and table descriptions
         """
         try:
-            params = {}
-            if table:
-                # Handle both single table string and list of tables
-                if isinstance(table, list):
-                    params["table"] = table
+            # If no table specified, get list of all available tables with descriptions
+            if not table:
+                result = self._make_request('GET', '/api/query/tables')
+                if result.get('success'):
+                    logger.info("get_table_schema successful: retrieved list of all available tables with descriptions")
+                    return result
                 else:
-                    params["table"] = table
+                    logger.error(f"get_table_schema failed to retrieve table list: {result.get('error', {}).get('message')}")
+                    return result
+
+            # If table specified, get detailed schema for the table(s)
+            params = {}
+            if isinstance(table, list):
+                params["table"] = table
+            else:
+                params["table"] = table
 
             # Always request column comments in the schema
             params["includeComments"] = True
@@ -682,38 +697,26 @@ IMPORTANT NOTES:
                 data = result.get('data', {})
 
                 # Validate response structure
-                if table:
-                    if isinstance(table, list):
-                        # When requesting multiple tables, we should get 'tables' object
-                        if 'tables' not in data:
-                            logger.error(f"get_table_schema returned invalid response for tables {table}: missing 'tables' field. Got: {list(data.keys())}")
-                            return {
-                                "success": False,
-                                "error": {
-                                    "code": "VALIDATION_ERROR",
-                                    "message": f"API returned unexpected response format for tables {table}. Expected 'tables' field, got: {list(data.keys())}"
-                                }
-                            }
-                    else:
-                        # When requesting a single table, we should get 'columns' array
-                        if 'columns' not in data:
-                            logger.error(f"get_table_schema returned invalid response for table '{table}': missing 'columns' field. Got: {list(data.keys())}")
-                            return {
-                                "success": False,
-                                "error": {
-                                    "code": "VALIDATION_ERROR",
-                                    "message": f"API returned unexpected response format for table '{table}'. Expected 'columns' field, got: {list(data.keys())}"
-                                }
-                            }
-                else:
-                    # When requesting all tables, we should get tables array
+                if isinstance(table, list):
+                    # When requesting multiple tables, we should get 'tables' object
                     if 'tables' not in data:
-                        logger.error(f"get_table_schema returned invalid response: missing 'tables' field. Got: {list(data.keys())}")
+                        logger.error(f"get_table_schema returned invalid response for tables {table}: missing 'tables' field. Got: {list(data.keys())}")
                         return {
                             "success": False,
                             "error": {
                                 "code": "VALIDATION_ERROR",
-                                "message": "API returned unexpected response format. Expected 'tables' field."
+                                "message": f"API returned unexpected response format for tables {table}. Expected 'tables' field, got: {list(data.keys())}"
+                            }
+                        }
+                else:
+                    # When requesting a single table, we should get 'columns' array
+                    if 'columns' not in data:
+                        logger.error(f"get_table_schema returned invalid response for table '{table}': missing 'columns' field. Got: {list(data.keys())}")
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "VALIDATION_ERROR",
+                                "message": f"API returned unexpected response format for table '{table}'. Expected 'columns' field, got: {list(data.keys())}"
                             }
                         }
 

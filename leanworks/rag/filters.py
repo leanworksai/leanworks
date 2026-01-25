@@ -47,16 +47,29 @@ class FilterExtractor:
         """
         
         try:
-            response = model_client.chat.completions.create(
-                model=OTHER_MODEL,
-                max_tokens=256,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            content = response.choices[0].message.content
+            # Check if this is an Anthropic client (has messages attribute) or OpenAI client
+            if hasattr(model_client, 'messages'):
+                # Anthropic client
+                response = model_client.messages.create(
+                    model=OTHER_MODEL,
+                    max_tokens=256,
+                    system="You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone.",
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                content = response.content[0].text
+            else:
+                # OpenAI client (fallback)
+                response = model_client.chat.completions.create(
+                    model=OTHER_MODEL,
+                    max_tokens=256,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that extracts time filters from queries. Always interpret dates in UTC timezone."},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                content = response.choices[0].message.content
             
             # Extract JSON object using regex pattern
             json_pattern = r'\{[\s\S]*?\}'

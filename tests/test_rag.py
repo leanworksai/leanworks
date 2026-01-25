@@ -3,7 +3,7 @@ from leanworks.rag.vectordb import PineconeHybridIndex
 from leanworks.rag.embedding import GoogleEmbedding
 from google import genai
 import uuid
-from openai import OpenAI
+from anthropic import Anthropic
 from google.cloud import secretmanager
 from google.oauth2 import service_account
 import time
@@ -36,7 +36,7 @@ def test_sync_chat():
         return response.payload.data.decode("UTF-8")
 
     embedding_model_api_key = get_secret("gemini-api-key")
-    model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
+    model_client = Anthropic(api_key=get_secret("claude-api-key"))
     # session_id = str(uuid.uuid4())
     session_id = "cwjhh[fp984]"
 
@@ -89,7 +89,7 @@ async def test_async_chat():
         return response.payload.data.decode("UTF-8")
 
     embedding_model_api_key = get_secret("gemini-api-key")
-    model_client = OpenAI(api_key=get_secret("claude-api-key"), base_url="https://api.anthropic.com/v1")
+    model_client = Anthropic(api_key=get_secret("claude-api-key"))
     session_id = str(uuid.uuid4())
     # session_id = "deu2tp892fhg"
 
