@@ -1978,7 +1978,6 @@ Returns TOC template for user confirmation before drafting.""",
         }
     
     @property
-    @property
     def prepare_section_context_property(self):
         """Property definition for prepare_section_context tool."""
         return {
