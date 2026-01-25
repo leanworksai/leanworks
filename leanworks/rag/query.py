@@ -43,7 +43,7 @@ class QueryRewriter:
         try:
             # Check if this is an Anthropic client (has messages attribute) or OpenAI client
             if hasattr(self.model_client, 'messages'):
-                # Anthropic client
+                # Anthropic client - does not support response_format parameter
                 response = self.model_client.messages.create(
                     model=model,
                     system=system_prompt,
@@ -51,25 +51,7 @@ class QueryRewriter:
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.7,  # Use some temperature for diversity
-                    max_tokens=1000,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "query_rewrites",
-                            "strict": True,
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "rewrites": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    }
-                                },
-                                "required": ["rewrites"],
-                                "additionalProperties": False
-                            }
-                        }
-                    }
+                    max_tokens=1000
                 )
                 result = response.content[0].text
             else:
@@ -157,23 +139,7 @@ class QueryRewriter:
                             {"role": "user", "content": user_prompt}
                         ],
                         temperature=0.7,  # Use same temperature as sync version
-                        max_tokens=1000,
-                        response_format={
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": "query_rewrites",
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "rewrites": {
-                                            "type": "array",
-                                            "items": {"type": "string"}
-                                        }
-                                    },
-                                    "required": ["rewrites"]
-                                }
-                            }
-                        }
+                        max_tokens=1000
                     )
                 )
                 result = response.content[0].text
