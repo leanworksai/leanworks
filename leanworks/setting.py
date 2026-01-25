@@ -325,7 +325,7 @@ LARGE_RESPONSE_CONFIG = {
         "sparse_name": "large-responses-sparse",
         "dimension": 768,
         "metric": "cosine",
-        "sparse_dimension": 30000,
+        "sparse_dimension": 20000,  # Pinecone limit is 20000 max
         "sparse_metric": "dotproduct",
         "use_large_response_indexes": True
     }

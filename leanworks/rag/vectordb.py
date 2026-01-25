@@ -11,9 +11,11 @@ import tiktoken
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
+logger = logging.getLogger(__name__)
+
 # Constants
 DEFAULT_EMBEDDING_DIMENSION = 768
-DEFAULT_VOCAB_SIZE = 30000
+DEFAULT_VOCAB_SIZE = 20000  # Pinecone max sparse dimension is 20000
 UPSERT_BATCH_SIZE = 100
 SERVERLESS_SPEC = ServerlessSpec(cloud="gcp", region="us-central1")
 
@@ -59,6 +61,106 @@ class PineconeHybridIndex:
         """Load both dense and sparse indexes for hybrid search."""
         self.dense_index = self.pc.Index(dense_index_name)
         self.sparse_index = self.pc.Index(sparse_index_name)
+        return self.dense_index, self.sparse_index
+    
+    def ensure_index_exists(self, index_name: str, dimension: int, metric: str, max_retries: int = 3) -> Any:
+        """
+        Check if index exists, create if not, and return the index.
+        
+        Args:
+            index_name: Name of the index
+            dimension: Dimension of the embedding vectors
+            metric: Distance metric (cosine, euclidean, dotproduct)
+            max_retries: Maximum number of retries for index readiness check
+            
+        Returns:
+            Pinecone Index instance
+        """
+        # List existing indexes
+        existing_indexes = self.pc.list_indexes()
+        index_names = [idx.name for idx in existing_indexes]
+        
+        if index_name not in index_names:
+            logger.info(f"Index '{index_name}' not found. Creating new index...")
+            self._create_index(index_name, dimension, metric)
+        
+        # Wait for index to be ready
+        for attempt in range(max_retries):
+            try:
+                index_desc = self.pc.describe_index(index_name)
+                if index_desc.status.ready:
+                    logger.info(f"Index '{index_name}' is ready")
+                    return self.pc.Index(index_name)
+                else:
+                    logger.info(f"Index '{index_name}' is not ready yet (status: {index_desc.status}). Waiting...")
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff: 5s, 10s, 15s
+            except Exception as e:
+                logger.warning(f"Error checking index status (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+        
+        logger.warning(f"Index '{index_name}' may not be fully ready, but proceeding...")
+        return self.pc.Index(index_name)
+    
+    def _create_index(self, index_name: str, dimension: int, metric: str) -> None:
+        """
+        Create a new serverless Pinecone index.
+        
+        Args:
+            index_name: Name of the index to create
+            dimension: Dimension of the embedding vectors
+            metric: Distance metric (cosine, euclidean, dotproduct)
+        """
+        try:
+            logger.info(f"Creating serverless index '{index_name}' with dimension {dimension} and metric {metric}...")
+            
+            self.pc.create_index(
+                name=index_name,
+                dimension=dimension,
+                metric=metric,
+                spec=SERVERLESS_SPEC
+            )
+            
+            logger.info(f"Index '{index_name}' created successfully")
+        except Exception as e:
+            error_str = str(e)
+            # Check if index already exists (might have been created concurrently)
+            if "already exists" in error_str.lower() or "400" in error_str:
+                logger.info(f"Index '{index_name}' already exists (concurrent creation)")
+            else:
+                logger.error(f"Failed to create index '{index_name}': {e}")
+                raise
+    
+    def load_or_create_hybrid_index(self, dense_index_name: str, sparse_index_name: str, 
+                                   dense_dimension: int = DEFAULT_EMBEDDING_DIMENSION,
+                                   sparse_dimension: int = DEFAULT_VOCAB_SIZE) -> tuple:
+        """
+        Load or create both dense and sparse indexes for hybrid search.
+        
+        Args:
+            dense_index_name: Name of the dense index
+            sparse_index_name: Name of the sparse index
+            dense_dimension: Dimension for dense vectors (default: 768)
+            sparse_dimension: Dimension for sparse vectors (default: 30000)
+            
+        Returns:
+            Tuple of (dense_index, sparse_index)
+        """
+        logger.info(f"Loading or creating hybrid indexes: {dense_index_name} (dense), {sparse_index_name} (sparse)")
+        
+        self.dense_index = self.ensure_index_exists(
+            dense_index_name, 
+            dimension=dense_dimension, 
+            metric="cosine"
+        )
+        
+        self.sparse_index = self.ensure_index_exists(
+            sparse_index_name, 
+            dimension=sparse_dimension, 
+            metric="dotproduct"
+        )
+        
+        logger.info(f"Hybrid indexes loaded/created successfully")
         return self.dense_index, self.sparse_index
     
     def _chunk_text(self, text: str) -> List[str]:
