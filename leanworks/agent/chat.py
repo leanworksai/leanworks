@@ -97,6 +97,12 @@ class ChatAgent:
             )
             logger.debug(f"MemoryManager initialized for model {GENERATION_MODEL}")
             logger.debug(f"Memory settings: {self.memory_manager.get_memory_stats()}")
+            
+            # Synchronize working_context: use MemoryManager's persisted instance
+            # This ensures cited context (tasks, projects, documents) persists across requests
+            self.working_context = self.memory_manager.working_context
+            self.tool_use.working_context = self.working_context
+            logger.debug(f"Synchronized working_context with MemoryManager ({self.working_context.get_resource_count()} resources)")
         except Exception as e:
             logger.error(f"Failed to initialize MemoryManager: {e}")
             self.memory_manager = None
