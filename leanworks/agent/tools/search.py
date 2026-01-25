@@ -147,18 +147,17 @@ class SearchTool:
         description = """
         Search for relevant information using the team's knowledge base and stored tool responses.
 
+        When to use this tool:
+        1. As a fallback when domain-specific tools (project_management, doc_management, etc.) return insufficient/empty results, errors, or are otherwise not suitable to answer the question
+        2. When you are unsure which specific tool to use, or need to identify relevant resources to guide further actions
+        3. When you need to find information from previous tool responses, need more detailed information, or have any uncertainty about the quality or completeness of your answer
+        4. In conjunction with execute_sql_query when searching for progress updates, since progress update tables might not contain all necessary information
+
         This tool searches across two types of content:
         1. Knowledge base documents (Confluence, Jira, GitHub, Slack, etc.)
         2. Stored tool responses (large outputs from previous tool executions)
 
         The response will be a list of results ordered by relevance, most relevant first.
-
-        Use this tool when:
-        - Other tools are not suitable to answer the question
-        - Other tools return empty, error or insufficient results
-        - You need to find information from previous tool responses
-        - You have ANY uncertainty about the quality of your answer
-        - More detailed information is needed
 
         You might need to use this tool multiple times with different queries or scopes.
         """
