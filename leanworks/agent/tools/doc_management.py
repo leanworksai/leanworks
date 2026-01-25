@@ -795,239 +795,6 @@ Document ID: {docId}
         
         return html
     
-    def html_to_markdown(self, html: str) -> str:
-        """Convert HTML to markdown for text editor tool."""
-        markdown = html
-        
-        # Remove HTML tags and convert to markdown
-        # Headers
-        markdown = re.sub(r'<h1>(.*?)</h1>', r'# \1', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<h2>(.*?)</h2>', r'## \1', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<h3>(.*?)</h3>', r'### \1', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Bold
-        markdown = re.sub(r'<strong>(.*?)</strong>', r'**\1**', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<b>(.*?)</b>', r'**\1**', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Italic
-        markdown = re.sub(r'<em>(.*?)</em>', r'*\1*', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<i>(.*?)</i>', r'*\1*', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Links
-        markdown = re.sub(r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'[\2](\1)', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Lists
-        markdown = re.sub(r'<li>(.*?)</li>', r'- \1', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<ul[^>]*>|</ul>|<ol[^>]*>|</ol>', '', markdown, flags=re.IGNORECASE)
-        
-        # Code
-        markdown = re.sub(r'<code>(.*?)</code>', r'`\1`', markdown, flags=re.IGNORECASE | re.DOTALL)
-        markdown = re.sub(r'<pre[^>]*><code>(.*?)</code></pre>', r'```\n\1\n```', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Paragraphs
-        markdown = re.sub(r'<p[^>]*>(.*?)</p>', r'\1\n\n', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Blockquotes
-        markdown = re.sub(r'<blockquote[^>]*>(.*?)</blockquote>', r'> \1', markdown, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Remove remaining HTML tags
-        markdown = re.sub(r'<[^>]+>', '', markdown)
-        
-        # Decode HTML entities
-        markdown = markdown.replace('&amp;', '&')
-        markdown = markdown.replace('&lt;', '<')
-        markdown = markdown.replace('&gt;', '>')
-        markdown = markdown.replace('&quot;', '"')
-        markdown = markdown.replace('&#39;', "'")
-        
-        # Clean up extra whitespace
-        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
-        markdown = markdown.strip()
-        
-        return markdown
-    
-    def tiptap_json_to_markdown(self, tiptap_json: Union[str, dict]) -> str:
-        """
-        Convert TipTap JSON format to markdown.
-        
-        TipTap JSON structure:
-        {
-            "type": "doc",
-            "content": [
-                {"type": "paragraph", "content": [{"type": "text", "text": "Hello"}]},
-                {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Title"}]}
-            ]
-        }
-        
-        Args:
-            tiptap_json: TipTap JSON as string or dict
-            
-        Returns:
-            Markdown string
-        """
-        if not tiptap_json:
-            return ""
-        
-        # Parse JSON string if needed
-        if isinstance(tiptap_json, str):
-            try:
-                doc = json.loads(tiptap_json)
-            except json.JSONDecodeError:
-                # If not valid JSON, might be HTML or plain text - return as is
-                return tiptap_json
-        else:
-            doc = tiptap_json
-        
-        # Validate TipTap JSON structure
-        if not isinstance(doc, dict) or doc.get("type") != "doc":
-            # Not TipTap JSON format, return as string
-            if isinstance(tiptap_json, str):
-                return tiptap_json
-            return json.dumps(tiptap_json)
-        
-        content = doc.get("content", [])
-        if not content:
-            return ""
-        
-        markdown_lines = []
-        
-        def process_node(node: dict, list_context: Optional[dict] = None) -> str:
-            """Process a TipTap node and return markdown representation."""
-            node_type = node.get("type", "")
-            attrs = node.get("attrs", {})
-            node_content = node.get("content", [])
-            
-            if node_type == "text":
-                text = node.get("text", "")
-                marks = node.get("marks", [])
-                
-                # Apply marks (bold, italic, etc.)
-                for mark in marks:
-                    mark_type = mark.get("type", "")
-                    if mark_type == "bold":
-                        text = f"**{text}**"
-                    elif mark_type == "italic":
-                        text = f"*{text}*"
-                    elif mark_type == "strike":
-                        text = f"~~{text}~~"
-                    elif mark_type == "code":
-                        text = f"`{text}`"
-                    elif mark_type == "link":
-                        href = mark.get("attrs", {}).get("href", "")
-                        text = f"[{text}]({href})"
-                
-                return text
-            
-            elif node_type == "paragraph":
-                if not node_content:
-                    return "\n"
-                text = "".join(process_node(child) for child in node_content)
-                return text + "\n"
-            
-            elif node_type == "heading":
-                level = attrs.get("level", 1)
-                prefix = "#" * level + " "
-                text = "".join(process_node(child) for child in node_content)
-                return prefix + text.strip() + "\n"
-            
-            elif node_type == "bulletList":
-                items = []
-                for child in node_content:
-                    if child.get("type") == "listItem":
-                        item_text = process_list_item(child)
-                        items.append(f"- {item_text}")
-                return "\n".join(items) + "\n"
-            
-            elif node_type == "orderedList":
-                items = []
-                for idx, child in enumerate(node_content, 1):
-                    if child.get("type") == "listItem":
-                        item_text = process_list_item(child)
-                        items.append(f"{idx}. {item_text}")
-                return "\n".join(items) + "\n"
-            
-            elif node_type == "listItem":
-                # Handled by parent list
-                return ""
-            
-            elif node_type == "codeBlock":
-                language = attrs.get("language", "")
-                code = "".join(process_node(child) for child in node_content)
-                lang_prefix = language if language else ""
-                return f"```{lang_prefix}\n{code}\n```\n"
-            
-            elif node_type == "blockquote":
-                quote_text = "".join(process_node(child) for child in node_content)
-                lines = quote_text.strip().split("\n")
-                return "\n".join(f"> {line}" for line in lines if line.strip()) + "\n"
-            
-            elif node_type == "horizontalRule":
-                return "---\n"
-            
-            elif node_type == "hardBreak":
-                return "\n"
-            
-            elif node_type == "image":
-                src = attrs.get("src", "")
-                alt = attrs.get("alt", "")
-                title = attrs.get("title", "")
-                title_part = f' "{title}"' if title else ""
-                return f"![{alt}]({src}{title_part})\n"
-            
-            elif node_type == "table":
-                # Process table
-                rows = []
-                for child in node_content:
-                    if child.get("type") == "tableRow":
-                        cells = []
-                        for cell_node in child.get("content", []):
-                            if cell_node.get("type") in ["tableHeader", "tableCell"]:
-                                cell_text = "".join(process_node(c) for c in cell_node.get("content", []))
-                                cells.append(cell_text.strip())
-                        if cells:
-                            rows.append("| " + " | ".join(cells) + " |")
-                
-                if rows:
-                    # Add separator row after header
-                    if len(rows) > 0:
-                        separator = "| " + " | ".join(["---"] * len(rows[0].split("|")[1:-1])) + " |"
-                        return "\n".join([rows[0], separator] + rows[1:]) + "\n"
-                return ""
-            
-            else:
-                # Unknown node type - try to process content
-                if node_content:
-                    return "".join(process_node(child) for child in node_content)
-                return ""
-        
-        def process_list_item(item_node: dict) -> str:
-            """Process a list item node."""
-            text_parts = []
-            for child in item_node.get("content", []):
-                if child.get("type") == "paragraph":
-                    text_parts.append(process_node(child))
-                elif child.get("type") in ["bulletList", "orderedList"]:
-                    # Nested list
-                    nested = process_node(child)
-                    # Indent nested list items
-                    nested_lines = nested.strip().split("\n")
-                    text_parts.append("\n" + "\n".join("  " + line for line in nested_lines))
-                else:
-                    text_parts.append(process_node(child))
-            return "".join(text_parts).strip()
-        
-        # Process all top-level content nodes
-        for node in content:
-            result = process_node(node)
-            if result:
-                markdown_lines.append(result)
-        
-        # Join and clean up
-        markdown_text = "".join(markdown_lines)
-        # Remove excessive blank lines
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
-        return markdown_text.strip()
-    
     def tiptap_json_to_html(self, tiptap_json: Union[str, dict]) -> str:
         """
         Convert TipTap JSON format to HTML.
@@ -1458,39 +1225,6 @@ Document ID: {docId}
             return []
         return [{"type": "text", "text": text}]
     
-    def _convert_content_to_markdown(self, content: str) -> str:
-        """
-        Convert content from database (TipTap JSON or legacy HTML) to markdown.
-        Handles backward compatibility with HTML content.
-        
-        Args:
-            content: Content from database (TipTap JSON string or HTML string)
-            
-        Returns:
-            Markdown string
-        """
-        if not content:
-            return ""
-        
-        # Check if content is TipTap JSON format
-        if isinstance(content, str):
-            # Try to detect TipTap JSON
-            content_stripped = content.strip()
-            if content_stripped.startswith('{') and '"type":"doc"' in content_stripped.replace(' ', ''):
-                try:
-                    # It's TipTap JSON
-                    return self.tiptap_json_to_markdown(content)
-                except Exception as e:
-                    logger.warning(f"Failed to parse TipTap JSON, treating as HTML: {str(e)}")
-                    # Fall through to HTML conversion
-        
-        # Check if it's already a dict (TipTap JSON object)
-        if isinstance(content, dict):
-            return self.tiptap_json_to_markdown(content)
-        
-        # Otherwise, treat as HTML (legacy format) and convert to markdown
-        return self.html_to_markdown(content)
-    
     def _is_tiptap_json(self, content: str) -> bool:
         """
         Check if content is TipTap JSON format.
@@ -1509,34 +1243,6 @@ Document ID: {docId}
         return (content_stripped.startswith('{') and 
                 ('"type":"doc"' in content_stripped.replace(' ', '') or 
                  '"type": "doc"' in content_stripped))
-    
-    def _normalize_content_to_markdown(self, content: str) -> str:
-        """
-        Normalize content to markdown format.
-        Handles TipTap JSON, HTML, or markdown input.
-        
-        Args:
-            content: Content in any format (TipTap JSON, HTML, or markdown)
-            
-        Returns:
-            Markdown string
-        """
-        if not content:
-            return ""
-        
-        # Check if it's TipTap JSON
-        if self._is_tiptap_json(content):
-            return self.tiptap_json_to_markdown(content)
-        
-        # Check if it's HTML (contains HTML tags)
-        if isinstance(content, str) and '<' in content and '>' in content:
-            # Check for common HTML patterns
-            html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
-            if any(pattern in content for pattern in html_patterns):
-                return self.html_to_markdown(content)
-        
-        # Otherwise, assume it's already markdown
-        return content
     
     def _convert_content_to_html(self, content: str) -> str:
         """
@@ -1603,117 +1309,6 @@ Document ID: {docId}
     # Temporary File Management
     # ============================================================================
     
-    def get_doc_html_path(self, docId: str) -> str:
-        """
-        Get or create temporary HTML file path for a document.
-        
-        Args:
-            docId: Document ID
-            
-        Returns:
-            Path to temporary HTML file
-        """
-        if docId in self._temp_files and os.path.exists(self._temp_files[docId]):
-            return self._temp_files[docId]
-        
-        # Create new temporary file
-        file_path = self.create_temp_html_file(docId)
-        return file_path
-    
-    def create_temp_html_file(self, docId: str, content: str = None) -> str:
-        """
-        Create a workspace HTML file for a document.
-
-        Args:
-            docId: Document ID
-            content: Optional initial content (if None, will fetch from DB)
-
-        Returns:
-            Docker-accessible path to HTML file
-        """
-        # Check for existing workspace file
-        existing_path = self._temp_files.get(docId)
-        if existing_path and os.path.exists(existing_path):
-            if content is not None:
-                try:
-                    with open(existing_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    logger.info(f"Reused workspace HTML file (updated): {existing_path} for doc {docId}")
-                except Exception as e:
-                    logger.warning(f"Failed to update cached workspace file {existing_path} for doc {docId}: {str(e)}")
-            else:
-                logger.info(f"Reused workspace HTML file: {existing_path} for doc {docId}")
-            # Convert host path to container path for return
-            workspace_dir = self._get_workspace_dir()
-            if existing_path.startswith(workspace_dir):
-                filename = os.path.basename(existing_path)
-                return f'/workspace/{filename}'
-            return existing_path
-
-        if existing_path and not os.path.exists(existing_path):
-            del self._temp_files[docId]
-
-        try:
-            if content is None:
-                # Try to fetch from API and convert to HTML
-                try:
-                    doc = self._make_request('GET', f'/api/docs/{docId}')
-                    if doc and 'content' in doc:
-                        db_content = doc['content']
-                        # Convert from TipTap JSON (or legacy HTML) to HTML
-                        content = self._convert_content_to_html(db_content)
-                    else:
-                        content = ""
-                except Exception as e:
-                    logger.warning(f"Error fetching document {docId} for HTML file: {str(e)}")
-                    content = ""
-
-            # Save to workspace directory (Docker-accessible)
-            container_path = self._save_workflow_file_to_workspace(
-                content=content,
-                prefix=f'doc_{docId}_',
-                suffix='.html',
-                doc_id=docId
-            )
-
-            # Get host path for tracking
-            workspace_dir = self._get_workspace_dir()
-            filename = container_path.split('/')[-1]
-            host_path = os.path.join(workspace_dir, filename)
-
-            # Track the file (host path for local operations)
-            self._temp_files[docId] = host_path
-
-            logger.debug(f"Created workspace HTML file: {container_path} for doc {docId}")
-            return container_path  # Return Docker-accessible path
-
-        except Exception as e:
-            logger.error(f"Error creating workspace HTML file: {str(e)}")
-            raise
-    
-    def cleanup_temp_file(self, file_path: str):
-        """
-        Clean up a temporary file.
-        
-        Args:
-            file_path: Path to temporary file to clean up
-        """
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.debug(f"Cleaned up temporary file: {file_path}")
-            
-            # Remove from tracking
-            docId_to_remove = None
-            for doc_id, path in self._temp_files.items():
-                if path == file_path:
-                    docId_to_remove = doc_id
-                    break
-            if docId_to_remove:
-                del self._temp_files[docId_to_remove]
-        except Exception as e:
-            logger.warning(f"Error cleaning up temporary file {file_path}: {str(e)}")
-
     def set_selected_text_positions(self, doc_id: str, html_from: Optional[int], html_to: Optional[int]) -> None:
         """Store selected text HTML positions for a document."""
         if not doc_id:
@@ -1964,40 +1559,6 @@ Document ID: {docId}
         
         return sanitized
     
-    def _convert_to_html_if_needed(self, content: str) -> str:
-        """
-        Convert content to HTML. Defaults to treating content as markdown.
-        Only accepts HTML if explicitly wrapped in <html>...</html> tags.
-        
-        Args:
-            content: Content string (markdown preferred, or HTML wrapped in <html>...</html>)
-            
-        Returns:
-            HTML content
-        """
-        if not content or not content.strip():
-            return content
-        
-        # Check if content is explicitly wrapped in <html>...</html> tags
-        html_wrapper_pattern = re.compile(
-            r'^\s*<html[^>]*>(.*?)</html>\s*$',
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        match = html_wrapper_pattern.match(content)
-        if match:
-            # Extract content between tags
-            html_content = match.group(1).strip()
-            logger.debug("HTML content detected (wrapped in <html> tags), sanitizing...")
-            
-            # Sanitize HTML before returning
-            sanitized_html = self._sanitize_html(html_content)
-            return sanitized_html
-        else:
-            # Default to markdown
-            logger.debug("Treating content as markdown (no <html> wrapper detected)")
-            return self.markdown_to_html(content)
-    
     @property
     def list_docs_property(self):
         description = f"""
@@ -2019,7 +1580,7 @@ Document ID: {docId}
         
         Returns:
         - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, visibility, created_at, updated_at
-        - Note: Full content is not included - only a preview. Use get_doc_html_path or query_postgres to get full content if needed.
+        - Note: Full content is not included - only a preview. Use get_doc to get full content if needed.
         - Error: Dictionary with error message
         
         Example Use Cases:
@@ -2340,7 +1901,7 @@ Document ID: {docId}
             "type": "custom",
             "name": "get_create_doc_instruction",
             "description": f"""
-WHEN TO USE: This tool should be the very first document management tool to call when the user asks to create a new document.
+WHEN TO USE: When we need to create a new document.
 
 WHAT IT RETURNS:
 Detailed workflow instructions for creating a new document.
@@ -2360,7 +1921,7 @@ Detailed workflow instructions for creating a new document.
             "name": "get_update_doc_instruction",
             "description": f"""
 
-WHEN TO USE: This tool should be the very first document management tool to call when the user asks to update, edit, or modify an existing document (especially with selected text).
+WHEN TO USE: When we need to update, edit, or modify an existing document (especially with selected text).
 
 WHAT IT RETURNS:
 Detailed workflow instructions for updating/modifying an existing document.
@@ -2379,7 +1940,7 @@ Detailed workflow instructions for updating/modifying an existing document.
             "type": "custom",
             "name": "get_understand_doc_instruction",
             "description": f"""
-WHEN TO USE: This tool should be the first document management tool to call when the user asks to read, view, understand, analyze, or review an existing document WITHOUT making changes.
+WHEN TO USE: When we need to read, view, understand, analyze, or review an existing document WITHOUT making changes.
 
 WHAT IT RETURNS:
 Detailed workflow instructions for reading and understanding document content (both small and large documents).
@@ -2417,23 +1978,6 @@ Returns TOC template for user confirmation before drafting.""",
         }
     
     @property
-    def create_toc_file_property(self):
-        """Property definition for create_toc_file tool."""
-        return {
-            "type": "custom",
-            "name": "create_toc_file",
-            "description": f"""Create a temporary markdown file with TOC structure for org `{self.org_slug}`.
-            
-Converts TOC dictionary to markdown format and saves to temp file for editing.""",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "toc_structure": {"type": "object", "description": "TOC dictionary structure"}
-                },
-                "required": ["toc_structure"]
-            }
-        }
-    
     @property
     def prepare_section_context_property(self):
         """Property definition for prepare_section_context tool."""
@@ -2457,26 +2001,6 @@ This ensures fluent transitions between sections.""",
                     "next_section_heading": {"type": "string", "description": "Heading of next section (optional)"}
                 },
                 "required": ["section_info", "previous_content"]
-            }
-        }
-    
-    @property
-    def upsert_section_to_file_property(self):
-        """Property definition for upsert_section_to_file tool."""
-        return {
-            "type": "custom",
-            "name": "upsert_section_to_file",
-            "description": f"""Upsert section content to document file for org `{self.org_slug}`.
-            
-Appends drafted section content to the working document file.""",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to document file"},
-                    "section_content": {"type": "string", "description": "Section content to add"},
-                    "section_id": {"type": "string", "description": "Section identifier (e.g., '2.3')"}
-                },
-                "required": ["file_path", "section_content", "section_id"]
             }
         }
     
@@ -2834,26 +2358,6 @@ Please proceed with the appropriate workflow."""
         
         return False
     
-    def create_toc_file(self, toc_structure: Dict[str, Any]) -> str:
-        """
-        Create a workspace markdown file with TOC structure.
-
-        Args:
-            toc_structure: TOC dictionary structure
-
-        Returns:
-            Docker-accessible path to TOC file
-        """
-        # Generate markdown TOC content
-        md_content = self._toc_to_markdown(toc_structure)
-
-        # Save to workspace directory (Docker-accessible)
-        return self._save_workflow_file_to_workspace(
-            content=md_content,
-            prefix='toc_',
-            suffix='.md'
-        )
-    
     def _toc_to_markdown(self, toc: Dict[str, Any]) -> str:
         """
         Convert TOC structure to markdown format.
@@ -2977,51 +2481,6 @@ Please proceed with the appropriate workflow."""
             "drafting_prompt": ''.join(prompt_parts)
         }
     
-    def upsert_section_to_file(
-        self,
-        file_path: str,
-        section_content: str,
-        section_id: str
-    ) -> Dict[str, Any]:
-        """
-        Upsert section content to a document file.
-        
-        Args:
-            file_path: Path to document file
-            section_content: Content to add/update
-            section_id: Section identifier for tracking
-            
-        Returns:
-            Status dictionary
-        """
-        try:
-            # Read current content
-            if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    current_content = f.read()
-            else:
-                current_content = ""
-            
-            # Append new section
-            updated_content = current_content + "\n\n" + section_content
-            
-            # Write updated content
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(updated_content)
-            
-            logger.debug(f"Upserted section {section_id} to {file_path}")
-            
-            return {
-                "success": True,
-                "section_id": section_id,
-                "file_path": file_path,
-                "current_size_tokens": self.estimate_tokens(updated_content)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error upserting section: {str(e)}")
-            return {"error": str(e)}
-    
     def get_section_list_from_toc(self, toc: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Extract flat list of sections from TOC structure.
@@ -3097,7 +2556,11 @@ For each section:
    - Main content (follow outline and description)
    - Bridge-out (1-3 sentences to next section)
    - Change log entry
-3. Call upsert_section_to_file() to append to document
+3. Append to document using bash tool:
+   bash(command='cat >> "{output_file}" << "EOF"
+
+{section_content}
+EOF')
 4. Move to next section
 
 After all sections are drafted:
@@ -3105,7 +2568,12 @@ After all sections are drafted:
 - Create final document by calling create_doc() with file_path parameter:
   * Use the output_file path returned in this response
   * Pass it as file_path parameter to create_doc()
-  * Example: create_doc(title="Document Title", file_path="/workspace/working_doc.html")"""
+  * Example: create_doc(title="Document Title", file_path="/workspace/working_doc.html")
+
+FILE OPERATIONS:
+- Use bash tool for all file operations (create, append, etc.)
+- Use heredoc syntax (<<'EOF'...EOF) for multi-line content
+- Example: bash(command='cat > /workspace/file.md << "EOF"\\n{content}\\nEOF')"""
         }
     
     # ============================================================================
@@ -3487,58 +2955,6 @@ After all sections are drafted:
     # RAG Fallback for Large Documents
     # ============================================================================
     
-    def _chunk_document_for_rag_internal(
-        self,
-        doc_id: str,
-        content: str,
-        chunk_by_headings: Optional[bool] = None
-    ) -> Dict[str, Any]:
-        """
-        Chunk document and store in RAG for semantic search.
-        
-        Args:
-            doc_id: Document ID
-            content: Document content
-            chunk_by_headings: Whether to chunk by headings (default from config)
-            
-        Returns:
-            Chunking status and document_id for retrieval
-        """
-        if chunk_by_headings is None:
-            chunk_by_headings = self.config["chunk_by_headings"]
-        
-        try:
-            if chunk_by_headings:
-                chunks = self._chunk_by_headings(content)
-            else:
-                chunks = self._chunk_by_paragraphs(content)
-            
-            # Store in RAG using existing RAGStorageTool
-            rag_doc_id = self.rag_storage.store_tool_response_in_vectorstore(
-                content=content,
-                tool_name="doc_management",
-                tool_input={"doc_id": doc_id, "action": "chunk_for_editing"},
-                metadata={
-                    "doc_id": doc_id,
-                    "chunk_count": len(chunks),
-                    "chunk_method": "headings" if chunk_by_headings else "paragraphs"
-                }
-            )
-            
-            logger.debug(f"Chunked doc {doc_id} into {len(chunks)} chunks, stored as {rag_doc_id}")
-            
-            return {
-                "success": True,
-                "doc_id": doc_id,
-                "rag_document_id": rag_doc_id,
-                "chunk_count": len(chunks),
-                "chunk_method": "headings" if chunk_by_headings else "paragraphs"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error chunking document for RAG: {str(e)}")
-            return {"error": str(e)}
-    
     def _chunk_by_headings(self, content: str) -> List[Dict[str, Any]]:
         """
         Chunk document by heading boundaries, preserving structure.
@@ -3713,43 +3129,6 @@ After all sections are drafted:
             overlapped_chunks.append(overlapped_chunk)
         
         return overlapped_chunks
-    
-    def retrieve_chunks_for_update(
-        self,
-        doc_id: str,
-        query: str,
-        top_k: int = 5
-    ) -> Dict[str, Any]:
-        """
-        Retrieve relevant chunks from RAG for document update.
-        
-        Args:
-            doc_id: Document ID
-            query: Search query
-            top_k: Number of chunks to retrieve
-            
-        Returns:
-            Retrieved chunks with context
-        """
-        return {
-            "workflow": "rag_chunk_retrieval",
-            "doc_id": doc_id,
-            "query": query,
-            "instructions": f"""Retrieve relevant chunks for updating:
-
-1. Use search_documents with query: "{query}"
-2. Specify namespace: {self.org_slug}_tool_responses
-3. Filter by metadata: doc_id = {doc_id}
-4. Request top {top_k} chunks
-5. Review chunks and their neighbor context
-6. Identify which chunks need updating
-7. Apply edits to relevant chunks
-8. Merge updated chunks back to document
-
-The chunks include overlap with neighbors for continuity.""",
-            "namespace": f"{self.org_slug}_tool_responses",
-            "top_k": top_k
-        }
     
     # ============================================================================
     # Post-Update Validation
@@ -3973,110 +3352,9 @@ The chunks include overlap with neighbors for continuity.""",
         
         return False
     
-    def _get_update_instructions(self, strategy: Dict[str, Any]) -> str:
-        """
-        Generate instructions for the agent based on update strategy.
-        
-        Args:
-            strategy: Strategy information from _detect_update_strategy
-            
-        Returns:
-            Instructions string for the agent
-        """
-        strategy_type = strategy["strategy"]
-        
-        if strategy_type == "direct":
-            return """DIRECT UPDATE (doc < 30K tokens):
-The document fits in context. You can update it directly:
-1. Load full content and review current state
-2. Apply the requested updates to the content
-3. Use update_doc() to save changes
-4. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
-        
-        elif strategy_type == "targeted":
-            return """TARGETED EDIT (large doc, user specifies location):
-The document is large but you have a specific target. Use targeted edit workflow:
-1. Prefer edit_doc_section() when cited_context.selectedText is available
-2. Use search_target (selected_text.text), old_block, new_block for precise edits
-3. If HTML positions available (htmlFrom, htmlTo), use extract_text_at_html_positions() for verification
-4. Avoid full-document overwrites unless targeted edit fails with a clear error
-5. Export the document to a temp file only if needed for complex edits
-6. Search for the target area (exact match, then fuzzy if needed)
-7. Extract a local window (context before + target + context after)
-8. Apply diff-first edit (OLD_BLOCK → NEW_BLOCK)
-9. Merge changes back using update_doc()
-10. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
-        
-        else:  # broad
-            return """BROAD UPDATE (large doc, no specific location):
-The document is large and requires broad updates. Use structure-first workflow:
-1. Generate an impact map with generate_impact_map() to identify which sections need updates
-2. Optionally confirm impact map with user
-3. For each impacted section:
-   - Use search_large_doc() to retrieve the section
-   - Update with new information using update_section_with_rag()
-   - Upsert changes back to document
-4. Run post-update validation and finalize_doc_update() for change log and consolidated report"""
-    
     # ============================================================================
     # Workspace File Management
     # ============================================================================
-
-    def _save_workflow_file_to_workspace(
-        self,
-        content: str,
-        prefix: str,
-        suffix: str,
-        doc_id: Optional[str] = None
-    ) -> str:
-        """
-        Save workflow file to workspace directory (Docker-accessible).
-
-        Args:
-            content: File content to write
-            prefix: Filename prefix
-            suffix: File extension (e.g., '.md', '.html')
-            doc_id: Optional document ID for context
-
-        Returns:
-            File path in workspace (Docker-accessible format)
-        """
-        import uuid
-        import os
-
-        # Get workspace directory (try bash tool first, fallback to session temp)
-        workspace_dir = self._get_workspace_dir()
-
-        # Generate filename
-        filename = f'{prefix}{uuid.uuid4().hex[:8]}{suffix}'
-        file_path = os.path.join(workspace_dir, filename)
-
-        # Write file
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-        # Track for cleanup
-        self._workflow_temp_files.append(file_path)
-
-        # Register in working context if available
-        if self.working_context:
-            resource_id = f"workflow_file_{uuid.uuid4().hex[:8]}"
-            self.working_context.register_resource(
-                resource_id=resource_id,
-                type='workflow_file',
-                path=f'/workspace/{filename}',
-                metadata={
-                    'tool': 'doc_management',
-                    'operation': 'workflow',
-                    'doc_id': doc_id,
-                    'doc_ids': [doc_id] if doc_id else [],  # NEW: consistent with Large Response Handler
-                    'file_type': suffix,
-                    'host_path': file_path
-                }
-            )
-
-        logger.debug(f"Created workflow file: {file_path}")
-        return f'/workspace/{filename}'  # Return Docker-accessible path
 
     def _get_workspace_dir(self) -> str:
         """Get workspace directory (Docker-accessible temp dir)."""
@@ -4094,6 +3372,29 @@ The document is large and requires broad updates. Use structure-first workflow:
         workspace_dir = os.path.join(tempfile.gettempdir(), f"session_{session_id}")
         os.makedirs(workspace_dir, exist_ok=True)
         return workspace_dir
+
+    def cleanup_temp_files(self):
+        """Clean up all tracked temporary files using bash."""
+        all_files = []
+        
+        # Collect document temp files
+        all_files.extend(self._temp_files.values())
+        
+        # Collect workflow temp files  
+        all_files.extend(self._workflow_temp_files)
+        
+        # Cleanup using bash if available
+        if self.bash_tool and all_files:
+            files_str = ' '.join(f"'{f}'" for f in all_files)
+            try:
+                self.bash_tool(command=f"rm -f {files_str}")
+                logger.debug(f"Cleaned up {len(all_files)} temp files via bash")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temp files: {e}")
+        
+        # Clear tracking
+        self._temp_files.clear()
+        self._workflow_temp_files.clear()
 
     # ============================================================================
     # Cleanup
@@ -4128,18 +3429,6 @@ The document is large and requires broad updates. Use structure-first workflow:
         logger.debug(f"Found {len(result)} cited documents: {[d['doc_id'] for d in result if d['doc_id']]}")
         return result
 
-    def cleanup_workflow_temp_files(self):
-        """Clean up any temporary files created during workflows."""
-        for temp_file in self._workflow_temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    logger.debug(f"Removed temp file: {temp_file}")
-            except Exception as e:
-                logger.warning(f"Failed to remove temp file {temp_file}: {e}")
-
-        self._workflow_temp_files.clear()
-    
     def __del__(self):
         """Cleanup on deletion."""
         self.cleanup_temp_files()

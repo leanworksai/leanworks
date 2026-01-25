@@ -143,8 +143,7 @@ AGENT_SYSTEM_PROMPT = """
     You have below tools at your disposal to answer project management related questions.
     Internal project collaboration tools:
     - User management tools: query_users
-    - Document management tools: create_doc, update_doc, get_doc, list_docs, get_create_doc_instruction, get_understand_doc_instruction, get_update_doc_instruction, generate_toc, create_toc_file, prepare_section_context, upsert_section_to_file, draft_document_iteratively, run_quality_passes, extract_text_at_html_positions
-    - Working context tools: query_working_context
+    - Document management tools: create_doc, update_doc, get_doc, list_docs, get_create_doc_instruction, get_understand_doc_instruction, get_update_doc_instruction, generate_toc, prepare_section_context, draft_document_iteratively, run_quality_passes, extract_text_at_html_positions
     - Project management tools: create_task, update_task, execute_sql_query, get_table_schema
     - Chat management tools: query_messages
 
@@ -157,8 +156,8 @@ AGENT_SYSTEM_PROMPT = """
     - ClickUp tools: search_tasks,get_task,create_task,update_task,get_task_comments,add_task_comment
 
     Search tools: search_documents
-    DuckDB tools: get_response_schema, query_response_duckdb
     Client execution tools: bash, str_replace_editor (text editor)
+    Working context tools: query_working_context
     Server tools: web_search
 
     Tool Usage Guidelines:
@@ -212,34 +211,32 @@ AGENT_SYSTEM_PROMPT = """
     <large_tool_response_handling>
     FOR NON-DOCUMENT TOOLS ONLY (PostgreSQL, API calls, etc.)
     
-    When tool responses exceed size limits, they are automatically stored and you receive a file reference and summary.
-    Storage type depends on data format:
+    When tool responses exceed size limits, they are automatically stored based on data type:
+    
+    1. STRUCTURED (JSON/lists/dicts - both simple and complex)
+       → Saved as JSON FILE ONLY (not indexed in vectordb)
+       - Use jq via bash tool for structured queries: jq '.field' /workspace/file.json
+       - Use grep for keyword search: grep "keyword" /workspace/file.json
+       - Use text_editor or cat to view the file
+       - Examples:
+         - jq '.[] | select(.age > 30)' file.json  # Filter records
+         - jq '.user.profile.name' file.json       # Navigate nested data
+         - grep -i "alice" file.json               # Text search
 
-    1. SIMPLE JSON (flat, tabular) → DuckDB
-       - Use: get_response_schema(response_id) and query_response_duckdb(response_id, sql)
-       - Best for: aggregations, filtering, SQL analytics
+    2. UNSTRUCTURED (text, HTML, documents)
+       → Saved as TEXT FILE → Indexed in vectordb
+       - PRIMARY: Use grep for text search, text_editor for reading
+       - FALLBACK: Use search_documents(query='your question') for semantic search
 
-    2. COMPLEX JSON (deep nesting, ≥4 levels) → JSON file
-       - Use: jq commands via bash tool (see <core_tools_reference>)
-       - Best for: navigation, transformation, complex hierarchies
-
-    3. UNSTRUCTURED TEXT → Text file + Background RAG indexing
-       - IMMEDIATE: Use grep and text_editor (see <core_tools_reference>)
-       - AFTER INDEXING: Use search_documents for semantic search
-
-    CRITICAL: Always check the tool response for storage type and follow the provided instructions.
+    CRITICAL: 
+    - Check tool response for file path and document_id (if indexed)
     
     <working_with_large_files>
     When working with large files from NON-DOCUMENT tool responses:
 
-    SEARCH STRATEGY:
-    - EXACT MATCHING: Use grep when you have known keywords/patterns (see <core_tools_reference>)
-    - SEMANTIC SEARCH: Use RAG Storage tools when you need conceptual search without exact wording
-    - HYBRID: Try grep first with 2-5 keywords. If insufficient, use RAG search, then grep to verify location
-
     FILE ACCESS:
     - NEVER view entire large files without specifying view_range or max_characters
-    - Use grep first to find line numbers, then text_editor with view_range to view targeted sections
+    - Use grep or jq first to find relevant sections, then text_editor with view_range to view
     - All file paths follow <workspace_reference> conventions
 
     NOTE: For DOCUMENT files (from get_doc), use <document_workflows> instead.
@@ -250,24 +247,22 @@ AGENT_SYSTEM_PROMPT = """
     dedicated <document_workflows> instructions. It takes precedence over <large_tool_response_handling> 
     instructions to document management tasks.
     <document_workflows>
-    THREE workflows for document management - choose based on user intent:
-
+    THREE workflows for document management - choose based on user intent and follow the returned instructions:
+    Workflow tool should be called first before any other document management tools, as understanding instructions is required for proper document management.
     1. Reading/Understanding documents:
        - User wants to: read, view, understand, analyze, review, or summarize document content
        - ALWAYS call get_understand_doc_instruction() FIRST to get the instructions for understanding the document
        - For large documents: Use tools from <core_tools_reference> for targeted reading
-       - Follow the returned instructions exactly
+       - Follow the returned instructions
 
     2. Creating documents:
        - User wants to: create, draft, or write a new document
        - ALWAYS call get_create_doc_instruction() FIRST to get TOC-first workflow
-       - Follow the returned instructions exactly
 
     3. Updating/Editing documents:
        - User wants to: edit, modify, update, change, add to, or revise existing document content
        - ALWAYS call get_update_doc_instruction() FIRST to get editing workflow
        - For large documents: Use tools from <core_tools_reference> for targeted editing
-       - Follow the returned instructions exactly (different paths for small vs. large documents)
 
     KEY DISTINCTION:
     - Reading = get_understand_doc_instruction → No changes made
@@ -299,10 +294,12 @@ LARGE_RESPONSE_CONFIG = {
     "json_max_simple_array_size": 100,
 
     # Storage routing preferences
-    "use_duckdb_for_simple_json": True,
-    "use_jq_for_complex_json": True,
-    "use_rag_for_unstructured": True,
+    "use_rag_for_structured": False,      # Structured → JSON file only (no vectordb)
+    "use_rag_for_unstructured": True,     # Unstructured → text → vectordb
     "rag_min_semantic_value": 1000,
+    
+    # Formatting options
+    "structured_json_indent": 2,  # JSON pretty-print indentation
 
     # Background RAG indexing
     "enable_background_rag_indexing": True,
@@ -320,7 +317,18 @@ LARGE_RESPONSE_CONFIG = {
 
     # Summary settings
     "summary_preview_length": 500,
-    "summary_sample_size": 3
+    "summary_sample_size": 3,
+
+    # Large response vectordb indexes
+    "large_response_indexes": {
+        "dense_name": "large-responses-dense",
+        "sparse_name": "large-responses-sparse",
+        "dimension": 768,
+        "metric": "cosine",
+        "sparse_dimension": 30000,
+        "sparse_metric": "dotproduct",
+        "use_large_response_indexes": True
+    }
 }
 
 # Working Context Configuration
