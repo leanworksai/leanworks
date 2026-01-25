@@ -151,7 +151,7 @@ class SearchTool:
         1. As a fallback when domain-specific tools (project_management, doc_management, etc.) return insufficient/empty results, errors, or are otherwise not suitable to answer the question
         2. When you are unsure which specific tool to use, or need to identify relevant resources to guide further actions
         3. When you need to find information from previous tool responses, need more detailed information, or have any uncertainty about the quality or completeness of your answer
-        4. In conjunction with execute_sql_query when searching for progress updates, since progress update tables might not contain all necessary information
+        4. ALWAYS with execute_sql_query when searching for progress updates: progress update tables may lack context. Call both tools together in the same turn (see system prompt for details).
 
         This tool searches across two types of content:
         1. Knowledge base documents (Confluence, Jira, GitHub, Slack, etc.)

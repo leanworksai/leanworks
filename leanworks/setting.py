@@ -167,6 +167,14 @@ AGENT_SYSTEM_PROMPT = """
     - str_replace_editor (text editor) tool allows reading, writing, and editing text files. See <workspace_reference> and <core_tools_reference> for usage details.
     - Server tools are used to search the web for current information, news, or data from the internet. Use this when you need up-to-date information not available in the knowledge base. When the user asks about a website URL (like https://leanworks.ai) or requests information from the internet, you MUST immediately call the web_search tool with a search query. Do NOT just say you will search - you MUST actually call the tool.
     - search_documents: Use as a fallback or exploration tool when domain-specific tools are insufficient. See the tool's description for detailed usage scenarios.
+    
+    Multi-Tool Patterns (Special Cases):
+    - Progress Updates Queries: ALWAYS call BOTH execute_sql_query AND search_documents together (not sequentially):
+      1. Use execute_sql_query to get structured task_progress_updates data from the database
+      2. Use search_documents to find additional context from tool responses and knowledge base
+      3. Combine both results to provide complete information
+      Example: When asked about task progress, call both tools in the same response turn, then synthesize the results.
+    
     - Project collaboration tools selection Priority:
       a. Internal project collaboration tools first
       b. External project collaboration tools second:

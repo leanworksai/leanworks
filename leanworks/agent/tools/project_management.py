@@ -453,10 +453,11 @@ Use this tool to query tasks, projects, events, users, and related data using SQ
 This provides flexible querying capabilities for complex data retrieval needs.
 
 Special Case - Searching Progress Updates:
-When searching for progress updates, the task_progress_updates table may not contain all necessary information. Consider using search_documents in conjunction with this tool to:
-1. Query the database for structured progress data
-2. Search for additional context from tool responses and knowledge base
-This combined approach ensures more complete information retrieval.
+When searching for progress updates, the task_progress_updates or project_progress_updates table may not contain all necessary information. ALWAYS use search_documents in conjunction with this tool:
+1. Query the database for structured progress data using this tool
+2. Call search_documents in the same turn to find additional context from tool responses and knowledge base
+3. Combine both results to provide comprehensive information
+This is a required pattern - do not query progress updates without also searching for additional context (see system prompt for details).
 
 Parameters:
 - sql (required): SQL SELECT or WITH query (max 10,000 characters)
