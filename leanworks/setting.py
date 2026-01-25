@@ -166,7 +166,9 @@ AGENT_SYSTEM_PROMPT = """
     - bash tool executes bash commands in an isolated Docker container with resource limits and timeouts. Use this for system operations, file manipulation, or running scripts. See <workspace_reference> and <core_tools_reference> for usage details.
     - str_replace_editor (text editor) tool allows reading, writing, and editing text files. See <workspace_reference> and <core_tools_reference> for usage details.
     - Server tools are used to search the web for current information, news, or data from the internet. Use this when you need up-to-date information not available in the knowledge base. When the user asks about a website URL (like https://leanworks.ai) or requests information from the internet, you MUST immediately call the web_search tool with a search query. Do NOT just say you will search - you MUST actually call the tool.
-    - Use search_documents only when other tools don't provide sufficient information
+    - Use search_documents in two scenarios:
+      1. As a fallback when other domain-specific tools (project_management, doc_management, etc.) cannot provide sufficient information
+      2. When you don't have a clear idea which specific tool to use - search_documents can help identify relevant resources and guide you to the right tool
     - Project collaboration tools selection Priority:
       a. Internal project collaboration tools first
       b. External project collaboration tools second:
