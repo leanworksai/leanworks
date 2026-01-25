@@ -6,14 +6,6 @@ from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
 from leanworks.agent.tools.linear import LinearTool
-from leanworks.agent.tools.duckdb import (
-    DuckDBTool,
-    save_data,
-    query_response_duckdb,
-    get_response_schema,
-    cleanup_responses,
-    clear_session_response_ids,
-)
 
 __all__ = [
     'ToolUse',
@@ -24,10 +16,4 @@ __all__ = [
     'AtlassianTool',
     'GitHubTool',
     'LinearTool',
-    'DuckDBTool',
-    'save_data',
-    'query_response_duckdb',
-    'get_response_schema',
-    'cleanup_responses',
-    'clear_session_response_ids',
 ]
