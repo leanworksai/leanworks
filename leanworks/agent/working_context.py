@@ -194,9 +194,29 @@ class WorkingContext:
         if not self.resources:
             return ""
 
+        # Normalize all datetimes before sorting (convert to offset-naive)
+        normalized_resources = {}
+        for resource_id, resource_info in self.resources.items():
+            normalized_info = resource_info.copy()
+            last_used = normalized_info.get('last_used')
+            
+            # Convert string to datetime if needed
+            if isinstance(last_used, str):
+                try:
+                    last_used = datetime.fromisoformat(last_used.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    last_used = datetime.now()
+            
+            # Strip timezone info for consistent comparison
+            if hasattr(last_used, 'tzinfo') and last_used.tzinfo is not None:
+                last_used = last_used.replace(tzinfo=None)
+            
+            normalized_info['last_used'] = last_used
+            normalized_resources[resource_id] = normalized_info
+
         # Sort by last_used (most recent first)
         sorted_resources = sorted(
-            self.resources.items(),
+            normalized_resources.items(),
             key=lambda x: x[1]['last_used'],
             reverse=True
         )
