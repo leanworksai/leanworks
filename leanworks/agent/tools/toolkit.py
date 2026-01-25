@@ -1,7 +1,6 @@
 from leanworks.agent.tools.doc_management import DocManagementTool
 from leanworks.agent.tools.search import SearchTool
 from leanworks.agent.tools.outlook import OutlookTool
-from leanworks.agent.tools.duckdb import DuckDBTool
 from leanworks.agent.tools.cloud_storage import CloudStorageTool
 from leanworks.agent.tools.atlassian import AtlassianTool
 from leanworks.agent.tools.github import GitHubTool
@@ -77,8 +76,7 @@ class ToolUse:
             'event_management',
             'user_management',
             'chat_management',
-            'doc_management',
-            'duckdb'
+            'doc_management'
         ]
         
         # Set default tools if not provided
@@ -102,17 +100,15 @@ class ToolUse:
         # RAG storage tool cache (lazy initialization)
         self._rag_storage = None
         
+        # Large response vectordb client cache (lazy initialization)
+        self._large_response_vectordb_client = None
+        
         # Track which tools are actually enabled (successfully initialized)
         self.enabled_tools = []
         
         # Initialize cached properties
         self._tools_cache = None
         self._function_map_cache = None
-        
-        # Register DuckDB tools immediately (stateless wrappers; no instance required)
-        if 'duckdb' in self.requested_tools:
-            self.enabled_tools.append('duckdb')
-            logger.info("DuckDB tools registered (stateless)")
         
         # Log initialization completion
         logger.debug(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
@@ -1411,15 +1407,6 @@ EOF"""
                 ])
                 logger.info("Linear tools added to tools list (lazy)")
 
-            # Add DuckDB tools (response-scoped tools only)
-            if 'duckdb' in self.requested_tools:
-                from leanworks.agent.tools.duckdb import query_response_duckdb_property, get_response_schema_property
-                self._tools_cache.extend([
-                    query_response_duckdb_property(),
-                    get_response_schema_property()
-                ])
-                logger.info("DuckDB tools added to tools list (query_response, get_schema)")
-            
             # Add client tools (bash and text_editor)
             # These are always available as they don't require external dependencies
             self._tools_cache.extend([
@@ -1584,25 +1571,6 @@ EOF"""
                 })
                 logger.info("Linear functions added to function_map (lazy)")
 
-            # Add DuckDB function mapping (Docker-based operations)
-            if 'duckdb' in self.requested_tools:
-                from leanworks.agent.tools.duckdb import DockerDuckDBTool
-
-                def query_response_duckdb_docker(response_id: str, sql: str):
-                    """Docker-based DuckDB query function."""
-                    tool = DockerDuckDBTool(self._bash_session, response_id=response_id)
-                    return tool.query_duckdb(sql)
-
-                def get_response_schema_docker(response_id: str):
-                    """Docker-based DuckDB schema function."""
-                    tool = DockerDuckDBTool(self._bash_session, response_id=response_id)
-                    return tool.get_response_schema()
-
-                self._function_map_cache.update({
-                    "query_response_duckdb": query_response_duckdb_docker,
-                    "get_response_schema": get_response_schema_docker
-                })
-
             # Add client tool function mappings (always available)
             # Note: bash and text_editor are client tools
             # text_editor tool uses name "str_replace_based_edit_tool" in the API for version 20250728
@@ -1623,9 +1591,6 @@ EOF"""
         self._tools_cache = None
         self._function_map_cache = None
         self.enabled_tools = []
-        # Re-register DuckDB tools immediately (stateless)
-        if 'duckdb' in self.requested_tools:
-            self.enabled_tools.append('duckdb')
     
     @property
     def rag_storage_tool(self):
@@ -1677,6 +1642,74 @@ EOF"""
             RAGStorageTool instance or None if not available
         """
         return self.rag_storage_tool
+    
+    @property
+    def large_response_vectordb_client(self):
+        """
+        Lazy initialize a separate vectordb client for large response indexing.
+        Creates new indexes specifically for large unstructured responses.
+        
+        Returns:
+            PineconeHybridIndex instance for large responses, or None if not available
+        """
+        if self._large_response_vectordb_client is None:
+            try:
+                from leanworks.rag.vectordb import PineconeHybridIndex
+                from leanworks.rag.embedding import GoogleEmbedding
+                from leanworks.setting import LARGE_RESPONSE_CONFIG
+                import os
+                
+                # Get configuration for large response indexes
+                config = LARGE_RESPONSE_CONFIG
+                large_response_config = config.get("large_response_indexes", {})
+                
+                if not large_response_config.get("use_large_response_indexes", False):
+                    logger.debug("Large response indexes are disabled in configuration")
+                    self._large_response_vectordb_client = False
+                    return None
+                
+                # Get Pinecone API key from environment or secrets
+                pinecone_key = os.environ.get('PINECONE_API_KEY')
+                if not pinecone_key:
+                    logger.warning("PINECONE_API_KEY not found in environment variables")
+                    self._large_response_vectordb_client = False
+                    return None
+                
+                # Initialize embedding client
+                embedding_client = GoogleEmbedding(self.project_id)
+                
+                # Create vectordb client for large responses
+                vectordb_client = PineconeHybridIndex(
+                    pinecone_key=pinecone_key,
+                    embedding_model_client=embedding_client,
+                    chunk_size=config.get("rag_chunk_size", 512),
+                    chunk_overlap=config.get("rag_chunk_overlap", 128)
+                )
+                
+                # Load or create large response indexes
+                dense_name = large_response_config.get("dense_name", "large-responses-dense")
+                sparse_name = large_response_config.get("sparse_name", "large-responses-sparse")
+                dense_dimension = large_response_config.get("dimension", 768)
+                sparse_dimension = large_response_config.get("sparse_dimension", 30000)
+                
+                logger.info(f"Loading or creating large response indexes: {dense_name}, {sparse_name}")
+                vectordb_client.load_or_create_hybrid_index(
+                    dense_index_name=dense_name,
+                    sparse_index_name=sparse_name,
+                    dense_dimension=dense_dimension,
+                    sparse_dimension=sparse_dimension
+                )
+                
+                self._large_response_vectordb_client = vectordb_client
+                logger.info("Large response vectordb client initialized successfully")
+                
+            except Exception as e:
+                logger.warning(f"Failed to initialize large response vectordb client: {e}")
+                import traceback
+                traceback.print_exc()
+                self._large_response_vectordb_client = False  # Mark as unavailable
+        
+        return self._large_response_vectordb_client if self._large_response_vectordb_client else None
     
     def cleanup_bash_session(self):
         """Clean up Docker container for bash session."""
