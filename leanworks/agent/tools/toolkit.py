@@ -1666,16 +1666,16 @@ EOF"""
                     self._large_response_vectordb_client = False
                     return None
                 
-                # Get Pinecone API key from secret manager or environment fallback
+                # Get Pinecone API key from secret manager (same as search tool)
                 try:
                     from app.services.client import get_cached_api_key
-                    pinecone_key = get_cached_api_key('PINECONE_API_KEY')
+                    pinecone_key = get_cached_api_key('pinecone-api-key')
                 except ImportError:
                     # Fallback to environment variable if app.services.client is not available
                     pinecone_key = os.environ.get('PINECONE_API_KEY')
                 
                 if not pinecone_key:
-                    logger.warning("PINECONE_API_KEY not found in secret manager or environment variables")
+                    logger.warning("pinecone-api-key not found in secret manager or environment variables")
                     self._large_response_vectordb_client = False
                     return None
                 
