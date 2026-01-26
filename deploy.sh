@@ -232,6 +232,27 @@ build_and_push_cloud_build() {
     fi
 }
 
+# Function to apply Bash Session RBAC (required for Kubernetes backend)
+apply_bash_session_rbac() {
+    RBAC_YAML="$DEPLOY_DIR/bash-session-rbac.yaml"
+    
+    if [[ ! -f "$RBAC_YAML" ]]; then
+        echo "Warning: $RBAC_YAML not found. Skipping RBAC setup."
+        return
+    fi
+    
+    echo "Applying Bash Session RBAC (ServiceAccount, Role, RoleBinding)..."
+    if kubectl apply -f "$RBAC_YAML"; then
+        echo "✓ Bash Session RBAC applied successfully"
+        echo "  - ServiceAccount: ask-api-sa"
+        echo "  - Role: bash-session-manager"
+        echo "  - Permissions: pods, pods/exec, persistentvolumeclaims"
+    else
+        echo "Error: Failed to apply Bash Session RBAC"
+        exit 1
+    fi
+}
+
 # Function to apply Kubernetes YAML
 apply_kubernetes_yaml() {
     echo "Updating deployment YAML with the new image..."
@@ -337,6 +358,9 @@ fi
 
 # Configure kubectl
 configure_kubectl
+
+# Apply Bash Session RBAC (required for Kubernetes backend to work)
+apply_bash_session_rbac
 
 # Build and push Docker image using Cloud Build (default method)
 build_and_push_cloud_build
