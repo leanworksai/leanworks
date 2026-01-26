@@ -40,50 +40,19 @@ class KubernetesBashBackend(BashSessionBackend):
         self.v1 = client.CoreV1Api()
     
     def create_session(self, session_id: str) -> BashSession:
-        """Create Kubernetes pod bash session with PersistentVolumeClaim."""
+        """Create Kubernetes pod bash session with emptyDir volume."""
         import uuid
         
         # Generate unique names with full UUID to avoid collisions
-        unique_id = str(uuid.uuid4())[:16]  # Full 16 chars instead of 8 for uniqueness
+        unique_id = str(uuid.uuid4())[:16]
         pod_name = f"bash-session-{unique_id}"
-        pvc_name = f"bash-workspace-{unique_id}"
         
         try:
-            # Create PVC for shared workspace
-            pvc = client.V1PersistentVolumeClaim(
-                metadata=client.V1ObjectMeta(name=pvc_name),
-                spec=client.V1PersistentVolumeClaimSpec(
-                    access_modes=["ReadWriteOnce"],
-                    storage_class_name=self.storage_class,
-                    resources=client.V1ResourceRequirements(
-                        requests={"storage": "1Gi"}
-                    )
-                )
-            )
-            
-            logger.info(f"Creating PVC {pvc_name} for bash session")
-            try:
-                self.v1.create_namespaced_persistent_volume_claim(self.namespace, pvc)
-            except client.rest.ApiException as e:
-                if e.status == 409:  # AlreadyExists - PVC with same name exists
-                    logger.warning(f"PVC {pvc_name} already exists, trying to reuse it")
-                else:
-                    raise
-            
-            # Wait for PVC to be bound with timeout
-            max_wait_attempts = 20
-            for attempt in range(max_wait_attempts):
-                pvc_status = self.v1.read_namespaced_persistent_volume_claim(pvc_name, self.namespace)
-                if pvc_status.status.phase == "Bound":
-                    logger.info(f"PVC {pvc_name} is bound")
-                    break
-                logger.debug(f"PVC {pvc_name} phase: {pvc_status.status.phase} (attempt {attempt+1}/{max_wait_attempts})")
-                time.sleep(1)
-            else:
-                # PVC didn't bind in time
-                logger.warning(f"PVC {pvc_name} did not bind after {max_wait_attempts}s, proceeding anyway")
-                # Note: We continue despite binding timeout - emptyDir can be used as fallback
-                # but we'll still try with the PVC
+            # NOTE: Using emptyDir instead of PVC for ephemeral bash sessions
+            # - Much faster (no provisioning delay)
+            # - No resource leaks or cleanup issues
+            # - Perfect for temporary session files that don't need persistence
+            # - Simpler and more reliable
             
             # Create Pod with bash session
             pod = client.V1Pod(
@@ -120,9 +89,7 @@ class KubernetesBashBackend(BashSessionBackend):
                     volumes=[
                         client.V1Volume(
                             name="workspace",
-                            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                                claim_name=pvc_name
-                            )
+                            empty_dir=client.V1EmptyDirVolumeSource(size_limit="1Gi")
                         ),
                         client.V1Volume(
                             name="tmp",
@@ -162,10 +129,9 @@ class KubernetesBashBackend(BashSessionBackend):
         
         except Exception as e:
             logger.error(f"Error creating Kubernetes bash session: {e}")
-            # Attempt cleanup if creation failed
+            # Attempt cleanup if creation failed (pod only, no PVC with emptyDir)
             try:
                 self.v1.delete_namespaced_pod(pod_name, self.namespace, grace_period_seconds=0)
-                self.v1.delete_namespaced_persistent_volume_claim(pvc_name, self.namespace, grace_period_seconds=0)
             except:
                 pass
             raise
@@ -232,16 +198,15 @@ class KubernetesBashBackend(BashSessionBackend):
             return False
     
     def cleanup_session(self, session: BashSession) -> None:
-        """Delete pod and PVC."""
+        """Delete bash session pod."""
         try:
-            # Delete pod
+            logger.info(f"Deleting pod {session.backend_id}...")
             try:
-                logger.info(f"Deleting pod {session.backend_id}...")
-                # Use default grace period (30s) for proper termination
+                # Use short grace period for quick cleanup
                 self.v1.delete_namespaced_pod(
                     session.backend_id,
                     self.namespace,
-                    grace_period_seconds=30
+                    grace_period_seconds=5
                 )
                 logger.info(f"Pod {session.backend_id} deletion initiated")
             except client.rest.ApiException as e:
@@ -249,25 +214,6 @@ class KubernetesBashBackend(BashSessionBackend):
                     logger.info(f"Pod {session.backend_id} not found (already deleted)")
                 else:
                     logger.warning(f"Failed to delete pod: {e}")
-            
-            # Delete PVC - use reasonable grace period
-            try:
-                # Extract PVC name from backend_id or session_id
-                # PVC name format: bash-workspace-{unique_id}
-                pvc_name = f"bash-workspace-{session.backend_id.split('-')[-1]}"
-                logger.info(f"Deleting PVC {pvc_name}...")
-                
-                self.v1.delete_namespaced_persistent_volume_claim(
-                    pvc_name,
-                    self.namespace,
-                    grace_period_seconds=5  # Allow clean unbind
-                )
-                logger.info(f"PVC {pvc_name} deletion initiated")
-            except client.rest.ApiException as e:
-                if e.status == 404:  # Not found - already deleted
-                    logger.info(f"PVC not found (already deleted)")
-                else:
-                    logger.warning(f"Failed to delete PVC: {e}")
         
         except Exception as e:
             logger.warning(f"Cleanup failed: {e}")
