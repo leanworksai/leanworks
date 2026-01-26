@@ -89,7 +89,7 @@ class KubernetesBashBackend(BashSessionBackend):
             pod = client.V1Pod(
                 metadata=client.V1ObjectMeta(
                     name=pod_name,
-                    labels={"app": "bash-session", "session-id": session_id_short}
+                    labels={"app": "bash-session", "session-id": unique_id}
                 ),
                 spec=client.V1PodSpec(
                     containers=[
@@ -149,7 +149,7 @@ class KubernetesBashBackend(BashSessionBackend):
                 raise Exception(f"Pod {pod_name} failed to start after 60 seconds")
             
             # Create local temp directory for session
-            local_session_temp = os.path.join(tempfile.gettempdir(), f"k8s_session_{session_id_short}")
+            local_session_temp = os.path.join(tempfile.gettempdir(), f"k8s_session_{unique_id}")
             os.makedirs(local_session_temp, exist_ok=True)
             
             return BashSession(
