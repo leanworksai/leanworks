@@ -239,7 +239,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
                             if response_id:
                                 working_context.register_resource(
                                     resource_id=response_id,
-                                    type='storage_ref',
+                                    resource_type='storage_ref',
                                     path=f'duckdb:response_id:{response_id}',
                                     metadata={
                                         'tool': 'duckdb',
@@ -259,7 +259,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
                                     resource_id = f"temp_file_{hash(file_path) % 10000}"
                                     working_context.register_resource(
                                         resource_id=resource_id,
-                                        type='temp_file',
+                                        resource_type='temp_file',
                                         path=file_path,
                                         metadata={
                                             'tool': tool_name,
@@ -275,7 +275,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
                                 resource_id = f"doc_{doc_id}"
                                 working_context.register_resource(
                                     resource_id=resource_id,
-                                    type='document_id',
+                                    resource_type='document_id',
                                     path=doc_id,
                                     metadata={
                                         'tool': tool_name,

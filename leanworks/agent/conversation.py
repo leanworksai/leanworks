@@ -1149,7 +1149,7 @@ NOTE: {rag_note}
             resource_id = f"tool_response_file_{uuid.uuid4().hex[:8]}"
             self.memory_manager.working_context.register_resource(
                 resource_id=resource_id,
-                type='tool_response_file',
+                resource_type='tool_response_file',
                 path=f'/workspace/{filename}',
                 metadata={
                     'tool': tool_name,

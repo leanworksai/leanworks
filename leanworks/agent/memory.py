@@ -687,7 +687,7 @@ class MemoryManager:
                 resource_id = self._generate_resource_id(fact_type, value)
                 self.working_context.register_resource(
                     resource_id=resource_id,
-                    type=fact_type,
+                    resource_type=fact_type,
                     path=value,
                     metadata={'extracted_from': 'summarization'}
                 )
