@@ -1088,7 +1088,9 @@ class GitHubTool:
     @property
     def list_commits_property(self):
         description = """
-        List commits for a repository. Returns a list of commits with key information. Can filter by branch, path, author, or date range.
+        List commits for a repository. Returns a list of commits with key information. Can filter by branch, path, author, date range, or commit message content.
+        
+        Use the optional 'message_keyword' parameter to filter commits by message content (e.g., "PDF", "export", "fix", etc.) - this avoids needing bash parsing.
         
         IMPORTANT: If this tool returns zero results when filtering by author, it may mean the GitHub username is incorrect. 
         Always suggest the user confirm the correct GitHub username/handle and consider using github_search_users to find the correct username.
@@ -1120,6 +1122,10 @@ class GitHubTool:
                         "type": "string",
                         "description": "Author username to filter commits by (optional)"
                     },
+                    "message_keyword": {
+                        "type": "string",
+                        "description": "Keyword to search for in commit messages (case-insensitive, optional). Use this instead of bash parsing to filter results."
+                    },
                     "since": {
                         "type": "string",
                         "description": "Only show commits after this date (ISO 8601 format, optional)"
@@ -1138,9 +1144,10 @@ class GitHubTool:
         }
     
     def list_commits(self, owner: str, repo: str, sha: str = None, path: str = None, author: str = None,
-                    since: str = None, until: str = None, per_page: int = 30, try_approximate_match: bool = True) -> List[Dict]:
+                    message_keyword: str = None, since: str = None, until: str = None, per_page: int = 30, 
+                    try_approximate_match: bool = True) -> List[Dict]:
         """
-        List commits for a repository.
+        List commits for a repository with optional message filtering.
         
         Args:
             owner: Repository owner
@@ -1148,6 +1155,7 @@ class GitHubTool:
             sha: Branch, tag, or commit SHA (optional)
             path: File path filter (optional)
             author: Author username filter (optional)
+            message_keyword: Keyword to search for in commit messages (case-insensitive, optional)
             since: Only show commits after this date (ISO 8601, optional)
             until: Only show commits before this date (ISO 8601, optional)
             per_page: Results per page (default: 30, max: 100)
@@ -1156,10 +1164,15 @@ class GitHubTool:
         Returns:
             List of commit dictionaries, or error dictionary with matching suggestions
         """
-        logger.info(f"Executing list_commits for {owner}/{repo}, author: {author}")
+        logger.info(f"Executing list_commits for {owner}/{repo}, author: {author}, message_keyword: {message_keyword}")
         try:
+            # Increase per_page if we're filtering by message (to get more results before filtering)
+            fetch_per_page = per_page
+            if message_keyword:
+                fetch_per_page = min(100, per_page * 2)  # Fetch more to ensure we have enough after filtering
+            
             params = {
-                'per_page': min(per_page, 100)
+                'per_page': fetch_per_page
             }
             
             if sha:
@@ -1188,7 +1201,7 @@ class GitHubTool:
                     if 'error' not in result:
                         # Success - add metadata about the match
                         if isinstance(result, list):
-                            return result
+                            pass  # Continue to formatting below
                 elif match_result['match'] and match_result['confidence'] >= 0.7:
                     # Medium confidence - return error with suggestion
                     alternatives = [match_result['match']] + match_result['alternatives'][:2]
@@ -1234,6 +1247,34 @@ class GitHubTool:
                     'files_count': len(commit.get('files', []))
                 }
                 formatted_commits.append(formatted_commit)
+            
+            # Apply message keyword filter if provided
+            if message_keyword:
+                keyword_lower = message_keyword.lower()
+                filtered_commits = []
+                
+                for commit in formatted_commits:
+                    message = commit.get('message', '').lower()
+                    if keyword_lower in message:
+                        filtered_commits.append(commit)
+                
+                logger.info(f"Filtered {len(formatted_commits)} commits to {len(filtered_commits)} matching keyword '{message_keyword}'")
+                
+                if not filtered_commits:
+                    return {
+                        "message": f"No commits found matching message keyword '{message_keyword}' in {owner}/{repo}",
+                        "keyword": message_keyword,
+                        "results": [],
+                        "total_retrieved": len(formatted_commits),
+                        "total_matched": 0
+                    }
+                
+                return {
+                    "keyword": message_keyword,
+                    "results": filtered_commits,
+                    "total_retrieved": len(formatted_commits),
+                    "total_matched": len(filtered_commits)
+                }
             
             return formatted_commits
             

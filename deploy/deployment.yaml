@@ -17,7 +17,7 @@ spec:
       serviceAccountName: ask-api-sa
       containers:
       - name: ask-api
-        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260125-211455
+        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260125-212339
         command: ["hypercorn"]
         args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
         ports:
