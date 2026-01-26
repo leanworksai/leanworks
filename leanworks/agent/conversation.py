@@ -621,70 +621,74 @@ class ConversationManager:
         doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Unified entry point for handling all large tool responses.
-        Routes to appropriate storage method based on data format and complexity.
+        Simplified unified handler for all large tool responses.
+        Always saves as text file for maximum reliability and scalability.
+        Eliminates complex classification logic that could fail.
 
         Args:
-            result: The tool response data
+            result: The tool response data (any type)
             tool_name: Name of the tool that generated the response
             tool_input: Input parameters passed to the tool
             tool_use_id: Unique identifier for this tool use
             data_sources: List to append data source tracking info
 
         Returns:
-            Formatted tool result with storage instructions
+            Formatted tool result with bash command instructions
         """
-        from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
-
-        # Classify response type and check if large
-        response_type, is_large = LargeResponseHandler.classify_response(result)
-
-        if not is_large:
-            # Small response - should not reach here, but fallback
-            logger.warning(f"handle_large_response called with small response: {response_type}")
-            return self._truncate_response(result, tool_use_id)
-
-        logger.info(f"Routing large response for {tool_name}: type={response_type.value}")
-
-        # Route to appropriate handler based on classification
-        if response_type in [ResponseType.STRUCTURED_SIMPLE, ResponseType.STRUCTURED_COMPLEX]:
-            logger.info(f"Storing {tool_name} structured response as JSON file (no vectordb indexing)")
-            return self._handle_structured_response(
-                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
+        try:
+            logger.info(f"Handling large response for {tool_name}: defaulting to text file storage")
+            
+            # Convert result to text (try JSON formatting first for structured data)
+            if isinstance(result, (dict, list)):
+                text_content = json.dumps(result, indent=2, default=str, ensure_ascii=False)
+            else:
+                text_content = str(result)
+            
+            # Save to temporary text file in Docker workspace
+            host_path, container_path = self._save_file_to_docker_workspace(
+                text_content,
+                tool_name,
+                suffix='.txt'
             )
+            
+            # Generate summary (preview of content)
+            summary = self._generate_text_summary(text_content)
+            
+            # Build instructions with bash commands
+            formatted_result = f"""Large response saved to: {container_path}
 
-        elif response_type == ResponseType.UNSTRUCTURED:
-            logger.info(f"Storing {tool_name} unstructured text response with hybrid file + RAG indexing")
-            return self._handle_hybrid_text_and_rag_storage(
-                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
-            )
+Summary: {summary}
 
-        elif response_type == ResponseType.MIXED:
-            logger.info(f"Storing {tool_name} mixed response - splitting into structured and unstructured parts")
-            # Split and handle both parts
-            structured_part, unstructured_part = LargeResponseHandler.split_mixed_response(result)
-            results = []
+BASH COMMANDS TO QUERY THE FILE:
+- Search by pattern: grep 'keyword' {container_path}
+- Case-insensitive search: grep -i 'pattern' {container_path}
+- View specific lines: sed -n '10,20p' {container_path}
+- View first N lines: head -n 50 {container_path}
+- View last N lines: tail -n 50 {container_path}
+- Count occurrences: grep -c 'pattern' {container_path}
+- Extract JSON field (if JSON): jq '.field_name' {container_path}
+- Combine operations: grep 'pattern' {container_path} | head -n 20
 
-            # Handle structured part (use unified JSON handler)
-            if structured_part:
-                structured_result = self._handle_structured_response(
-                    structured_part, tool_name, tool_input, tool_use_id, data_sources
-                )
-                results.append(structured_result)
-
-            # Handle unstructured part (hybrid approach)
-            if unstructured_part:
-                unstructured_result = self._handle_hybrid_text_and_rag_storage(
-                    unstructured_part, tool_name, tool_input, tool_use_id, data_sources
-                )
-                results.append(unstructured_result)
-
-            # Return the first result (primary) - mixed responses are rare
-            return results[0] if results else self._truncate_response(result, tool_use_id)
-
-        else:
-            # Unknown type - fallback to truncation
-            logger.warning(f"Unknown response type: {response_type}")
+IMPORTANT: After using bash commands to retrieve specific data, provide the results to the user.
+Do NOT just tell the user the file path - always query and return the actual data.
+"""
+            
+            # Track data source
+            data_sources.append(f"Text file: {container_path}")
+            
+            logger.info(f"Stored large response as text file: {container_path} ({len(text_content)} chars)")
+            
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": formatted_result
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to handle large response for {tool_name}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Fallback to truncation on any error
             return self._truncate_response(result, tool_use_id)
 
     def _handle_structured_response(

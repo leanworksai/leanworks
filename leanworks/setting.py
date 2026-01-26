@@ -219,36 +219,44 @@ AGENT_SYSTEM_PROMPT = """
     <large_tool_response_handling>
     FOR NON-DOCUMENT TOOLS ONLY (PostgreSQL, API calls, etc.)
     
-    When tool responses exceed size limits, they are automatically stored based on data type:
+    When tool responses exceed size limits, they are ALWAYS saved as TEXT FILES.
+    This simplified approach is more reliable and scalable than complex classification.
     
-    1. STRUCTURED (JSON/lists/dicts - both simple and complex)
-       → Saved as JSON FILE ONLY (not indexed in vectordb)
-       - Use jq via bash tool for structured queries: jq '.field' /workspace/file.json
-       - Use grep for keyword search: grep "keyword" /workspace/file.json
-       - Use text_editor or cat to view the file
-       - Examples:
-         - jq '.[] | select(.age > 30)' file.json  # Filter records
-         - jq '.user.profile.name' file.json       # Navigate nested data
-         - grep -i "alice" file.json               # Text search
-
-    2. UNSTRUCTURED (text, HTML, documents)
-       → Saved as TEXT FILE → Indexed in vectordb
-       - PRIMARY: Use grep for text search, text_editor for reading
-       - FALLBACK: Use search_documents(query='your question') for semantic search
-
-    CRITICAL: 
-    - Check tool response for file path and document_id (if indexed)
+    RESPONSE STORAGE:
+    - All large responses (JSON, lists, dicts, text, etc.) → Saved as TEXT FILE
+    - JSON data is formatted with indentation for readability
+    - Text files support grep, jq, and other bash tools for querying
     
-    <working_with_large_files>
-    When working with large files from NON-DOCUMENT tool responses:
-
-    FILE ACCESS:
-    - NEVER view entire large files without specifying view_range or max_characters
-    - Use grep or jq first to find relevant sections, then text_editor with view_range to view
+    CRITICAL WORKFLOW - DO NOT SKIP:
+    When you receive a file path in a large response message, this is NOT the final answer to the user.
+    MANDATORY STEPS:
+    1. Recognize the file path as an intermediate output, not the end result
+    2. IMMEDIATELY execute bash commands to query the file and retrieve actual data:
+       - Search by pattern: grep 'keyword' /workspace/file.txt
+       - Extract JSON field: jq '.field_name' /workspace/file.txt
+       - View specific lines: sed -n '10,20p' /workspace/file.txt
+       - View first/last N lines: head -n 50 /workspace/file.txt or tail -n 50 /workspace/file.txt
+       - Combine operations: grep 'pattern' /workspace/file.txt | head -n 20
+    3. Transform the queried data into a readable answer for the user
+    
+    FILE ACCESS GUIDELINES:
+    - NEVER view entire large files without specifying line ranges or character limits
+    - Use grep, sed, head, or tail to find relevant sections first
+    - Combine bash tools for targeted data extraction: grep 'pattern' file.txt | head -n 10
     - All file paths follow <workspace_reference> conventions
-
+    
+    EXAMPLE WORKFLOWS:
+    - User: "Show me all tasks completed this week"
+      1. Receive file path from large response
+      2. Execute: grep -i "completed\|done" /workspace/file.txt | head -n 20
+      3. Show the results to user
+    
+    - User: "Find commits by author alice"
+      1. Receive file path from large response
+      2. Execute: grep -i "alice" /workspace/file.txt
+      3. Show matching commits to user
+    
     NOTE: For DOCUMENT files (from get_doc), use <document_workflows> instead.
-    </working_with_large_files>
     </large_tool_response_handling>
     
     WORKFLOW PRECEDENCE: When working with documents, ALWAYS use the 
