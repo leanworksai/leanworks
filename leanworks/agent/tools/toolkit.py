@@ -97,6 +97,9 @@ class ToolUse:
         # Tool instance cache - tools are initialized only when first accessed
         self._tool_cache = {}
         
+        # Initialize bash backend based on environment
+        self._initialize_bash_backend()
+        
         # RAG storage tool cache (lazy initialization)
         self._rag_storage = None
         
@@ -113,6 +116,40 @@ class ToolUse:
         # Log initialization completion
         logger.debug(f"ToolUse initialized with lazy loading for tools: {self.requested_tools}")
     
+    def _initialize_bash_backend(self):
+        """Initialize appropriate bash backend based on environment."""
+        is_kubernetes = os.environ.get("KUBERNETES_SERVICE_HOST") is not None
+        
+        try:
+            if is_kubernetes:
+                # GKE production: use Kubernetes backend
+                try:
+                    from .bash_backend_kubernetes import KubernetesBashBackend
+                    image_name = "us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"
+                    self._bash_backend = KubernetesBashBackend(image_name=image_name)
+                    logger.info("Using Kubernetes backend for bash sessions")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Kubernetes backend: {e}")
+                    logger.info("Falling back to Docker backend")
+                    self._bash_backend = self._create_docker_backend()
+            else:
+                # Local development: use Docker backend
+                self._bash_backend = self._create_docker_backend()
+        except Exception as e:
+            logger.error(f"Failed to initialize bash backend: {e}")
+            self._bash_backend = None
+        
+        self._bash_session = None
+    
+    def _create_docker_backend(self):
+        """Create Docker backend with image building support."""
+        from .bash_backend_docker import DockerBashBackend
+        backend = DockerBashBackend(
+            image_name="leanworks-bash-session:latest",
+            ensure_image_fn=self._ensure_custom_image
+        )
+        logger.info("Using Docker backend for bash sessions")
+        return backend
 
     # Lazy loading properties for individual tools
     
@@ -596,90 +633,20 @@ class ToolUse:
             return "alpine:latest"
     
     def _create_bash_session(self, retry_count=0, max_retries=3):
-        """Create a persistent bash session using Docker with retry logic."""
-        import uuid
-        import time
-        import subprocess
-
-        class DockerBashSession:
-            def __init__(self, session_id=None, parent_self=None):
-                # Generate unique container name
-                self.container_name = f"bash-session-{uuid.uuid4().hex[:12]}"
-                self.container_id = None
-
-                # Create session-specific temp directory on host
-                session_temp_dir = os.path.join(tempfile.gettempdir(), f"session_{session_id or 'default'}")
-                os.makedirs(session_temp_dir, exist_ok=True)
-                # Mount session temp directory at /workspace in container (read-write)
-                container_mount_path = '/workspace'
-                
-                try:
-                    # Ensure custom image exists
-                    image_name = parent_self._ensure_custom_image() if parent_self else "alpine:latest"
-                    
-                    # Create and start Docker container with pre-built image
-                    create_cmd = [
-                        'docker', 'run', '-d',
-                        '--name', self.container_name,
-                        '--rm',  # Auto-remove when stopped
-                        '--network', 'none',  # No network access for security
-                        '--memory', '512m',  # Limit memory
-                        '--cpus', '1.0',  # Limit to 1 CPU
-                        '--pids-limit', '100',  # Limit number of processes
-                        '--read-only',  # Read-only root filesystem
-                        '--tmpfs', '/tmp:rw,noexec,nosuid,size=100m',  # Writable /tmp
-                        '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
-                        '-v', f'{session_temp_dir}:{container_mount_path}:rw',  # Mount session dir as writable
-                        image_name,
-                        'sleep', 'infinity'  # Simple, reliable keep-alive
-                    ]
-                    
-                    result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=10)
-                    
-                    if result.returncode != 0:
-                        logger.error(f"Failed to create Docker container: {result.stderr}")
-                        raise Exception(f"Docker create failed: {result.stderr}")
-                    
-                    self.container_id = result.stdout.strip()
-                    self.session_temp_dir = session_temp_dir
-                    self.container_workspace_path = container_mount_path
-                    
-                    # CRITICAL: Wait for container to be fully running
-                    for attempt in range(5):
-                        time.sleep(0.2)  # 200ms delay
-                        check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', self.container_name]
-                        check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-                        
-                        if check_result.returncode == 0 and check_result.stdout.strip() == 'true':
-                            logger.info(f"Container {self.container_name} is running and ready")
-                            break
-                        
-                        if attempt == 4:
-                            raise Exception(f"Container started but not running after 1s")
-                    
-                    logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
-                    
-                except FileNotFoundError:
-                    logger.info("Docker is not installed or not in PATH")
-                    raise Exception("Docker is not installed or not in PATH")
-                except subprocess.TimeoutExpired:
-                    logger.info("Docker container creation timed out after 10 seconds")
-                    raise Exception("Docker container creation timed out")
-                except Exception as e:
-                    logger.error(f"Error creating Docker container: {e}")
-                    raise
+        """Create bash session using appropriate backend with retry logic."""
+        if self._bash_backend is None:
+            raise Exception("Bash backend not initialized")
         
-        # Retry logic
         try:
             session_id = getattr(self, 'session_id', None)
-            return DockerBashSession(session_id=session_id, parent_self=self)
+            return self._bash_backend.create_session(session_id)
         except Exception as e:
             if retry_count < max_retries:
-                logger.warning(f"Container creation failed (attempt {retry_count + 1}/{max_retries}), retrying...")
-                time.sleep(1)  # Wait before retry
+                logger.warning(f"Session creation failed (attempt {retry_count + 1}/{max_retries}), retrying...")
+                time.sleep(1)
                 return self._create_bash_session(retry_count=retry_count + 1, max_retries=max_retries)
             else:
-                logger.error(f"Failed to create container after {max_retries} attempts")
+                logger.error(f"Failed to create bash session after {max_retries} attempts: {e}")
                 raise
     
     def _translate_path_for_container(self, command: str, session) -> str:
@@ -732,7 +699,7 @@ class ToolUse:
     
     def _execute_bash_command_in_session(self, command: str, timeout: int = 30) -> dict:
         """
-        Execute a bash command in the Docker container.
+        Execute a bash command in the session.
         
         Args:
             command: The bash command to execute
@@ -752,90 +719,24 @@ class ToolUse:
                         "return_code": -1
                     }
             
-            session = self._bash_session
-            
-            # Check if container is still running
-            check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.container_name]
-            check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-            
-            if check_result.returncode != 0 or check_result.stdout.strip() != 'true':
-                # Container stopped, create a new one
-                logger.info(f"Container {session.container_name} is not running (return_code: {check_result.returncode}, state: {check_result.stdout.strip()}), recreating...")
-                try:
-                    # Try to remove old container if it exists
-                    rm_result = subprocess.run(['docker', 'rm', '-f', session.container_name],
-                                 capture_output=True, text=True, timeout=5)
-                    if rm_result.returncode != 0:
-                        logger.info(f"Failed to remove old container {session.container_name}: {rm_result.stderr}")
-                    else:
-                        logger.info(f"Successfully removed old container {session.container_name}")
-                except Exception as e:
-                    logger.info(f"Exception while removing old container {session.container_name}: {str(e)}")
-                self._bash_session = self._create_bash_session()
-                session = self._bash_session
-                logger.info(f"Successfully recreated container {session.container_name}")
-            
-            # Translate file paths from host temp directory to container mount path
-            translated_command = self._translate_path_for_container(command, session)
-
-            # Pre-check: If command references /workspace paths, ensure they exist on host to avoid container 404s
-            if "/workspace" in translated_command:
-                try:
-                    parts = translated_command.split()
-                    missing = False
-                    for part in parts:
-                        if part.startswith("/workspace"):
-                            host_path = os.path.join(session.session_temp_dir, os.path.relpath(part, "/workspace"))
-                            if not os.path.exists(host_path):
-                                missing = True
-                                break
-                    if missing:
-                        return {"output": "", "error": "Referenced file does not exist on host for /workspace path", "return_code": 1}
-                except Exception:
-                    pass
-            
-            # Execute command in Docker container (all commands run in /workspace for consistency)
-            # Use sh -c to execute the command (alpine uses sh, not bash)
-            # Change to workspace directory for consistent file operations
-            exec_cmd = [
-                'docker', 'exec',
-                session.container_name,
-                'sh', '-c', f'cd /workspace && {translated_command}'
-            ]
-            
-            try:
-                result = subprocess.run(
-                    exec_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout
-                )
-                
-                if result.returncode != 0:
-                    logger.info(f"Bash command execution failed in container {session.container_name}: return_code={result.returncode}, stderr={result.stderr[:200]}")
-                
-                return {
-                    "output": result.stdout,
-                    "error": result.stderr,
-                    "return_code": result.returncode
-                }
-            except subprocess.TimeoutExpired:
-                logger.info(f"Bash command timed out after {timeout} seconds in container {session.container_name}")
-                # Kill the command if it times out
-                try:
-                    subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
-                                 capture_output=True, timeout=5)
-                except:
-                    pass
-                
+            if not self._bash_backend or not self._bash_session:
                 return {
                     "output": "",
-                    "error": f"Command timed out after {timeout} seconds",
+                    "error": "Bash session not initialized",
                     "return_code": -1
                 }
-                
+            
+            # Check if session is still healthy
+            if not self._bash_backend.check_session_health(self._bash_session):
+                logger.info(f"Session unhealthy, recreating...")
+                self._bash_backend.cleanup_session(self._bash_session)
+                self._bash_session = self._create_bash_session()
+            
+            # Execute command using backend
+            return self._bash_backend.execute_command(self._bash_session, command, timeout)
+        
         except Exception as e:
-            logger.info(f"Error executing bash command in Docker container {session.container_name}: {str(e)}")
+            logger.error(f"Error executing bash command: {str(e)}")
             return {
                 "output": "",
                 "error": f"Error executing command: {str(e)}",
@@ -971,18 +872,12 @@ class ToolUse:
         """Execute a bash command or restart the session."""
         if restart:
             logger.info("Bash session restart requested")
-            # Restart the bash session (stop and remove Docker container)
-            if hasattr(self, '_bash_session') and self._bash_session is not None:
+            if hasattr(self, '_bash_session') and self._bash_session is not None and self._bash_backend:
                 try:
-                    session = self._bash_session
-                    # Stop and remove the container
-                    subprocess.run(['docker', 'stop', session.container_name],
-                                 capture_output=True, timeout=10)
-                    subprocess.run(['docker', 'rm', '-f', session.container_name],
-                                 capture_output=True, timeout=10)
-                    logger.info(f"Stopped and removed Docker container {session.container_name}")
+                    self._bash_backend.cleanup_session(self._bash_session)
+                    logger.info(f"Cleaned up bash session {self._bash_session.backend_id}")
                 except Exception as e:
-                    logger.info(f"Error stopping Docker container during restart: {e}")
+                    logger.info(f"Error during session cleanup: {e}")
             self._bash_session = None
             logger.info("Bash session restarted successfully")
             return "Bash session restarted"
@@ -1003,12 +898,17 @@ class ToolUse:
         # Use persistent session if available, otherwise create one
         if not hasattr(self, '_bash_session') or self._bash_session is None:
             try:
-                logger.info("Creating new bash session with Docker container")
+                logger.info("Creating new bash session")
                 self._bash_session = self._create_bash_session()
-                logger.info(f"New bash session created successfully with container {self._bash_session.container_name}")
+                logger.info(f"New bash session created successfully: {self._bash_session.backend_id}")
             except Exception as e:
-                logger.info(f"Error creating Docker container: {str(e)}")
-                return f"Error creating Docker container: {str(e)}. Make sure Docker is installed and running."
+                logger.info(f"Error creating bash session: {str(e)}")
+                if self._bash_session and hasattr(self._bash_session, 'backend_type'):
+                    if self._bash_session.backend_type == 'docker':
+                        return f"Error creating Docker container: {str(e)}. Make sure Docker is installed and running."
+                    else:
+                        return f"Error creating Kubernetes pod: {str(e)}. Check cluster access and RBAC permissions."
+                return f"Error creating bash session: {str(e)}"
         
         result = self._execute_bash_command_in_session(command)
         if result["return_code"] == 0:

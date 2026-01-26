@@ -14,6 +14,7 @@ spec:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
     spec:
+      serviceAccountName: ask-api-sa
       containers:
       - name: ask-api
         image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260125-123756

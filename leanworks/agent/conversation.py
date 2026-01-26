@@ -1116,10 +1116,9 @@ NOTE: {rag_note}
 
     def _save_file_to_docker_workspace(self, content: str, tool_name: str, suffix: str = '.txt', doc_ids: Optional[List[str]] = None) -> tuple[str, str]:
         """
-        Save file to Docker workspace directory and register in working context.
+        Save file to workspace directory (Docker or Kubernetes) and register in working context.
 
-        Ensures Docker container is initialized before saving to guarantee
-        consistent session directory paths.
+        Ensures session is initialized before saving to guarantee consistent paths.
 
         Returns:
             tuple: (host_path, container_path)
@@ -1127,22 +1126,48 @@ NOTE: {rag_note}
         import uuid
         import re
         import os
+        import subprocess
 
-        # Ensure Docker container is initialized before saving files
+        # Ensure session is initialized
         if not self._ensure_docker_container_initialized():
-            logger.error("Failed to initialize Docker container for file save operation")
-            raise Exception("Docker container initialization failed - cannot save file to workspace")
+            logger.error("Failed to initialize session for file save operation")
+            raise Exception("Session initialization failed - cannot save file to workspace")
 
-        session_temp_dir = self._get_session_temp_dir()
+        session = self.tool_use._bash_session
         tool_name_safe = re.sub(r'[^a-zA-Z0-9_]', '_', tool_name)[:30]
-
-        # Create unique filename
         filename = f'tool_response_{tool_name_safe}_{uuid.uuid4().hex[:8]}{suffix}'
-        host_path = os.path.join(session_temp_dir, filename)
 
-        # Write file on host
-        with open(host_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        if session.backend_type == 'kubernetes':
+            # For Kubernetes: write to local temp and copy into pod
+            local_temp_file = os.path.join(session.session_temp_dir, filename)
+            
+            # Write file locally
+            with open(local_temp_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            try:
+                # Copy file into pod using kubectl cp
+                cp_cmd = ['kubectl', 'cp', local_temp_file, 
+                         f'{session.backend_id}:/workspace/{filename}', 
+                         '-n', 'default']
+                subprocess.run(cp_cmd, check=True, timeout=30, capture_output=True)
+                logger.info(f"Copied file to pod {session.backend_id}:/workspace/{filename}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to copy file to pod: {e}")
+                raise Exception(f"Failed to copy file to Kubernetes pod: {e}")
+            
+            host_path = local_temp_file
+            container_path = f'/workspace/{filename}'
+        else:
+            # For Docker: use mounted directory (file already accessible in container)
+            session_temp_dir = session.session_temp_dir
+            host_path = os.path.join(session_temp_dir, filename)
+            
+            # Write file on host
+            with open(host_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            container_path = f'/workspace/{filename}'
 
         # Register in working context if available
         if self.memory_manager and hasattr(self.memory_manager, 'working_context'):
@@ -1150,18 +1175,17 @@ NOTE: {rag_note}
             self.memory_manager.working_context.register_resource(
                 resource_id=resource_id,
                 resource_type='tool_response_file',
-                path=f'/workspace/{filename}',
+                path=container_path,
                 metadata={
                     'tool': tool_name,
                     'host_path': host_path,
                     'file_type': suffix,
                     'created_via': 'unified_response_handler',
-                    'doc_ids': doc_ids if doc_ids else []
+                    'doc_ids': doc_ids if doc_ids else [],
+                    'backend_type': session.backend_type
                 }
             )
 
-        # Return both host path and container path
-        container_path = f'/workspace/{filename}'
         return host_path, container_path
 
     def _generate_response_summary(self, result: Any, tool_name: str) -> Dict[str, Any]:

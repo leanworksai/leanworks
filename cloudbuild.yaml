@@ -1,5 +1,40 @@
 steps:
-  # Step 1: Build the Docker image (no GitHub token needed since leanworks is in the same repo)
+  # Step 1: Build the bash session Docker image (used for bash tool in Kubernetes)
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Building bash session image..."
+        docker build \
+          -t ${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:${_IMAGE_TAG} \
+          -f deploy/Dockerfile.bash-session \
+          .
+    id: 'build-bash-session-image'
+
+  # Step 2: Push bash session image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:${_IMAGE_TAG}'
+    id: 'push-bash-session-image'
+
+  # Step 3: Tag bash session with 'latest'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'tag'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:${_IMAGE_TAG}'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:latest'
+    id: 'tag-bash-session-latest'
+
+  # Step 4: Push bash session 'latest' tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:latest'
+    id: 'push-bash-session-latest'
+
+  # Step 5: Build the main ask-api Docker image
   - name: 'gcr.io/cloud-builders/docker'
     entrypoint: 'bash'
     args:
@@ -11,15 +46,16 @@ steps:
           -f deploy/Dockerfile \
           .
     id: 'build-image'
+    waitFor: ['push-bash-session-latest']
 
-  # Step 2: Push the Docker image to Artifact Registry
+  # Step 6: Push the main Docker image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
       - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG}'
     id: 'push-image'
 
-  # Step 3: Tag with 'latest' for convenience
+  # Step 7: Tag with 'latest' for convenience
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'tag'
@@ -27,15 +63,17 @@ steps:
       - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
     id: 'tag-latest'
 
-  # Step 4: Push the 'latest' tag
+  # Step 8: Push the 'latest' tag
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
       - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
     id: 'push-latest'
 
-# Store the built image in Artifact Registry
+# Store the built images in Artifact Registry
 images:
+  - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:${_IMAGE_TAG}'
+  - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/leanworks-bash-session:latest'
   - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:${_IMAGE_TAG}'
   - '${_REGISTRY}/${PROJECT_ID}/${_REPO_NAME}/${_IMAGE_NAME}:latest'
 
