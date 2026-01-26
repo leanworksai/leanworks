@@ -114,6 +114,38 @@ def initialize_infrastructure():
 # Initialize infrastructure on import
 initialize_infrastructure()
 
+def initialize_docker_image():
+    """Build Docker image for bash sessions in background."""
+    import threading
+    
+    def build_image():
+        """Background thread to build Docker image."""
+        try:
+            logger.info("Building Docker image for bash sessions (background)...")
+            
+            # Import ToolUse to access _ensure_custom_image method
+            from leanworks.agent.tools.toolkit import ToolUse
+            
+            # Create a minimal instance just for image building
+            # We only need the _ensure_custom_image method, not actual tools
+            docker_builder = object.__new__(ToolUse)
+            
+            # Call the image build method
+            image_name = ToolUse._ensure_custom_image(docker_builder)
+            
+            logger.info(f"Docker image ready: {image_name}")
+        except Exception as e:
+            # Don't fail - image will be built on first use instead
+            logger.warning(f"Background Docker image build failed: {e}. Will build on first use.")
+    
+    # Start background thread
+    thread = threading.Thread(target=build_image, daemon=True, name="DockerImageBuilder")
+    thread.start()
+    logger.info("Started background Docker image builder thread")
+
+# Start background Docker image build
+initialize_docker_image()
+
 def get_leanworks_credentials():
     """Get shared Leanworks credentials"""
     return _leanworks_credentials
