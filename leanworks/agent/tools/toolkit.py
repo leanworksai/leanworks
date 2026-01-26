@@ -715,7 +715,7 @@ class ToolUse:
             # Translate file paths from host temp directory to container mount path
             translated_command = self._translate_path_for_container(command, session)
 
-            # If command references /workspace paths, ensure they exist on host to avoid container 404s
+            # Pre-check: If command references /workspace paths, ensure they exist on host to avoid container 404s
             if "/workspace" in translated_command:
                 try:
                     parts = translated_command.split()
@@ -730,46 +730,46 @@ class ToolUse:
                         return {"output": "", "error": "Referenced file does not exist on host for /workspace path", "return_code": 1}
                 except Exception:
                     pass
+            
+            # Execute command in Docker container (all commands run in /workspace for consistency)
+            # Use sh -c to execute the command (alpine uses sh, not bash)
+            # Change to workspace directory for consistent file operations
+            exec_cmd = [
+                'docker', 'exec',
+                session.container_name,
+                'sh', '-c', f'cd /workspace && {translated_command}'
+            ]
+            
+            try:
+                result = subprocess.run(
+                    exec_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
                 
-                # Execute command in Docker container
-                # Use sh -c to execute the command (alpine uses sh, not bash)
-                # Change to workspace directory for consistent file operations
-                exec_cmd = [
-                    'docker', 'exec',
-                    session.container_name,
-                    'sh', '-c', f'cd /workspace && {translated_command}'
-                ]
+                if result.returncode != 0:
+                    logger.info(f"Bash command execution failed in container {session.container_name}: return_code={result.returncode}, stderr={result.stderr[:200]}")
                 
+                return {
+                    "output": result.stdout,
+                    "error": result.stderr,
+                    "return_code": result.returncode
+                }
+            except subprocess.TimeoutExpired:
+                logger.info(f"Bash command timed out after {timeout} seconds in container {session.container_name}")
+                # Kill the command if it times out
                 try:
-                    result = subprocess.run(
-                        exec_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout
-                    )
-                    
-                    if result.returncode != 0:
-                        logger.info(f"Bash command execution failed in container {session.container_name}: return_code={result.returncode}, stderr={result.stderr[:200]}")
-                    
-                    return {
-                        "output": result.stdout,
-                        "error": result.stderr,
-                        "return_code": result.returncode
-                    }
-                except subprocess.TimeoutExpired:
-                    logger.info(f"Bash command timed out after {timeout} seconds in container {session.container_name}")
-                    # Kill the command if it times out
-                    try:
-                        subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
-                                     capture_output=True, timeout=5)
-                    except:
-                        pass
-                    
-                    return {
-                        "output": "",
-                        "error": f"Command timed out after {timeout} seconds",
-                        "return_code": -1
-                    }
+                    subprocess.run(['docker', 'exec', session.container_name, 'pkill', '-9', 'sh'],
+                                 capture_output=True, timeout=5)
+                except:
+                    pass
+                
+                return {
+                    "output": "",
+                    "error": f"Command timed out after {timeout} seconds",
+                    "return_code": -1
+                }
                 
         except Exception as e:
             logger.info(f"Error executing bash command in Docker container {session.container_name}: {str(e)}")
