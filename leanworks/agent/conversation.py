@@ -406,29 +406,30 @@ class ConversationManager:
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
 
                         # Check if response is large and needs special handling
-                        from leanworks.agent.large_response_handler import LargeResponseHandler, ResponseType
+                        from leanworks.agent.large_response_handler import LargeResponseHandler
                         from leanworks.setting import LARGE_RESPONSE_CONFIG
                         
                         # Configure handler with settings
                         LargeResponseHandler.configure(LARGE_RESPONSE_CONFIG)
                         
-                        # Classify response
-                        response_type, is_large = LargeResponseHandler.classify_response(result)
+                        # Classify response (returns file_extension and is_large)
+                        file_extension, is_large = LargeResponseHandler.classify_response(result)
 
                         # Log classification results
-                        logger.info(f"Response classification for {tool_name}: type={response_type.value}, is_large={is_large}, auto_store_enabled={LARGE_RESPONSE_CONFIG.get('auto_store_enabled', True)}")
+                        logger.info(f"Response classification for {tool_name}: file_ext={file_extension}, is_large={is_large}, auto_store_enabled={LARGE_RESPONSE_CONFIG.get('auto_store_enabled', True)}")
 
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
-                            logger.info(f"Large response detected for {tool_name}, routing to storage handler")
+                            logger.info(f"Large response detected for {tool_name}, routing to storage handler with file_ext={file_extension}")
                             # Extract doc IDs for doc tools (preprocessing moved to storage handler)
                             doc_ids = []
                             if self._is_doc_content_tool(tool_name):
                                 if isinstance(result, list):
                                     doc_ids = [doc.get('id') for doc in result if isinstance(doc, dict) and doc.get('id')]
 
-                            # Use unified handler for all tools
+                            # Use unified handler for all tools with file_extension parameter
                             formatted_result = self.handle_large_response(
-                                result, tool_name, tool_input, tool_use_id, data_sources, doc_ids=doc_ids
+                                result, tool_name, tool_input, tool_use_id, data_sources, 
+                                file_extension=file_extension, doc_ids=doc_ids
                             )
                             logger.info(f"Large response storage completed for {tool_name}. Final result content: {formatted_result.get('content', '')[:200]}...")
                             tool_results.append(formatted_result)
@@ -618,12 +619,12 @@ class ConversationManager:
         tool_input: Dict,
         tool_use_id: str,
         data_sources: List[str],
+        file_extension: str = 'json',
         doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Simplified unified handler for all large tool responses.
-        Always saves as text file for maximum reliability and scalability.
-        Eliminates complex classification logic that could fail.
+        Saves responses as appropriate file type (.json, .txt, or .html).
 
         Args:
             result: The tool response data (any type)
@@ -631,52 +632,69 @@ class ConversationManager:
             tool_input: Input parameters passed to the tool
             tool_use_id: Unique identifier for this tool use
             data_sources: List to append data source tracking info
+            file_extension: File extension ('json', 'txt', or 'html')
 
         Returns:
             Formatted tool result with bash command instructions
         """
         try:
-            logger.info(f"Handling large response for {tool_name}: defaulting to text file storage")
+            logger.info(f"Handling large response for {tool_name}: saving as .{file_extension} file")
             
-            # Convert result to text (try JSON formatting first for structured data)
-            if isinstance(result, (dict, list)):
-                text_content = json.dumps(result, indent=2, default=str, ensure_ascii=False)
+            # Convert result to appropriate format based on file type
+            if file_extension == 'json':
+                # JSON files: format as JSON for readability
+                if isinstance(result, (dict, list)):
+                    text_content = json.dumps(result, indent=2, default=str, ensure_ascii=False)
+                else:
+                    # Already a JSON string from parsing
+                    text_content = str(result)
             else:
+                # TXT and HTML files: just stringify
                 text_content = str(result)
             
-            # Save to temporary text file in Docker workspace
+            # Save to temporary file in Docker workspace with correct extension
             host_path, container_path = self._save_file_to_docker_workspace(
                 text_content,
                 tool_name,
-                suffix='.txt'
+                suffix=f'.{file_extension}'
             )
             
             # Generate summary (preview of content)
             summary = self._generate_text_summary(text_content)
             
-            # Build instructions with bash commands
-            formatted_result = f"""Large response saved to: {container_path}
-
-Summary: {summary}
-
-BASH COMMANDS TO QUERY THE FILE:
+            # Build instructions with bash commands appropriate for file type
+            if file_extension == 'json':
+                bash_commands = f"""BASH COMMANDS TO QUERY THE JSON FILE:
+- Extract field: jq '.field_name' {container_path}
+- Filter array: jq '.[] | select(.age > 30)' {container_path}
+- Search text: grep 'keyword' {container_path}
+- Case-insensitive: grep -i 'pattern' {container_path}
+- View lines: sed -n '10,20p' {container_path}
+- Combine: grep 'pattern' {container_path} | head -n 20"""
+            else:
+                # txt or html
+                bash_commands = f"""BASH COMMANDS TO QUERY THE FILE:
 - Search by pattern: grep 'keyword' {container_path}
 - Case-insensitive search: grep -i 'pattern' {container_path}
 - View specific lines: sed -n '10,20p' {container_path}
 - View first N lines: head -n 50 {container_path}
 - View last N lines: tail -n 50 {container_path}
 - Count occurrences: grep -c 'pattern' {container_path}
-- Extract JSON field (if JSON): jq '.field_name' {container_path}
-- Combine operations: grep 'pattern' {container_path} | head -n 20
+- Combine operations: grep 'pattern' {container_path} | head -n 20"""
+            
+            formatted_result = f"""Large response saved to: {container_path}
+
+Summary: {summary}
+
+{bash_commands}
 
 IMPORTANT: After using bash commands to retrieve specific data, provide the results to the user.
-Do NOT just tell the user the file path - always query and return the actual data.
-"""
+Do NOT just tell the user the file path - always query and return the actual data."""
             
             # Track data source
-            data_sources.append(f"Text file: {container_path}")
+            data_sources.append(f"{file_extension.upper()} file: {container_path}")
             
-            logger.info(f"Stored large response as text file: {container_path} ({len(text_content)} chars)")
+            logger.info(f"Stored large response as .{file_extension} file: {container_path} ({len(text_content)} chars)")
             
             return {
                 "type": "tool_result",

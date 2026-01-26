@@ -36,88 +36,49 @@ class LargeResponseHandler:
         )
     
     @classmethod
-    def classify_response(cls, result: Any) -> Tuple[ResponseType, bool]:
+    def classify_response(cls, result: Any) -> Tuple[str, bool]:
         """
-        Classify response type and determine if it's large.
+        Simplified classification based on data type and JSON parseability.
+        Eliminates complex JSONComplexityAnalyzer which can throw exceptions.
         
         Args:
             result: The tool response result
         
         Returns:
-            (ResponseType, is_large) tuple
+            (file_extension, is_large) tuple where file_extension is 'json', 'txt', or 'html'
         """
         # Check size first
         is_large = cls._is_large(result)
         
         if not is_large:
             logger.info("Response classified as SMALL, size check passed")
-            return (ResponseType.SMALL, False)
+            return ('json', False)
         
-        # Classify type
-        if isinstance(result, list):
-            if not result:
-                return (ResponseType.STRUCTURED, False)  # Empty list is small
-            
-            # Check first item type
-            first_item = result[0]
-            if isinstance(first_item, dict):
-                # List of dicts - analyze complexity of first item
-                from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
-                analysis = JSONComplexityAnalyzer.analyze(first_item)
-
-                if analysis["level"].value == "simple":
-                    logger.info("Response classified as STRUCTURED_SIMPLE (list of dicts), list size: %d", len(result))
-                    return (ResponseType.STRUCTURED_SIMPLE, True)
-                else:  # complex
-                    logger.info("Response classified as STRUCTURED_COMPLEX (list of dicts), list size: %d, complexity: %s", 
-                               len(result), analysis["level"].value)
-                    return (ResponseType.STRUCTURED_COMPLEX, True)
-            elif isinstance(first_item, str):
-                # List of strings - could be unstructured
-                total_text = ' '.join(str(item) for item in result)
-                if len(total_text) > cls.MIN_UNSTRUCTURED_CHARS:
-                    logger.info("Response classified as UNSTRUCTURED (list of strings), total chars: %d", len(total_text))
-                    return (ResponseType.UNSTRUCTURED, True)
-                logger.info("Response classified as STRUCTURED_SIMPLE (list of strings), total chars: %d", len(total_text))
-                return (ResponseType.STRUCTURED_SIMPLE, True)
-            else:
-                # List of other types (numbers, etc.)
-                logger.info("Response classified as STRUCTURED_SIMPLE (list of other types), list size: %d", len(result))
-                return (ResponseType.STRUCTURED_SIMPLE, True)
-        
-        if isinstance(result, dict):
-            # Use JSON complexity analyzer to classify dicts
-            from leanworks.agent.json_complexity_analyzer import JSONComplexityAnalyzer
-            analysis = JSONComplexityAnalyzer.analyze(result)
-
-            if analysis["level"].value == "simple":
-                logger.info("Response classified as STRUCTURED_SIMPLE (dict), complexity: %s", analysis["level"].value)
-                return (ResponseType.STRUCTURED_SIMPLE, True)
-            elif analysis["level"].value == "complex":
-                logger.info("Response classified as STRUCTURED_COMPLEX (dict), complexity: %s, depth: %d", 
-                           analysis["level"].value, analysis.get("depth", 0))
-                return (ResponseType.STRUCTURED_COMPLEX, True)
-            else:
-                # Not JSON or other cases - treat as unstructured
-                logger.info("Response classified as UNSTRUCTURED (dict, non-JSON), complexity: %s", analysis["level"].value)
-                return (ResponseType.UNSTRUCTURED, True)
+        # Type-based classification (simple and reliable)
+        if isinstance(result, (dict, list)):
+            logger.info("Response classified as JSON (dict/list), is_large=True")
+            return ('json', True)
         
         if isinstance(result, str):
-            # HTML content from doc tools should be treated as unstructured text
-            # Check for common HTML patterns
-            html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
-            is_html = any(pattern in result for pattern in html_patterns)
-            if is_html:
-                # HTML content - definitely unstructured
-                logger.info("Response classified as UNSTRUCTURED (HTML content), size: %d chars", len(result))
-                return (ResponseType.UNSTRUCTURED, True)
-            else:
-                # Plain text - unstructured
-                logger.info("Response classified as UNSTRUCTURED (plain text), size: %d chars", len(result))
-                return (ResponseType.UNSTRUCTURED, True)
+            # Try to parse as JSON
+            try:
+                json.loads(result)
+                logger.info("Response classified as JSON (parsed string), is_large=True")
+                return ('json', True)
+            except (json.JSONDecodeError, ValueError):
+                # Check for HTML patterns
+                html_patterns = ['<p', '<div', '<h1', '<h2', '<h3', '<ul', '<ol', '<li', '<br', '<strong', '<em', '<a href']
+                is_html = any(pattern in result for pattern in html_patterns)
+                if is_html:
+                    logger.info("Response classified as HTML, is_large=True")
+                    return ('html', True)
+                else:
+                    logger.info("Response classified as TXT (plain text), is_large=True")
+                    return ('txt', True)
         
-        # Default to structured for other types
-        return (ResponseType.STRUCTURED, True)
+        # Default: treat other types as JSON-serializable
+        logger.info("Response classified as JSON (other type, serializable), is_large=True")
+        return ('json', True)
     
     @classmethod
     def _is_large(cls, result: Any) -> bool:
