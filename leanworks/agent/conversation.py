@@ -1138,23 +1138,48 @@ NOTE: {rag_note}
         filename = f'tool_response_{tool_name_safe}_{uuid.uuid4().hex[:8]}{suffix}'
 
         if session.backend_type == 'kubernetes':
-            # For Kubernetes: write to local temp and copy into pod
+            # For Kubernetes: write file directly into pod using Kubernetes API
             local_temp_file = os.path.join(session.session_temp_dir, filename)
             
-            # Write file locally
+            # Write file locally for backup/reference
             with open(local_temp_file, 'w', encoding='utf-8') as f:
                 f.write(content)
             
             try:
-                # Copy file into pod using kubectl cp
-                cp_cmd = ['kubectl', 'cp', local_temp_file, 
-                         f'{session.backend_id}:/workspace/{filename}', 
-                         '-n', 'default']
-                subprocess.run(cp_cmd, check=True, timeout=30, capture_output=True)
-                logger.info(f"Copied file to pod {session.backend_id}:/workspace/{filename}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to copy file to pod: {e}")
-                raise Exception(f"Failed to copy file to Kubernetes pod: {e}")
+                # Use Kubernetes API to write file into pod (not kubectl CLI)
+                from kubernetes import client, config
+                from kubernetes.stream import stream as k8s_stream
+                
+                # Load in-cluster config
+                config.load_incluster_config()
+                v1 = client.CoreV1Api()
+                
+                # Write file into pod using exec with cat
+                # Escape content for shell (use base64 to avoid quote issues)
+                import base64
+                content_b64 = base64.b64encode(content.encode('utf-8')).decode('ascii')
+                
+                exec_command = [
+                    '/bin/sh', '-c',
+                    f'echo {content_b64} | base64 -d > /workspace/{filename}'
+                ]
+                
+                resp = k8s_stream(
+                    v1.connect_get_namespaced_pod_exec,
+                    session.backend_id,
+                    'default',
+                    command=exec_command,
+                    stderr=True,
+                    stdin=False,
+                    stdout=True,
+                    tty=False,
+                    _preload_content=True
+                )
+                
+                logger.info(f"Wrote file to pod {session.backend_id}:/workspace/{filename} using Kubernetes API")
+            except Exception as e:
+                logger.error(f"Failed to write file to pod: {e}")
+                raise Exception(f"Failed to write file to Kubernetes pod: {e}")
             
             host_path = local_temp_file
             container_path = f'/workspace/{filename}'
