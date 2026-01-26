@@ -151,7 +151,7 @@ class SearchTool:
         1. As a fallback when domain-specific tools (project_management, doc_management, etc.) return insufficient/empty results, errors, or are otherwise not suitable to answer the question
         2. When you are unsure which specific tool to use, or need to identify relevant resources to guide further actions
         3. When you need to find information from previous tool responses, need more detailed information, or have any uncertainty about the quality or completeness of your answer
-        4. When you anticipate needing to call a specific tool multiple times with different queries or scopes, use this tool first to minimize tool iterations.
+        4. When you anticipate needing to call a specific tool multiple times with different queries or scopes, use this tool first t narrow down the search space and minimize tool iterations.
         5. Always use together with execute_sql_query when searching for progress updates: progress update tables may lack sufficient context. Call both tools in the same turn (see system prompt for details).
 
         This tool searches across two types of content:
