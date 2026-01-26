@@ -554,12 +554,55 @@ class ToolUse:
                 self._tool_cache['linear_tool'] = None
         return self._tool_cache['linear_tool']
     
-    def _create_bash_session(self):
-        """Create a persistent bash session using Docker."""
+    def _ensure_custom_image(self):
+        """Ensure custom bash session image exists, build if needed."""
+        import subprocess
+        
+        image_name = "leanworks-bash-session:latest"
+        
+        # Check if image exists
+        try:
+            check_cmd = ['docker', 'images', '-q', image_name]
+            result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.stdout.strip():
+                logger.debug(f"Custom image {image_name} already exists")
+                return image_name
+        except Exception as e:
+            logger.debug(f"Error checking for image: {e}")
+        
+        # Build image from Dockerfile
+        try:
+            logger.info(f"Building custom image {image_name}...")
+            dockerfile_path = os.path.join(os.path.dirname(__file__), '../../../deploy/Dockerfile.bash-session')
+            
+            if not os.path.exists(dockerfile_path):
+                logger.warning(f"Dockerfile not found at {dockerfile_path}, falling back to alpine")
+                return "alpine:latest"
+            
+            # Get the directory containing the Dockerfile for build context
+            build_context = os.path.dirname(dockerfile_path)
+            build_cmd = ['docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context]
+            result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode != 0:
+                logger.warning(f"Failed to build custom image: {result.stderr}")
+                return "alpine:latest"
+            
+            logger.info(f"Successfully built custom image {image_name}")
+            return image_name
+        except Exception as e:
+            logger.warning(f"Exception building custom image: {e}")
+            return "alpine:latest"
+    
+    def _create_bash_session(self, retry_count=0, max_retries=3):
+        """Create a persistent bash session using Docker with retry logic."""
         import uuid
+        import time
+        import subprocess
 
         class DockerBashSession:
-            def __init__(self, session_id=None):
+            def __init__(self, session_id=None, parent_self=None):
                 # Generate unique container name
                 self.container_name = f"bash-session-{uuid.uuid4().hex[:12]}"
                 self.container_id = None
@@ -570,39 +613,50 @@ class ToolUse:
                 # Mount session temp directory at /workspace in container (read-write)
                 container_mount_path = '/workspace'
                 
-                # Create and start Docker container
                 try:
-                    # Use a lightweight base image (alpine with bash)
+                    # Ensure custom image exists
+                    image_name = parent_self._ensure_custom_image() if parent_self else "alpine:latest"
+                    
+                    # Create and start Docker container with pre-built image
                     create_cmd = [
                         'docker', 'run', '-d',
                         '--name', self.container_name,
                         '--rm',  # Auto-remove when stopped
                         '--network', 'none',  # No network access for security
-                        '--memory', '512m',  # Increase to 512MB for jq operations
+                        '--memory', '512m',  # Limit memory
                         '--cpus', '1.0',  # Limit to 1 CPU
                         '--pids-limit', '100',  # Limit number of processes
                         '--read-only',  # Read-only root filesystem
                         '--tmpfs', '/tmp:rw,noexec,nosuid,size=100m',  # Writable /tmp
                         '--tmpfs', '/home:rw,noexec,nosuid,size=100m',  # Writable /home
                         '-v', f'{session_temp_dir}:{container_mount_path}:rw',  # Mount session dir as writable
-                        'alpine:latest',
-                        'sh', '-c', 'apk add --no-cache jq bash grep sed coreutils duckdb && tail -f /dev/null'  # Install jq, bash tools, text editors, and DuckDB CLI
+                        image_name,
+                        'sleep', 'infinity'  # Simple, reliable keep-alive
                     ]
                     
-                    result = subprocess.run(
-                        create_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=10
-                    )
+                    result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=10)
                     
                     if result.returncode != 0:
-                        logger.info(f"Failed to create Docker container: {result.stderr}")
-                        raise Exception(f"Failed to create Docker container: {result.stderr}")
+                        logger.error(f"Failed to create Docker container: {result.stderr}")
+                        raise Exception(f"Docker create failed: {result.stderr}")
                     
                     self.container_id = result.stdout.strip()
                     self.session_temp_dir = session_temp_dir
                     self.container_workspace_path = container_mount_path
+                    
+                    # CRITICAL: Wait for container to be fully running
+                    for attempt in range(5):
+                        time.sleep(0.2)  # 200ms delay
+                        check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', self.container_name]
+                        check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
+                        
+                        if check_result.returncode == 0 and check_result.stdout.strip() == 'true':
+                            logger.info(f"Container {self.container_name} is running and ready")
+                            break
+                        
+                        if attempt == 4:
+                            raise Exception(f"Container started but not running after 1s")
+                    
                     logger.info(f"Created Docker container {self.container_name} ({self.container_id[:12]}) with session dir mounted at {container_mount_path}")
                     
                 except FileNotFoundError:
@@ -612,12 +666,21 @@ class ToolUse:
                     logger.info("Docker container creation timed out after 10 seconds")
                     raise Exception("Docker container creation timed out")
                 except Exception as e:
-                    logger.info(f"Error creating Docker container: {e}")
+                    logger.error(f"Error creating Docker container: {e}")
                     raise
         
-        # Get session_id from ToolUse instance (assuming it's available)
-        session_id = getattr(self, 'session_id', None)
-        return DockerBashSession(session_id=session_id)
+        # Retry logic
+        try:
+            session_id = getattr(self, 'session_id', None)
+            return DockerBashSession(session_id=session_id, parent_self=self)
+        except Exception as e:
+            if retry_count < max_retries:
+                logger.warning(f"Container creation failed (attempt {retry_count + 1}/{max_retries}), retrying...")
+                time.sleep(1)  # Wait before retry
+                return self._create_bash_session(retry_count=retry_count + 1, max_retries=max_retries)
+            else:
+                logger.error(f"Failed to create container after {max_retries} attempts")
+                raise
     
     def _translate_path_for_container(self, command: str, session) -> str:
         """

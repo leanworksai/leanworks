@@ -581,31 +581,37 @@ class ConversationManager:
             logger.warning("No tool_use available for Docker container initialization")
             return False
 
-        # Check if bash session already exists
+        # Check if bash session exists and is healthy
         if hasattr(self.tool_use, '_bash_session') and self.tool_use._bash_session:
-            # Verify container is still running
             try:
                 session = self.tool_use._bash_session
                 import subprocess
+                
+                # Verify container is running
                 check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.container_name]
                 check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-
+                
                 if check_result.returncode == 0 and check_result.stdout.strip() == 'true':
                     logger.debug(f"Docker container {session.container_name} is healthy")
                     return True
+                else:
+                    logger.warning(f"Container {session.container_name} is not running, will recreate")
+                    # Clear the dead session so it gets recreated
+                    self.tool_use._bash_session = None
             except Exception as e:
                 logger.warning(f"Docker health check failed: {e}")
-
-        # Initialize Docker container by calling bash tool
+                self.tool_use._bash_session = None
+        
+        # Initialize Docker container by calling bash tool (will create if needed)
         try:
             logger.debug("Initializing Docker container for file operations")
             # Simple echo command to trigger container creation
             result = self.tool_use.bash("echo 'Docker initialized'")
-
-            if "Error" in result:
+            
+            if "Error" in result or not result:
                 logger.error(f"Failed to initialize Docker container: {result}")
                 return False
-
+            
             logger.debug("Docker container initialized successfully")
             return True
         except Exception as e:

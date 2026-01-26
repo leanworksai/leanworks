@@ -1,0 +1,20 @@
+FROM alpine:3.19
+
+# Install all required tools in one layer
+RUN apk add --no-cache \
+    bash \
+    jq \
+    grep \
+    sed \
+    coreutils \
+    findutils \
+    && rm -rf /var/cache/apk/*
+
+# Create workspace directory
+RUN mkdir -p /workspace && chmod 777 /workspace
+
+# Set working directory
+WORKDIR /workspace
+
+# Keep container running
+CMD ["sleep", "infinity"]
