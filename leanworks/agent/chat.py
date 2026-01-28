@@ -1013,6 +1013,378 @@ class ChatAgent:
         }
         return result
     
+    async def process_message_stream(self, user_message, cited_context=None, file_references=None):
+        """
+        Process a user message and stream events using Server-Sent Events.
+        Yields event dictionaries that can be formatted as SSE events.
+        
+        Args:
+            user_message (str): The user's message content
+            cited_context (str): The cited context for the user message
+            file_references (list): List of file references from Claude Files API
+            
+        Yields:
+            dict: Event objects with 'type' and event-specific data
+                - tool_start: {"type": "tool_start", "tool_name": str, "display_name": str, "description": str}
+                - tool_end: {"type": "tool_end", "tool_name": str, "display_name": str, "summary": str}
+                - text_delta: {"type": "text_delta", "text": str}
+                - error: {"type": "error", "error": str}
+                - done: {"type": "done", "data_sources": list}
+        """
+        import asyncio
+        
+        try:
+            # Extract the actual user message from embedded conversation history (if present)
+            actual_user_message = self._extract_user_message_from_conversation_history(user_message)
+            
+            logger.debug(f"Streaming: User query received - user_id: {self.user_id}, session_id: {self.session_id}")
+            
+            # Load conversation history from messages collection
+            if self.session_id:
+                logger.debug(f"Streaming: Loading conversation history before processing message: {self.session_id}")
+                self.conversation.load_conversation_from_messages(
+                    chat_id=self.session_id,
+                    limit=10,
+                    exclude_last=True,
+                    current_message=actual_user_message
+                )
+            
+            # Reset data sources for new message
+            self.data_sources = []
+            self.original_user_query = actual_user_message
+            
+            # Process cited_context - handle both string and dict formats
+            # Store selected text context for tools to access
+            self.selected_text_context = None
+            cited_context_str = None
+            
+            if cited_context:
+                if isinstance(cited_context, dict):
+                    # Structured format - extract selectedText and format for LLM
+                    selected_text = cited_context.get("selectedText")
+                    if selected_text:
+                        # Web app now sends HTML positions directly
+                        # Store selected text context as-is (contains both ProseMirror and HTML positions)
+                        self.selected_text_context = selected_text
+
+                        doc_id = selected_text.get("docId")
+                        from_pos = selected_text.get("from")
+                        to_pos = selected_text.get("to")
+                        html_from = selected_text.get("htmlFrom")
+                        html_to = selected_text.get("htmlTo")
+
+                        logger.debug(f"Stored selected text context: docId={doc_id}, from={from_pos}, to={to_pos}, htmlFrom={html_from}, htmlTo={html_to}")
+
+                        # Store HTML positions for document tool if available
+                        if doc_id and html_from is not None and html_to is not None:
+                            try:
+                                doc_tool = self.tool_use.doc_management_tool
+                                if doc_tool:
+                                    doc_tool.set_selected_text_positions(doc_id, html_from, html_to)
+                            except Exception as e:
+                                logger.warning(f"Failed to store selected text positions for doc {doc_id}: {e}")
+                    
+                    # Format structured context for LLM
+                    context_parts = []
+                    
+                    # Add projects if present
+                    projects = cited_context.get("projects", [])
+                    if projects:
+                        project_info = [f"{p.get('name', 'Unnamed')} (id: {p.get('id', 'unknown')})" for p in projects]
+                        context_parts.append(f"Cited projects: {', '.join(project_info)}")
+
+                    # Add tasks if present
+                    tasks = cited_context.get("tasks", [])
+                    if tasks:
+                        task_info = [f"{t.get('title', 'Untitled')} (id: {t.get('id', 'unknown')})" for t in tasks]
+                        context_parts.append(f"Cited tasks: {', '.join(task_info)}")
+
+                    # Add docs if present
+                    docs = cited_context.get("docs", [])
+                    if docs:
+                        doc_info = [f"{d.get('title', 'Untitled')} (id: {d.get('id', 'unknown')})" for d in docs]
+                        context_parts.append(f"Cited documents: {', '.join(doc_info)}")
+
+                        # Register cited documents in working context for tool access
+                        for doc in docs:
+                            doc_id = doc.get("id")
+                            doc_title = doc.get("title", "")
+                            if doc_id:
+                                self.working_context.register_resource(
+                                    resource_id=f"cited_doc_{doc_id}",
+                                    resource_type="document_id",
+                                    path=doc_title or doc_id,
+                                    metadata={
+                                        "doc_id": doc_id,
+                                        "title": doc_title,
+                                        "source": "cited_context",
+                                        "data": doc  # Store full doc data safely in nested field
+                                    }
+                                )
+                                logger.debug(f"Registered cited document in working context: {doc_id} - {doc_title}")
+
+                    # Register cited projects in working context for tool access
+                    if projects:
+                        for project in projects:
+                            project_id = project.get("id")
+                            project_name = project.get("name", "")
+                            if project_id:
+                                self.working_context.register_resource(
+                                    resource_id=f"cited_project_{project_id}",
+                                    resource_type="project_id",
+                                    path=project_name or project_id,
+                                    metadata={
+                                        "project_id": project_id,
+                                        "name": project_name,
+                                        "source": "cited_context",
+                                        "data": project  # Store full project data safely in nested field
+                                    }
+                                )
+                                logger.debug(f"Registered cited project in working context: {project_id} - {project_name}")
+
+                    # Register cited tasks in working context for tool access
+                    if tasks:
+                        for task in tasks:
+                            task_id = task.get("id")
+                            task_title = task.get("title", "")
+                            if task_id:
+                                self.working_context.register_resource(
+                                    resource_id=f"cited_task_{task_id}",
+                                    resource_type="task_id",
+                                    path=task_title or task_id,
+                                    metadata={
+                                        "task_id": task_id,
+                                        "title": task_title,
+                                        "source": "cited_context",
+                                        "data": task  # Store full task data safely in nested field
+                                    }
+                                )
+                                logger.debug(f"Registered cited task in working context: {task_id} - {task_title}")
+                    
+                    # Add selected text if present
+                    if selected_text:
+                        text = selected_text.get("text", "")
+                        doc_id = selected_text.get("docId", "")
+                        if text:
+                            context_parts.append(f"Selected text from document {doc_id}: {text[:200]}{'...' if len(text) > 200 else ''}")
+
+                        # Register selected text document in working context if not already registered
+                        if doc_id and not any(d.get("id") == doc_id for d in docs):
+                            self.working_context.register_resource(
+                                resource_id=f"cited_doc_{doc_id}",
+                                resource_type="document_id",
+                                path=f"Document {doc_id}",
+                                metadata={
+                                    "doc_id": doc_id,
+                                    "source": "selected_text",
+                                    "has_selected_text": True
+                                }
+                            )
+                            logger.debug(f"Registered selected text document in working context: {doc_id}")
+                    
+                    cited_context_str = "\n".join(context_parts) if context_parts else None
+                else:
+                    # String format (legacy)
+                    cited_context_str = str(cited_context)
+            
+            # Add file references to conversation if present
+            if file_references:
+                for file_ref in file_references:
+                    self.conversation.add_file_reference(
+                        file_id=file_ref.get("file_id"),
+                        filename=file_ref.get("filename"),
+                        mime_type=file_ref.get("mime_type"),
+                        size_bytes=file_ref.get("size_bytes")
+                    )
+            
+            # Prepare the user message (use the extracted actual message)
+            user_message = actual_user_message
+            if cited_context_str:
+                user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
+                # Log the final message with cited context
+                logger.debug(f"Streaming: Final user message with cited context: {user_message}")
+            
+            # Add to conversation
+            self.conversation.add_user_message(user_message)
+            
+            # Log parameters
+            logger.info(f"Streaming API call with {len(self.conversation.conversation)} messages")
+            
+            # Main loop - use executor for synchronous tool execution
+            loop = asyncio.get_event_loop()
+            unanswered_count = 0
+            max_unanswered_num = 2
+            
+            while unanswered_count < max_unanswered_num:
+                try:
+                    # Create API parameters
+                    current_params = self.conversation.create_params_copy(
+                        self.api_params,
+                        messages=self.conversation.conversation
+                    )
+                    
+                    # Ensure tools are included
+                    if "tools" not in current_params or not current_params.get("tools"):
+                        current_params["tools"] = self.api_params.get("tools", [])
+                    
+                    logger.debug(f"Streaming: Making API call with {len(current_params.get('tools', []))} tools")
+                    
+                    # Make API call (non-streaming first to get tool calls)
+                    response = self.model_client.messages.create(**current_params)
+                    stop_reason = getattr(response, 'stop_reason', None)
+                    
+                    logger.info(f"Streaming: Response stop_reason: {stop_reason}")
+                    
+                    # Handle error cases
+                    if stop_reason == "refusal":
+                        logger.warning("Streaming: Claude refused to respond")
+                        yield {"type": "error", "error": "Request was refused by the model"}
+                        break
+                    
+                    # Check if response has tool calls
+                    has_tool_calls = any(
+                        getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
+                        for block in response.content
+                    )
+                    
+                    if stop_reason == "tool_use" and has_tool_calls:
+                        # Extract and stream tool execution
+                        tool_calls = [
+                            block for block in response.content 
+                            if getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
+                        ]
+                        
+                        logger.info(f"Streaming: Executing {len(tool_calls)} tools")
+                        
+                        for tool_block in tool_calls:
+                            tool_name = getattr(tool_block, 'name', 'unknown_tool')
+                            
+                            # Skip internal instruction tools
+                            if self._is_internal_tool(tool_name):
+                                logger.debug(f"Streaming: Skipping internal tool event: {tool_name}")
+                                continue
+                            
+                            tool_display_name = self._get_tool_display_name(tool_name)
+                            tool_description = self._get_tool_description(tool_name)
+                            
+                            # Yield tool_start event
+                            yield {
+                                "type": "tool_start",
+                                "tool_name": tool_name,
+                                "display_name": tool_display_name,
+                                "description": tool_description
+                            }
+                            
+                            logger.debug(f"Streaming: Tool {tool_name} started")
+                        
+                        # Execute tools using handler in executor
+                        def execute_tools():
+                            handler = self.tool_response_handler_factory.get_handler(response)
+                            context = {
+                                'conversation': self.conversation,
+                                'tool_use': self.tool_use,
+                                'data_sources': self.data_sources,
+                                'streaming': True,
+                                'memory_manager': self.memory_manager
+                            }
+                            return handler.handle(response, context)
+                        
+                        await loop.run_in_executor(None, execute_tools)
+                        
+                        # Yield tool_end events
+                        for tool_block in tool_calls:
+                            tool_name = getattr(tool_block, 'name', 'unknown_tool')
+                            
+                            # Skip internal instruction tools (must match tool_start filtering)
+                            if self._is_internal_tool(tool_name):
+                                continue
+                            
+                            tool_display_name = self._get_tool_display_name(tool_name)
+                            tool_summary = self._summarize_tool_result(tool_block, tool_name)
+                            
+                            yield {
+                                "type": "tool_end",
+                                "tool_name": tool_name,
+                                "display_name": tool_display_name,
+                                "summary": tool_summary
+                            }
+                            
+                            logger.debug(f"Streaming: Tool {tool_name} completed")
+                        
+                        # Continue loop for next API call
+                        continue
+                    
+                    elif stop_reason == "end_turn" or not has_tool_calls:
+                        # Extract final text response
+                        text_content = next(
+                            (block.text for block in response.content if block.type == "text"),
+                            ""
+                        )
+                        
+                        if text_content:
+                            # Add to conversation
+                            self.conversation.add_assistant_message(text_content)
+                            
+                            # Stream text character by character for better UX
+                            # Split into words/chunks for more efficient streaming
+                            words = text_content.split()
+                            current_chunk = ""
+                            
+                            for word in words:
+                                current_chunk += word + " "
+                                # Yield in reasonable-sized chunks
+                                if len(current_chunk) > 20:
+                                    yield {
+                                        "type": "text_delta",
+                                        "text": current_chunk
+                                    }
+                                    current_chunk = ""
+                                    # Small async sleep to allow other tasks
+                                    await asyncio.sleep(0.001)
+                            
+                            # Yield remaining text
+                            if current_chunk.strip():
+                                yield {
+                                    "type": "text_delta",
+                                    "text": current_chunk
+                                }
+                            
+                            # Update memory manager
+                            if self.memory_manager:
+                                assistant_message_obj = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": text_content}]
+                                }
+                                self.memory_manager.update_assistant_response(assistant_message_obj)
+                        
+                        break
+                    
+                    else:
+                        # Unexpected stop reason
+                        logger.warning(f"Streaming: Unexpected stop_reason: {stop_reason}")
+                        yield {
+                            "type": "error",
+                            "error": f"Unexpected response: {stop_reason}"
+                        }
+                        break
+                
+                except Exception as e:
+                    logger.error(f"Streaming: Error in main loop: {str(e)}", exc_info=True)
+                    yield {"type": "error", "error": str(e)}
+                    break
+            
+            # Yield done event with data sources
+            yield {
+                "type": "done",
+                "data_sources": self.data_sources
+            }
+            
+            logger.info(f"Streaming: Completed with {len(self.data_sources)} data sources")
+        
+        except Exception as e:
+            logger.error(f"Streaming: Error in process_message_stream: {str(e)}", exc_info=True)
+            yield {"type": "error", "error": str(e)}
+    
     def cleanup(self):
         """Clean up resources and shutdown background threads."""
         try:
@@ -1037,6 +1409,201 @@ class ChatAgent:
             logger.debug("ChatAgent cleanup completed")
         except Exception as e:
             logger.error(f"Error during ChatAgent cleanup: {e}")
+    
+    def _get_tool_description(self, tool_name):
+        """
+        Get user-friendly description for a tool.
+        
+        Args:
+            tool_name (str): Name of the tool
+            
+        Returns:
+            str: User-friendly description
+        """
+        descriptions = {
+            "search_documents": "Searching documents",
+            "search_documents_with_images": "Searching documents with images",
+            "query_postgres": "Querying database",
+            "query_duckdb": "Querying DuckDB",
+            "web_search": "Searching the web",
+            "create_task": "Creating a task",
+            "update_task": "Updating a task",
+            "search_tasks": "Searching tasks",
+            "get_projects": "Fetching projects",
+            "get_team_members": "Fetching team members",
+            "get_user_info": "Retrieving user information",
+            "check_calendar": "Checking calendar",
+            "create_doc": "Creating a document",
+            "update_doc": "Updating a document",
+            "search_docs": "Searching documents",
+        }
+        return descriptions.get(tool_name, f"Executing {tool_name}")
+    
+    def _summarize_tool_result(self, tool_block, tool_name):
+        """
+        Create a brief summary of tool result.
+        
+        Args:
+            tool_block: The tool use block from Claude
+            tool_name (str): Name of the tool
+            
+        Returns:
+            str: Brief summary of the tool result
+        """
+        # Try to infer from tool name what the result might be
+        if "search" in tool_name.lower():
+            return "Search completed"
+        elif "query" in tool_name.lower():
+            return "Query executed"
+        elif "create" in tool_name.lower():
+            return "Item created"
+        elif "update" in tool_name.lower():
+            return "Item updated"
+        elif "get" in tool_name.lower():
+            return "Data retrieved"
+        else:
+            return f"{tool_name} completed"
+    
+    def _is_internal_tool(self, tool_name):
+        """
+        Check if a tool is internal (instruction/helper/system) and should not be shown to users.
+        
+        Args:
+            tool_name (str): Technical name of the tool
+            
+        Returns:
+            bool: True if tool is internal and should be hidden from user
+        """
+        internal_tools = {
+            # Instruction tools (provide guidance to Claude, not user actions)
+            "get_create_doc_instruction",
+            "get_update_doc_instruction",
+            "get_understand_doc_instruction",
+            "get_user_identification_instruction",
+            "prepare_section_context",
+            "draft_document_iteratively",
+            "run_quality_passes",
+            
+            # System/internal tools
+            "extract_text_at_html_positions",  # Internal document processing
+            "query_working_context",            # Internal context management
+            "bash",                              # System command execution
+            "str_replace_based_edit_tool",      # Text editor (system tool)
+            "get_table_schema",                 # Database schema introspection
+        }
+        return tool_name in internal_tools
+    
+    def _get_tool_display_name(self, tool_name):
+        """
+        Get user-friendly display name for a tool.
+        
+        Args:
+            tool_name (str): Technical name of the tool
+            
+        Returns:
+            str: User-friendly display name
+        """
+        display_names = {
+            # Search & Discovery
+            "search_documents": "Document Search",
+            "web_search": "Web Search",
+            
+            # Document Management
+            "create_doc": "Create Document",
+            "update_doc": "Update Document",
+            "get_doc": "Get Document",
+            "list_docs": "List Documents",
+            "generate_toc": "Generate Table of Contents",
+            
+            # Task & Project Management
+            "create_task": "Create Task",
+            "update_task": "Update Task",
+            "execute_sql_query": "Database Query",
+            "search_tasks": "Search Tasks",
+            "get_projects": "Get Projects",
+            
+            # User Management
+            "query_users": "Search Users",
+            "get_team_members": "Team Members",
+            "get_user_info": "User Info",
+            
+            # Chat Management
+            "query_messages": "Search Messages",
+            
+            # Email & Calendar
+            "list_upcoming_meetings": "Upcoming Meetings",
+            "find_available_slots": "Find Time Slots",
+            "check_calendar": "Check Calendar",
+            
+            # Cloud Storage
+            "get_image_url": "Get Image",
+            "list_chat_images": "List Images",
+            
+            # Jira/Atlassian
+            "search_issues": "Search Issues",
+            "get_issue": "Get Issue",
+            "create_issue": "Create Issue",
+            "update_issue": "Update Issue",
+            "add_comment": "Add Comment",
+            "jira_search_users": "Search Users",
+            
+            # GitHub
+            "github_list_repositories": "List Repositories",
+            "github_get_repository": "Get Repository",
+            "github_search_issues": "Search Issues",
+            "github_get_issue": "Get Issue",
+            "github_create_issue": "Create Issue",
+            "github_update_issue": "Update Issue",
+            "github_add_issue_comment": "Add Comment",
+            "github_list_pull_requests": "List Pull Requests",
+            "github_get_pull_request": "Get Pull Request",
+            "github_create_pull_request": "Create Pull Request",
+            "github_list_commits": "List Commits",
+            "github_get_commit": "Get Commit",
+            "github_get_pull_request_commits": "PR Commits",
+            "github_search_users": "Search Users",
+            
+            # Notion
+            "notion_search_pages": "Search Pages",
+            "notion_get_page": "Get Page",
+            "notion_create_page": "Create Page",
+            "notion_update_page": "Update Page",
+            "notion_archive_page": "Archive Page",
+            "notion_query_database": "Query Database",
+            "notion_get_database": "Get Database",
+            "notion_create_database_entry": "Create Entry",
+            "notion_update_database_entry": "Update Entry",
+            
+            # ClickUp
+            "clickup_search_tasks": "Search Tasks",
+            "clickup_get_task": "Get Task",
+            "clickup_create_task": "Create Task",
+            "clickup_update_task": "Update Task",
+            "clickup_add_comment": "Add Comment",
+            "clickup_list_spaces": "List Spaces",
+            "clickup_list_lists": "List Lists",
+            
+            # Linear
+            "linear_list_issues": "List Issues",
+            "linear_get_issue": "Get Issue",
+            "linear_create_issue": "Create Issue",
+            "linear_update_issue": "Update Issue",
+            "linear_search_issues": "Search Issues",
+            "linear_list_projects": "List Projects",
+            "linear_get_project": "Get Project",
+            "linear_list_teams": "List Teams",
+            "linear_search_users": "Search Users",
+            
+            # Database
+            "query_postgres": "Database Query",
+            "query_duckdb": "Query Data",
+        }
+        
+        # Fallback: Convert snake_case to Title Case
+        if tool_name not in display_names:
+            return ' '.join(word.capitalize() for word in tool_name.replace('_', ' ').split())
+        
+        return display_names.get(tool_name)
     
     def __del__(self):
         """Cleanup on deletion."""

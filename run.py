@@ -8,6 +8,6 @@ from app.api import routes  # Import routes to register them
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-    logger.info("Starting async API server on port 8081")
-    app.run(host="0.0.0.0", debug=True, port=8081)
+    logger.info("Starting async API server on port 8082")
+    app.run(host="0.0.0.0", debug=True, port=8082)
 

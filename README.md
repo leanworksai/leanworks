@@ -165,7 +165,8 @@ Flask/Quart-based REST API with cloud infrastructure integration.
 
 #### API Endpoints:
 
-- **`/chat`** - Primary chat interface (streaming responses)
+- **`/api/ask`** - Main chat interface (supports streaming via `stream=true` parameter)
+- **`/api/ask-stream`** - Server-Sent Events streaming responses with tool execution tracking
 - **`/search`** - Semantic search over knowledge base
 - **`/upload`** - File upload to Claude Files API + Pinecone indexing
 - **Authentication** - API key validation middleware
@@ -325,6 +326,7 @@ RECENCY_WEIGHT=0.6
 - **Multi-Tenant**: Namespace and organization-based data isolation
 - **Conversation Memory**: Persistent session management with Firestore
 - **File Management**: Claude Files API integration with lifecycle tracking
+- **Server-Sent Events Streaming**: Real-time tool execution and response streaming
 - **Cloud Native**: GCP-ready with Kubernetes support
 - **Rate Limiting**: Embedding and API rate limiting built-in
 - **Error Resilience**: Comprehensive error handling and recovery
@@ -408,6 +410,50 @@ response = rag_chat.generate_response(
 )
 ```
 
+### Using Streaming API
+
+The `/api/ask` endpoint supports Server-Sent Events (SSE) streaming. Enable streaming by adding `stream=true` to your request:
+
+```python
+import requests
+import json
+
+response = requests.post(
+    'http://localhost:8000/api/ask',
+    json={
+        "user_id": "user@example.com",
+        "org_slug": "my-org",
+        "query": "What projects do I have?",
+        "stream": true  # Enable streaming
+    },
+    headers={"X-API-Key": "your-api-key"},
+    stream=True
+)
+
+# Process Server-Sent Events
+for line in response.iter_lines():
+    if line and line.startswith(b'data: '):
+        event = json.loads(line[6:].decode('utf-8'))
+        
+        if event['type'] == 'tool_start':
+            print(f"🔧 {event['tool_name']}: {event['description']}")
+        elif event['type'] == 'tool_end':
+            print(f"✅ {event['tool_name']}: {event['summary']}")
+        elif event['type'] == 'text_delta':
+            print(event['text'], end='', flush=True)
+        elif event['type'] == 'done':
+            print(f"\n✨ Complete ({len(event['data_sources'])} sources)")
+```
+
+**Streaming Features:**
+- `tool_start`: Shows which tool is executing
+- `tool_end`: Shows tool completion with summary
+- `text_delta`: Response text streamed incrementally
+- `done`: Stream completion with data sources
+- `error`: Error handling with diagnostics
+
+See [STREAMING.md](STREAMING.md) for complete documentation and [STREAMING_QUICKSTART.md](STREAMING_QUICKSTART.md) for examples.
+
 ## Requirements
 
 - Python 3.10 or higher
@@ -415,6 +461,29 @@ response = rag_chat.generate_response(
 - Pinecone account for vector database
 - Anthropic API key (Claude models)
 - PostgreSQL for shared user database (optional)
+
+## Testing Streaming
+
+To test the streaming API with your local setup:
+
+```bash
+# Using the helper script (fetches API key from Secret Manager)
+python3 run_streaming_test.py \
+  --secret-name api-key \
+  --org-slug your-org \
+  --user-id your@email.com \
+  --url http://localhost:8081 \
+  --query "Your question here"
+
+# Or use the test script directly
+python3 test_streaming.py \
+  --api-key your-api-key \
+  --org-slug your-org \
+  --user-id your@email.com \
+  --query "Your question here"
+```
+
+See [TEST_RESULTS.md](TEST_RESULTS.md) for example test runs and [STREAMING_QUICKSTART.md](STREAMING_QUICKSTART.md) for client implementation examples.
 
 ## Dependencies Overview
 

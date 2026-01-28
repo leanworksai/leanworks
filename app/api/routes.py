@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 import requests
-from quart import request
+from quart import request, Response
 from leanworks.agent.chat import ChatAgent
 from anthropic import Anthropic
 from app import app, get_firestore_client, get_secret_manager_client
@@ -27,6 +27,50 @@ from app.utils.cache import clear_cache
 from leanworks.setting import MAX_FILES_PER_REQUEST, MAX_FILE_SIZE_MB
 
 logger = logging.getLogger(__name__)
+
+
+async def stream_ask_response(user_id, org_slug, session_id, query, cited_context, 
+                              file_references, tools, firestore_client, secret_manager_client, 
+                              model_client, available_tools):
+    """
+    Async generator for SSE streaming of ask API responses.
+    Yields formatted SSE events.
+    
+    Args:
+        user_id: User identifier
+        org_slug: Organization slug
+        session_id: Session ID for conversation
+        query: User query
+        cited_context: Cited context for the query
+        file_references: List of file references
+        tools: Tools to use (already filtered)
+        firestore_client: Firestore client
+        secret_manager_client: Secret manager client
+        model_client: Model client (Anthropic)
+        available_tools: Available tools from configuration
+    """
+    try:
+        # Initialize ChatAgent
+        agent = ChatAgent(
+            firestore_client=firestore_client,
+            secret_manager_client=secret_manager_client,
+            model_client=model_client,
+            user_id=user_id,
+            org_slug=org_slug,
+            session_id=session_id,
+            clear_conversation=False,
+            tools=tools
+        )
+        
+        # Stream events from agent
+        async for event in agent.process_message_stream(query, cited_context, file_references):
+            # Format as SSE
+            yield f"data: {json.dumps(event)}\n\n"
+        
+    except Exception as e:
+        logger.error(f"Error in stream_ask_response: {str(e)}", exc_info=True)
+        error_event = {"type": "error", "error": str(e)}
+        yield f"data: {json.dumps(error_event)}\n\n"
 
 
 def get_user_details_from_postgres(user_email: str):
@@ -180,6 +224,7 @@ async def ask():
         content_type = request.headers.get('Content-Type', '')
         uploaded_files = []
         file_references = []
+        stream_enabled = False
         
         if 'multipart/form-data' in content_type:
             # Handle multipart request with files
@@ -193,6 +238,7 @@ async def ask():
             query = form.get("query")
             cited_context = form.get("cited_context")
             tools = form.get("tools")
+            stream_enabled = form.get("stream", "false").lower() == "true"
             
             # Process uploaded files
             uploaded_files = files.getlist("files")  # Support multiple files
@@ -208,6 +254,7 @@ async def ask():
             query = data.get("query")
             cited_context = data.get("cited_context")
             tools = data.get("tools")
+            stream_enabled = data.get("stream", False)
         
         # Validate required fields
         if not user_id:
@@ -358,6 +405,21 @@ async def ask():
         print(f"Filtered tools: {filtered_tools}")
         
         # Web app now sends HTML positions directly - no conversion needed
+        
+        # Check if streaming is requested
+        if stream_enabled:
+            logger.info(f"Streaming mode enabled for request from user_id: {user_id}")
+            # Return SSE streaming response
+            return Response(
+                stream_ask_response(user_id, org_slug, session_id, query, cited_context, 
+                                   file_references, filtered_tools, firestore_client, 
+                                   secret_manager_client, model_client, available_tools),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
         
         # Performance optimization: Initialize Agent with pre-initialized clients (using keyword arguments like test file)
         agent = ChatAgent(
