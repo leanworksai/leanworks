@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bash-session-cleanup
+  namespace: default
+spec:
+  schedule: "0 * * * *"  # Every hour at the top of the hour
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app: bash-session-cleanup
+        spec:
+          serviceAccountName: bash-session-cleanup-sa
+          restartPolicy: OnFailure
+          containers:
+          - name: cleanup
+            image: curlimages/curl:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - sh
+            - -c
+            - |
+              echo "Starting bash session cleanup..."
+              curl -v -X POST http://bash-session-manager-service:8080/cleanup \
+                -H "Content-Type: application/json" \
+                -d '{"max_age_seconds": 7200, "max_idle_seconds": 3600}' \
+                --connect-timeout 10 \
+                --max-time 30 \
+                || exit 1
+              echo "Cleanup completed"
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "32Mi"
+              limits:
+                cpu: "200m"
+                memory: "128Mi"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bash-session-cleanup-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bash-session-cleanup-role
+  namespace: default
+rules: []  # CronJob only needs to create jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bash-session-cleanup-rolebinding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bash-session-cleanup-role
+subjects:
+- kind: ServiceAccount
+  name: bash-session-cleanup-sa
+  namespace: default

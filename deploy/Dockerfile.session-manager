@@ -1,0 +1,58 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for file operations and data analysis
+RUN apt-get update && apt-get install -y \
+    bash \
+    util-linux \
+    procps \
+    jq \
+    curl \
+    wget \
+    coreutils \
+    findutils \
+    gawk \
+    tar \
+    gzip \
+    zip \
+    unzip \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install common Python data analysis packages
+RUN pip install --no-cache-dir \
+    pandas \
+    numpy \
+    openpyxl \
+    pyyaml \
+    requests
+
+# Create non-root user for running the application
+RUN useradd -m -u 1000 sessionmgr
+
+# Copy ONLY session manager code - keep it isolated
+COPY leanworks/agent/session_manager/ .
+
+# Install minimal dependencies - only what session manager needs
+RUN pip install --no-cache-dir \
+    fastapi==0.104.1 \
+    uvicorn==0.24.0 \
+    pydantic==2.5.0
+
+# Create session storage directory with proper permissions
+RUN mkdir -p /var/sessions && chown -R sessionmgr:sessionmgr /var/sessions
+
+# Switch to non-root user
+USER sessionmgr
+
+# Expose port
+EXPOSE 8080
+
+# Environment variables
+ENV HOST=0.0.0.0
+ENV PORT=8080
+ENV SESSION_STORAGE_PATH=/var/sessions
+
+# Run the FastAPI app directly using uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -253,6 +253,134 @@ apply_bash_session_rbac() {
     fi
 }
 
+# Function to build and push session manager image
+build_session_manager_image() {
+    echo ""
+    echo "=========================================="
+    echo "Building Bash Session Manager Docker Image"
+    echo "=========================================="
+    
+    if [[ ! -f "deploy/Dockerfile.session-manager" ]]; then
+        echo "Error: deploy/Dockerfile.session-manager not found."
+        exit 1
+    fi
+    
+    SESSION_IMAGE_NAME="bash-session-manager"
+    SESSION_REGISTRY="$REGISTRY/$PROJECT_ID/$REPO_NAME/$SESSION_IMAGE_NAME"
+    
+    echo "Step 1: Building Docker image from deploy/Dockerfile.session-manager..."
+    docker build -f deploy/Dockerfile.session-manager -t $SESSION_IMAGE_NAME:latest .
+    if [ $? -ne 0 ]; then
+        echo "Error: Docker build failed"
+        exit 1
+    fi
+    echo "✓ Docker image built successfully"
+    
+    echo ""
+    echo "Step 2: Tagging image for Artifact Registry..."
+    docker tag $SESSION_IMAGE_NAME:latest $SESSION_REGISTRY:latest
+    echo "✓ Image tagged as: $SESSION_REGISTRY:latest"
+    
+    echo ""
+    echo "Step 3: Pushing image to Artifact Registry..."
+    docker push $SESSION_REGISTRY:latest
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to push image to Artifact Registry"
+        echo "Make sure you are authenticated with: gcloud auth configure-docker $REGISTRY"
+        exit 1
+    fi
+    echo "✓ Image pushed successfully: $SESSION_REGISTRY:latest"
+    
+    echo ""
+    echo "=========================================="
+    echo "Session Manager image build completed!"
+    echo "=========================================="
+}
+
+# Function to deploy session manager service
+deploy_session_manager() {
+    echo ""
+    echo "=========================================="
+    echo "Deploying Bash Session Manager Service"
+    echo "=========================================="
+    
+    RBAC_YAML="$DEPLOY_DIR/bash-session-manager-rbac.yaml"
+    DEPLOYMENT_YAML_SM="$DEPLOY_DIR/bash-session-manager-deployment.yaml"
+    SERVICE_YAML_SM="$DEPLOY_DIR/bash-session-manager-service.yaml"
+    CRONJOB_YAML="$DEPLOY_DIR/bash-session-cleanup-cronjob.yaml"
+    
+    # Check if all required files exist
+    for yaml_file in "$RBAC_YAML" "$DEPLOYMENT_YAML_SM" "$SERVICE_YAML_SM" "$CRONJOB_YAML"; do
+        if [[ ! -f "$yaml_file" ]]; then
+            echo "Warning: $yaml_file not found. Skipping session manager deployment."
+            return
+        fi
+    done
+    
+    echo "Step 1: Applying Session Manager RBAC..."
+    if kubectl apply -f "$RBAC_YAML"; then
+        echo "✓ Session Manager RBAC applied successfully"
+        echo "  - ServiceAccount: bash-session-manager-sa"
+        echo "  - Role: bash-session-manager-role"
+    else
+        echo "Error: Failed to apply Session Manager RBAC"
+        exit 1
+    fi
+    
+    echo ""
+    echo "Step 2: Deploying Session Manager (2 replicas for HA)..."
+    if kubectl apply -f "$DEPLOYMENT_YAML_SM"; then
+        echo "✓ Session Manager deployment applied successfully"
+    else
+        echo "Error: Failed to apply Session Manager deployment"
+        exit 1
+    fi
+    
+    echo ""
+    echo "Step 3: Creating Session Manager Service..."
+    if kubectl apply -f "$SERVICE_YAML_SM"; then
+        echo "✓ Session Manager service created successfully"
+    else
+        echo "Error: Failed to create Session Manager service"
+        exit 1
+    fi
+    
+    echo ""
+    echo "Step 4: Setting up Cleanup CronJob (runs every hour)..."
+    if kubectl apply -f "$CRONJOB_YAML"; then
+        echo "✓ Cleanup CronJob created successfully"
+    else
+        echo "Error: Failed to create Cleanup CronJob"
+        exit 1
+    fi
+    
+    echo ""
+    echo "Waiting for Session Manager pods to be ready (max 60 seconds)..."
+    if kubectl rollout status deployment/bash-session-manager --timeout=60s 2>/dev/null; then
+        echo "✓ Session Manager pods are ready"
+        
+        # Get pod count
+        POD_COUNT=$(kubectl get pods -l app=bash-session-manager --no-headers | wc -l)
+        echo "  - Active pods: $POD_COUNT"
+        
+        # Verify service connectivity
+        echo ""
+        echo "Verifying Session Manager service..."
+        SERVICE_IP=$(kubectl get svc bash-session-manager-service -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+        if [[ -n "$SERVICE_IP" ]]; then
+            echo "✓ Session Manager service is available at: $SERVICE_IP:8080"
+        fi
+    else
+        echo "Warning: Session Manager pods did not become ready within timeout"
+        echo "Check pod logs with: kubectl logs -f deployment/bash-session-manager"
+    fi
+    
+    echo ""
+    echo "=========================================="
+    echo "Session Manager deployment completed!"
+    echo "=========================================="
+}
+
 # Function to apply Kubernetes YAML
 apply_kubernetes_yaml() {
     echo "Updating deployment YAML with the new image..."
@@ -359,6 +487,12 @@ fi
 # Configure kubectl
 configure_kubectl
 
+# Build and push Session Manager image first (before deploying pods that depend on it)
+build_session_manager_image
+
+# Deploy Session Manager Kubernetes resources
+deploy_session_manager
+
 # Apply Bash Session RBAC (required for Kubernetes backend to work)
 apply_bash_session_rbac
 
@@ -379,8 +513,32 @@ if [[ -n "$INGRESS_YAML" ]]; then
 fi
 
 echo "Deployment of API to GKE completed successfully!"
-echo "Multi-tenant API service deployed with public endpoints and SSL certificate"
-echo "Please allow up to 30 minutes for SSL certificate provisioning"
-echo "Your service will be available at: https://$CLIENT_DOMAIN"
+echo ""
+echo "=========================================="
+echo "Deployment Summary"
+echo "=========================================="
+echo "✓ Bash Session Manager Service deployed (2 replicas)"
+echo "  - Handles bash session management"
+echo "  - 2-replica HA deployment"
+echo "  - Automatic hourly cleanup via CronJob"
+echo ""
+echo "✓ Multi-tenant API service deployed"
+echo "  - Public endpoints with SSL certificate"
+echo "  - Integrated with Session Manager"
+echo ""
+echo "=========================================="
+echo "Next Steps:"
+echo "=========================================="
+echo "1. Wait up to 30 minutes for SSL certificate provisioning"
+echo "2. Service will be available at: https://$CLIENT_DOMAIN"
+echo "3. Check Session Manager status:"
+echo "   kubectl get pods -l app=bash-session-manager"
+echo "4. Monitor Session Manager logs:"
+echo "   kubectl logs -f deployment/bash-session-manager"
+echo "5. Test Session Manager endpoints:"
+echo "   kubectl port-forward svc/bash-session-manager-service 8080:8080"
+echo "   curl http://localhost:8080/health"
+echo ""
 echo "Note: Client is determined at runtime from user_id"
+echo "=========================================="
 

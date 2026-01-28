@@ -588,14 +588,14 @@ class ConversationManager:
                 import subprocess
                 
                 # Verify container is running
-                check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.container_name]
+                check_cmd = ['docker', 'inspect', '--format', '{{.State.Running}}', session.backend_id]
                 check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
                 
                 if check_result.returncode == 0 and check_result.stdout.strip() == 'true':
-                    logger.debug(f"Docker container {session.container_name} is healthy")
+                    logger.debug(f"Docker container {session.backend_id} is healthy")
                     return True
                 else:
-                    logger.warning(f"Container {session.container_name} is not running, will recreate")
+                    logger.warning(f"Container {session.backend_id} is not running, will recreate")
                     # Clear the dead session so it gets recreated
                     self.tool_use._bash_session = None
             except Exception as e:

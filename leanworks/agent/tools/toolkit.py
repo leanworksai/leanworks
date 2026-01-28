@@ -122,16 +122,26 @@ class ToolUse:
         
         try:
             if is_kubernetes:
-                # GKE production: use Kubernetes backend
+                # GKE production: use Session Manager backend
                 try:
-                    from .bash_backend_kubernetes import KubernetesBashBackend
-                    image_name = "us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"
-                    self._bash_backend = KubernetesBashBackend(image_name=image_name)
-                    logger.info("Using Kubernetes backend for bash sessions")
+                    from .bash_backend_session_manager import SessionManagerBackend
+                    manager_url = os.environ.get(
+                        "BASH_SESSION_MANAGER_URL",
+                        "http://bash-session-manager-service:8080"
+                    )
+                    self._bash_backend = SessionManagerBackend(manager_url=manager_url)
+                    logger.info(f"Using Session Manager backend for bash sessions at {manager_url}")
                 except Exception as e:
-                    logger.error(f"Failed to initialize Kubernetes backend: {e}")
-                    logger.info("Falling back to Docker backend")
-                    self._bash_backend = self._create_docker_backend()
+                    logger.error(f"Failed to initialize Session Manager backend: {e}")
+                    logger.info("Falling back to Kubernetes backend")
+                    try:
+                        from .bash_backend_kubernetes import KubernetesBashBackend
+                        image_name = "us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"
+                        self._bash_backend = KubernetesBashBackend(image_name=image_name)
+                        logger.info("Using Kubernetes backend for bash sessions")
+                    except Exception as e2:
+                        logger.error(f"Failed to initialize Kubernetes backend: {e2}")
+                        raise
             else:
                 # Local development: use Docker backend
                 self._bash_backend = self._create_docker_backend()
@@ -1699,23 +1709,23 @@ EOF"""
             try:
                 session = self._bash_session
                 # Stop and remove the container
-                stop_result = subprocess.run(['docker', 'stop', session.container_name],
+                stop_result = subprocess.run(['docker', 'stop', session.backend_id],
                              capture_output=True, text=True, timeout=10)
                 if stop_result.returncode != 0:
-                    logger.info(f"Failed to stop Docker container {session.container_name}: {stop_result.stderr}")
+                    logger.info(f"Failed to stop Docker container {session.backend_id}: {stop_result.stderr}")
                 else:
-                    logger.info(f"Successfully stopped Docker container {session.container_name}")
+                    logger.info(f"Successfully stopped Docker container {session.backend_id}")
                 
-                rm_result = subprocess.run(['docker', 'rm', '-f', session.container_name],
+                rm_result = subprocess.run(['docker', 'rm', '-f', session.backend_id],
                              capture_output=True, text=True, timeout=10)
                 if rm_result.returncode != 0:
-                    logger.info(f"Failed to remove Docker container {session.container_name}: {rm_result.stderr}")
+                    logger.info(f"Failed to remove Docker container {session.backend_id}: {rm_result.stderr}")
                 else:
-                    logger.info(f"Successfully removed Docker container {session.container_name}")
+                    logger.info(f"Successfully removed Docker container {session.backend_id}")
                 
                 self._bash_session = None
             except Exception as e:
-                logger.info(f"Error cleaning up Docker container {session.container_name}: {e}")
+                logger.info(f"Error cleaning up Docker container {session.backend_id}: {e}")
     
     def __del__(self):
         """Cleanup on deletion."""
