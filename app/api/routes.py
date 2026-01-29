@@ -10,6 +10,7 @@ import re
 import time
 import traceback
 import uuid
+import base64
 import requests
 from quart import request, Response
 from leanworks.agent.chat import ChatAgent
@@ -21,16 +22,99 @@ from app.services.client import (
     initialize_clients_async, 
     get_cached_storage_client
 )
-from app.services.database import query_org_one, get_domain_from_email, save_file_metadata
-from app.services.anthropic_files import AnthropicFilesService
+from app.services.database import query_org_one, get_domain_from_email
 from app.utils.cache import clear_cache
-from leanworks.setting import MAX_FILES_PER_REQUEST, MAX_FILE_SIZE_MB
+from leanworks.setting import MAX_IMAGES_PER_REQUEST, MAX_IMAGE_SIZE_MB, VISION_SUPPORTED_IMAGE_TYPES
 
 logger = logging.getLogger(__name__)
 
 
-async def stream_ask_response(user_id, org_slug, session_id, query, cited_context, 
-                              file_references, tools, firestore_client, secret_manager_client, 
+def validate_vision_images(images: list) -> tuple:
+    """
+    Validate images for vision API.
+    
+    Args:
+        images: List of image objects with type (base64 or url), and appropriate data
+        
+    Returns:
+        Tuple of (is_valid: bool, error_message: str, processed_images: list)
+    """
+    if not images:
+        return True, "", []
+    
+    if not isinstance(images, list):
+        return False, "images must be a list", []
+    
+    if len(images) > MAX_IMAGES_PER_REQUEST:
+        return False, f"Maximum {MAX_IMAGES_PER_REQUEST} images per request", []
+    
+    processed_images = []
+    
+    for idx, img in enumerate(images):
+        if not isinstance(img, dict):
+            return False, f"Image {idx} must be an object", []
+        
+        img_type = img.get("type")
+        
+        if img_type == "base64":
+            # Validate base64 image
+            media_type = img.get("media_type")
+            data = img.get("data")
+            
+            if not media_type:
+                return False, f"Image {idx}: media_type is required for base64 images", []
+            
+            if media_type not in VISION_SUPPORTED_IMAGE_TYPES:
+                return False, f"Image {idx}: Unsupported image type '{media_type}'. Supported types: {', '.join(VISION_SUPPORTED_IMAGE_TYPES)}", []
+            
+            if not data:
+                return False, f"Image {idx}: data is required for base64 images", []
+            
+            if not isinstance(data, str):
+                return False, f"Image {idx}: base64 data must be a string", []
+            
+            # Validate base64 format and size
+            try:
+                decoded = base64.b64decode(data, validate=True)
+                size_mb = len(decoded) / (1024 * 1024)
+                if size_mb > MAX_IMAGE_SIZE_MB:
+                    return False, f"Image {idx}: Size {size_mb:.2f}MB exceeds maximum allowed size of {MAX_IMAGE_SIZE_MB}MB", []
+            except Exception as e:
+                return False, f"Image {idx}: Invalid base64 data - {str(e)}", []
+            
+            processed_images.append({
+                "type": "base64",
+                "media_type": media_type,
+                "data": data
+            })
+        
+        elif img_type == "url":
+            # Validate URL image
+            url = img.get("url")
+            
+            if not url:
+                return False, f"Image {idx}: url is required for URL images", []
+            
+            if not isinstance(url, str):
+                return False, f"Image {idx}: url must be a string", []
+            
+            # Basic URL validation
+            if not (url.startswith("http://") or url.startswith("https://")):
+                return False, f"Image {idx}: URL must start with http:// or https://", []
+            
+            processed_images.append({
+                "type": "url",
+                "url": url
+            })
+        
+        else:
+            return False, f"Image {idx}: type must be 'base64' or 'url', got '{img_type}'", []
+    
+    return True, "", processed_images
+
+
+async def stream_ask_response(user_id, org_slug, session_id, query, cited_context, file_references,
+                              tools, firestore_client, secret_manager_client, 
                               model_client, available_tools):
     """
     Async generator for SSE streaming of ask API responses.
@@ -42,7 +126,7 @@ async def stream_ask_response(user_id, org_slug, session_id, query, cited_contex
         session_id: Session ID for conversation
         query: User query
         cited_context: Cited context for the query
-        file_references: List of file references
+        file_references: List of file references for vision API (base64 or URL images)
         tools: Tools to use (already filtered)
         firestore_client: Firestore client
         secret_manager_client: Secret manager client
@@ -63,7 +147,7 @@ async def stream_ask_response(user_id, org_slug, session_id, query, cited_contex
         )
         
         # Stream events from agent
-        async for event in agent.process_message_stream(query, cited_context, file_references):
+        async for event in agent.process_message_stream(query, cited_context, file_references if file_references else None):
             # Format as SSE
             yield f"data: {json.dumps(event)}\n\n"
         
@@ -220,41 +304,16 @@ async def ask():
     logger.info("Ask endpoint accessed")
     
     try:
-        # Check if request contains files (multipart/form-data)
-        content_type = request.headers.get('Content-Type', '')
-        uploaded_files = []
-        file_references = []
-        stream_enabled = False
-        
-        if 'multipart/form-data' in content_type:
-            # Handle multipart request with files
-            form = await request.form
-            files = await request.files
-            
-            # Extract form fields
-            user_id = form.get("user_id")
-            org_slug = form.get("org_slug")
-            session_id = form.get("session_id")
-            query = form.get("query")
-            cited_context = form.get("cited_context")
-            tools = form.get("tools")
-            stream_enabled = form.get("stream", "false").lower() == "true"
-            
-            # Process uploaded files
-            uploaded_files = files.getlist("files")  # Support multiple files
-            
-            logger.info(f"Multipart request received with {len(uploaded_files)} files")
-            
-        else:
-            # Handle regular JSON request (existing behavior)
-            data = await request.get_json()
-            user_id = data.get("user_id")
-            org_slug = data.get("org_slug")
-            session_id = data.get("session_id")
-            query = data.get("query")
-            cited_context = data.get("cited_context")
-            tools = data.get("tools")
-            stream_enabled = data.get("stream", False)
+        # Handle JSON request
+        data = await request.get_json()
+        user_id = data.get("user_id")
+        org_slug = data.get("org_slug")
+        session_id = data.get("session_id")
+        query = data.get("query")
+        cited_context = data.get("cited_context")
+        tools = data.get("tools")
+        stream_enabled = data.get("stream", False)
+        images = data.get("images", [])
         
         # Validate required fields
         if not user_id:
@@ -265,6 +324,16 @@ async def ask():
         
         if not query:
             return {"error": "query is required"}, 400
+        
+        # Validate and process images
+        if images:
+            is_valid, error_msg, vision_images = validate_vision_images(images)
+            if not is_valid:
+                logger.warning(f"Image validation failed: {error_msg}")
+                return {"error": error_msg, "code": "INVALID_IMAGES"}, 400
+            logger.info(f"Validated {len(vision_images)} images for vision request")
+        else:
+            vision_images = []
         
         # Process tools parameter
         if tools:
@@ -286,20 +355,13 @@ async def ask():
             "cited_context": cited_context,
             "tools": tools
         }
-        if uploaded_files:
-            payload["files"] = [{"filename": f.filename, "content_type": f.content_type} for f in uploaded_files]
+        if vision_images:
+            payload["images"] = [{"type": img.get("type"), "media_type": img.get("media_type")} if img.get("type") == "base64" else {"type": img.get("type"), "url": img.get("url")} for img in vision_images]
         logger.info(f"Ask API payload: {json.dumps(payload, default=str)}")
             
         logger.info(f"Request from user_id: {user_id}, org_slug: {org_slug}, session_id: {session_id}")
-        if uploaded_files:
-            logger.info(f"Processing {len(uploaded_files)} uploaded files")
-        
-        # Validate file count
-        if len(uploaded_files) > MAX_FILES_PER_REQUEST:
-            return {
-                "error": f"Maximum {MAX_FILES_PER_REQUEST} files per request",
-                "code": "TOO_MANY_FILES"
-            }, 400
+        if vision_images:
+            logger.info(f"Processing {len(vision_images)} images for vision analysis")
         
         # Performance optimization: Initialize clients asynchronously with caching
         try:
@@ -315,68 +377,6 @@ async def ask():
             logger.error(f"Error initializing clients for user {user_id} in org slug {org_slug}: {str(e)}")
             traceback.print_exc()
             return {"error": f"Failed to initialize clients: {str(e)}"}, 500
-        
-        # Process files if present
-        if uploaded_files:
-            files_service = AnthropicFilesService(model_client)
-            
-            for file in uploaded_files:
-                try:
-                    # Read file data (Quart file objects support async read)
-                    try:
-                        file_data = await file.read()
-                    except AttributeError:
-                        # Fallback for synchronous read if async not supported
-                        loop = asyncio.get_event_loop()
-                        file_data = await loop.run_in_executor(None, file.read)
-                    
-                    # Reset file pointer for validation
-                    file.seek(0)
-                    
-                    # Validate file
-                    validation = files_service.validate_file(file, max_size_mb=MAX_FILE_SIZE_MB)
-                    if not validation.get("valid", False):
-                        error_msg = validation.get("error", "Invalid file")
-                        logger.warning(f"Invalid file {file.filename}: {error_msg}")
-                        # Continue processing other files instead of failing entire request
-                        continue
-                    
-                    # Upload to Claude Files API
-                    file_info = await files_service.upload_file(
-                        file_data=file_data,
-                        filename=file.filename,
-                        mime_type=file.content_type or "application/octet-stream"
-                    )
-                    
-                    # Store metadata in database for audit
-                    try:
-                        save_file_metadata(
-                            org_slug=org_slug,
-                            user_id=user_id,
-                            session_id=session_id,
-                            file_id=file_info["file_id"],
-                            filename=file_info["filename"],
-                            mime_type=file_info["mime_type"],
-                            size_bytes=file_info["size_bytes"]
-                        )
-                    except Exception as e:
-                        # Log but don't fail - file upload succeeded
-                        logger.warning(f"Failed to save file metadata to database: {str(e)}")
-                    
-                    # Build file reference for ChatAgent
-                    file_references.append({
-                        "file_id": file_info["file_id"],
-                        "filename": file_info["filename"],
-                        "mime_type": file_info["mime_type"],
-                        "size_bytes": file_info["size_bytes"]
-                    })
-                    
-                    logger.info(f"Uploaded file to Claude Files API: {file.filename} -> {file_info['file_id']}")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing file {file.filename}: {str(e)}")
-                    # Continue processing other files instead of failing entire request
-                    continue
 
         # Filter tools based on integrations table in PostgreSQL if tools are provided
         if tools is not None:
@@ -411,8 +411,8 @@ async def ask():
             logger.info(f"Streaming mode enabled for request from user_id: {user_id}")
             # Return SSE streaming response
             return Response(
-                stream_ask_response(user_id, org_slug, session_id, query, cited_context, 
-                                   file_references, filtered_tools, firestore_client, 
+                stream_ask_response(user_id, org_slug, session_id, query, cited_context, vision_images,
+                                   filtered_tools, firestore_client, 
                                    secret_manager_client, model_client, available_tools),
                 mimetype='text/event-stream',
                 headers={
@@ -433,10 +433,8 @@ async def ask():
             tools=filtered_tools
         )
         
-        # Generate response with file references
+        # Generate response
         logger.info(f"Processing query: {query[:100]}{'...' if len(query) > 100 else ''}")
-        if file_references:
-            logger.info(f"Including {len(file_references)} file references in message")
         
         # Performance optimization: Process message with timing
         processing_start_time = time.time()
@@ -446,14 +444,10 @@ async def ask():
             agent.process_message, 
             query, 
             cited_context,
-            file_references if file_references else None  # New parameter: list of file_id references
+            vision_images if vision_images else None
         )
         processing_time = time.time() - processing_start_time
         logger.info(f"Message processing completed in {processing_time:.3f}s")
-        
-        # Add file metadata to response
-        if file_references:
-            response["files"] = file_references
         
         # Performance optimization: Log the interaction in the background without blocking
         # Initialize CloudStorage client for logging separately
@@ -462,7 +456,7 @@ async def ask():
             if client_name:
                 loop = asyncio.get_event_loop()
                 storage_client = await loop.run_in_executor(None, get_cached_storage_client, client_name)
-                # Prepare payload for logging (include file info if present)
+                # Prepare payload for logging
                 payload = {
                     "user_id": user_id,
                     "org_slug": org_slug,
@@ -471,8 +465,6 @@ async def ask():
                     "cited_context": cited_context,
                     "tools": tools
                 }
-                if file_references:
-                    payload["files"] = [{"file_id": f["file_id"], "filename": f["filename"]} for f in file_references]
                 asyncio.create_task(async_log_interaction(
                     storage_client=storage_client,
                     payload=payload,
@@ -485,12 +477,13 @@ async def ask():
         total_time = time.time() - request_start_time
         logger.info(f"Total request processing time: {total_time:.3f}s")
         
-        # Log final response
+        # Log final response with image info
         response_log = {
-            "content": response.get("content", "")[:500] + "..." if len(response.get("content", "")) > 500 else response.get("content", ""),
-            "has_files": "files" in response,
-            "file_count": len(response.get("files", [])) if "files" in response else 0
+            "content": response.get("content", "")[:500] + "..." if len(response.get("content", "")) > 500 else response.get("content", "")
         }
+        if vision_images:
+            response_log["images_count"] = len(vision_images)
+            response_log["images_types"] = [img.get("type") for img in vision_images]
         logger.info(f"Ask API final response: {json.dumps(response_log, default=str)}")
         
         logger.info("Successfully generated and returned response")

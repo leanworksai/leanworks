@@ -26,6 +26,11 @@ CLAUDE_FILES_API_BETA = "files-api-2025-04-14"
 # File retention policy (our application)
 FILE_RETENTION_DAYS = 90  # Track when to clean up old file records
 
+# Vision API configuration
+MAX_IMAGES_PER_REQUEST = 20  # Claude API limit for vision requests
+MAX_IMAGE_SIZE_MB = 5  # API limit per image (for base64 encoding)
+VISION_SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
 # Reranker configuration
 RERANK_MODEL = "claude-3-haiku-20240307"
 RERANKER_TYPE = "llm"  # Options: "llm", "bge" (now uses optimized version)

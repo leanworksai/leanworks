@@ -533,45 +533,82 @@ class ChatAgent:
         # Build multimodal message content
         content_blocks = [{"type": "text", "text": user_message}]
         
-        # Add file references to message content
+        # Add file references or vision images to message content
         if file_references:
             for file_ref in file_references:
-                file_id = file_ref.get("file_id")
-                mime_type = file_ref.get("mime_type", "")
-                filename = file_ref.get("filename", "unknown")
-                
-                if not file_id:
-                    logger.warning(f"Skipping file reference without file_id: {filename}")
-                    continue
-                
-                # Determine content block type based on MIME type
-                if mime_type in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
-                    # Image content block
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "file",
-                            "file_id": file_id
-                        }
-                    })
-                    logger.debug(f"Added image reference: {filename} ({file_id})")
+                # Check if this is a vision image (base64 or URL)
+                if file_ref.get("type") == "base64":
+                    # Base64-encoded image
+                    media_type = file_ref.get("media_type", "image/jpeg")
+                    data = file_ref.get("data")
                     
-                elif mime_type in ["application/pdf", "text/plain"]:
-                    # Document content block with citations enabled
-                    content_blocks.append({
-                        "type": "document",
-                        "source": {
-                            "type": "file",
-                            "file_id": file_id
-                        },
-                        "title": filename,
-                        "citations": {"enabled": True}  # Enable citations for PDFs
-                    })
-                    logger.debug(f"Added document reference: {filename} ({file_id})")
+                    if data:
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data
+                            }
+                        })
+                        logger.debug(f"Added base64 image: {media_type}")
+                    else:
+                        logger.warning(f"Skipping base64 image without data")
+                
+                elif file_ref.get("type") == "url":
+                    # URL-based image
+                    url = file_ref.get("url")
                     
-                else:
-                    # For unsupported types, log warning
-                    logger.warning(f"Unsupported MIME type for Files API: {mime_type} (file: {filename})")
+                    if url:
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": url
+                            }
+                        })
+                        logger.debug(f"Added URL image: {url}")
+                    else:
+                        logger.warning(f"Skipping URL image without url")
+                
+                elif file_ref.get("file_id"):
+                    # Files API reference (legacy support for backward compatibility)
+                    file_id = file_ref.get("file_id")
+                    mime_type = file_ref.get("mime_type", "")
+                    filename = file_ref.get("filename", "unknown")
+                    
+                    if not file_id:
+                        logger.warning(f"Skipping file reference without file_id: {filename}")
+                        continue
+                    
+                    # Determine content block type based on MIME type
+                    if mime_type in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+                        # Image content block
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "file",
+                                "file_id": file_id
+                            }
+                        })
+                        logger.debug(f"Added image reference: {filename} ({file_id})")
+                        
+                    elif mime_type in ["application/pdf", "text/plain"]:
+                        # Document content block with citations enabled
+                        content_blocks.append({
+                            "type": "document",
+                            "source": {
+                                "type": "file",
+                                "file_id": file_id
+                            },
+                            "title": filename,
+                            "citations": {"enabled": True}  # Enable citations for PDFs
+                        })
+                        logger.debug(f"Added document reference: {filename} ({file_id})")
+                        
+                    else:
+                        # For unsupported types, log warning
+                        logger.warning(f"Unsupported MIME type for Files API: {mime_type} (file: {filename})")
         
         # Create user message object with multimodal content
         user_message_obj = {
@@ -1187,25 +1224,89 @@ class ChatAgent:
                     # String format (legacy)
                     cited_context_str = str(cited_context)
             
-            # Add file references to conversation if present
-            if file_references:
-                for file_ref in file_references:
-                    self.conversation.add_file_reference(
-                        file_id=file_ref.get("file_id"),
-                        filename=file_ref.get("filename"),
-                        mime_type=file_ref.get("mime_type"),
-                        size_bytes=file_ref.get("size_bytes")
-                    )
+            # Prepare content blocks for multimodal message (text + images)
+            content_blocks = []
             
-            # Prepare the user message (use the extracted actual message)
+            # Add text content
             user_message = actual_user_message
             if cited_context_str:
                 user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
                 # Log the final message with cited context
                 logger.debug(f"Streaming: Final user message with cited context: {user_message}")
             
-            # Add to conversation
-            self.conversation.add_user_message(user_message)
+            content_blocks.append({
+                "type": "text",
+                "text": user_message
+            })
+            
+            # Add file references or vision images to message content
+            if file_references:
+                for file_ref in file_references:
+                    # Check if this is a vision image (base64 or URL)
+                    if file_ref.get("type") == "base64":
+                        # Base64-encoded image
+                        media_type = file_ref.get("media_type", "image/jpeg")
+                        data = file_ref.get("data")
+                        if data:
+                            content_blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data
+                                }
+                            })
+                            logger.debug(f"Streaming: Added base64 image: {media_type}")
+                        else:
+                            logger.warning(f"Streaming: Skipping base64 image without data")
+
+                    elif file_ref.get("type") == "url":
+                        # URL-based image
+                        url = file_ref.get("url")
+                        if url:
+                            content_blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": url
+                                }
+                            })
+                            logger.debug(f"Streaming: Added URL image: {url}")
+                        else:
+                            logger.warning(f"Streaming: Skipping URL image without url")
+
+                    elif file_ref.get("file_id"):
+                        # File reference from Claude Files API
+                        file_id = file_ref.get("file_id")
+                        filename = file_ref.get("filename", "unknown")
+                        mime_type = file_ref.get("mime_type", "application/octet-stream")
+                        
+                        # Determine content block type based on MIME type
+                        if mime_type in ["image/jpeg", "image/png", "image/gif", "image/webp"]:
+                            # Image content block
+                            content_blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": file_id
+                                }
+                            })
+                            logger.debug(f"Streaming: Added image reference: {filename} ({file_id})")
+                        else:
+                            # Document content block
+                            content_blocks.append({
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": file_id
+                                }
+                            })
+                            logger.debug(f"Streaming: Added document reference: {filename} ({file_id})")
+            
+            # Add to conversation (multimodal support)
+            self.conversation.add_user_message_multimodal(content_blocks, include_in_slim=True)
             
             # Log parameters
             logger.info(f"Streaming API call with {len(self.conversation.conversation)} messages")
