@@ -176,7 +176,7 @@ AGENT_SYSTEM_PROMPT = """
     Multi-Tool Patterns (Special Cases):
     - Progress Updates Queries: ALWAYS call BOTH execute_sql_query AND search_documents together (not sequentially):
       1. Use execute_sql_query to get structured task_progress_updates data from the database
-      2. Use search_documents to find additional context from tool responses and knowledge base
+      2. Use search_documents to find additional context from knowledge base
       3. Combine both results to provide complete information
       Example: When asked about task progress, call both tools in the same response turn, then synthesize the results.
     
