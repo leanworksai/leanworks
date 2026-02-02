@@ -1,11 +1,11 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from leanworks.agent.helpers import AgentHelpers
+from leanworks.agent.utils.helpers import AgentHelpers
 from datetime import datetime, timezone
-from leanworks.agent.conversation import ConversationManager
-from leanworks.agent.memory import MemoryManager
-from leanworks.agent.tool_registry import ToolRegistry
-from leanworks.agent.tool_response_handler import ToolResponseHandlerFactory
-from leanworks.agent.working_context import WorkingContext
+from leanworks.agent.core.conversation import ConversationManager
+from leanworks.agent.core.memory import MemoryManager
+from leanworks.agent.tools.tool_registry import ToolRegistry
+from leanworks.agent.tools.tool_response_handler import ToolResponseHandlerFactory
+from leanworks.agent.core.working_context import WorkingContext
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
 from google.cloud import firestore, secretmanager
 from typing import Dict, Any, List
@@ -816,10 +816,8 @@ class ChatAgent:
                         
                         # Stream the response if streaming is enabled
                         if streaming:
-                            print("🤖 Assistant response:")
-                            print("-" * 50)
+                            logger.info("Assistant response:")
                             AgentHelpers.stream_text(response_text, delay=0.01)
-                            print("-" * 50)
                         
                         assistant_message_obj = {
                             "role": "assistant",
@@ -843,10 +841,8 @@ class ChatAgent:
                         
                         # Stream the response if streaming is enabled
                         if streaming:
-                            print("🤖 Assistant response (evaluated):")
-                            print("-" * 50)
+                            logger.info("Assistant response (evaluated):")
                             AgentHelpers.stream_text(response_text, delay=0.01)
-                            print("-" * 50)
                         
                         # Create assistant message object
                         assistant_message_obj = {
@@ -907,10 +903,8 @@ class ChatAgent:
                                 
                                 # Stream the response if streaming is enabled
                                 if streaming:
-                                    print("🤖 Assistant response (retry successful):")
-                                    print("-" * 50)
+                                    logger.info("Assistant response (retry successful):")
                                     AgentHelpers.stream_text(response_text, delay=0.01)
-                                    print("-" * 50)
                                 
                                 # Remove the inadequate response and critique from conversation
                                 self.conversation.conversation = self.conversation.conversation[:-2]
@@ -1032,10 +1026,7 @@ class ChatAgent:
         
         # Show final summary if streaming is enabled
         if streaming and unique_sources:
-            print("\n📚 Data sources used:")
-            for i, source in enumerate(unique_sources, 1):
-                print(f"   {i}. {source}")
-            print()
+            logger.info(f"Data sources used: {', '.join(unique_sources)}")
         
         # Log memory stats if using memory manager
         if self.memory_manager:

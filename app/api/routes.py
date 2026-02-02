@@ -13,7 +13,7 @@ import uuid
 import base64
 import requests
 from quart import request, Response
-from leanworks.agent.chat import ChatAgent
+from leanworks.agent.core.chat import ChatAgent
 from anthropic import Anthropic
 from app import app, get_firestore_client, get_secret_manager_client
 from app.auth.middleware import require_api_key

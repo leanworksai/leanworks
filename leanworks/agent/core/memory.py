@@ -84,7 +84,7 @@ class MemoryManager:
         self._shutdown = False  # Track shutdown state
 
         # Add working context (persisted per session)
-        from leanworks.agent.working_context import WorkingContext
+        from leanworks.agent.core.working_context import WorkingContext
         self.working_context = WorkingContext()
 
         # Load existing memory state
@@ -349,7 +349,7 @@ class MemoryManager:
                     working_context_data = state.get("working_context")
                     if working_context_data and isinstance(working_context_data, dict):
                         try:
-                            from leanworks.agent.working_context import WorkingContext
+                            from leanworks.agent.core.working_context import WorkingContext
                             self.working_context = WorkingContext.from_dict(working_context_data)
                             # Validate restored resources (check if files still exist)
                             removed_count = self.working_context.validate_resources()
@@ -678,7 +678,7 @@ class MemoryManager:
         recent_turns = self.conversation_turns[-self.recent_turns_to_keep:]
 
         # NEW: Extract facts before summarization
-        from leanworks.agent.fact_extractor import FactExtractor
+        from leanworks.agent.utils.fact_extractor import FactExtractor
         facts = FactExtractor.extract_facts(turns_to_summarize)
 
         # Register extracted facts in working context

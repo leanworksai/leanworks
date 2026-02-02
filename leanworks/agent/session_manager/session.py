@@ -4,8 +4,8 @@ Session lifecycle management.
 import logging
 import subprocess
 from typing import Dict, Any, Optional
-from isolation import ProcessIsolation
-from persistence import SessionPersistence
+from .isolation import ProcessIsolation
+from .persistence import SessionPersistence
 
 logger = logging.getLogger(__name__)
 

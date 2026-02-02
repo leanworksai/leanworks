@@ -1,19 +1,49 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.outlook import OutlookTool
-from leanworks.agent.tools.firestore import FirestoreTool
-from leanworks.agent.tools.cloud_storage import CloudStorageTool
-from leanworks.agent.tools.atlassian import AtlassianTool
-from leanworks.agent.tools.github import GitHubTool
-from leanworks.agent.tools.linear import LinearTool
+from leanworks.agent.tools.tool_registry import ToolRegistry
+from leanworks.agent.tools.tool_response_handler import ToolResponseHandlerFactory
+
+# Re-export from subdirectories for backward compatibility
+from leanworks.agent.tools.gcp import BigQueryTool, CloudStorageTool, FirestoreTool, GCPTool, GoogleDriveTool
+from leanworks.agent.tools.project_management import (
+    AtlassianTool, ClickUpTool, LinearTool, GitHubTool, NotionTool, ProjectManagementTool
+)
+from leanworks.agent.tools.azure import OneDriveTool, OutlookTool
+from leanworks.agent.tools.communication import SlackTool
+from leanworks.agent.tools.internal import (
+    SearchTool, DocManagementTool, UserManagementTool, ChatManagementTool,
+    RAGStorageTool, WorkingContextTool
+)
+from leanworks.agent.tools.hr import WorkdayTool
 
 __all__ = [
     'ToolUse',
-    'SearchTool',
-    'OutlookTool',
-    'FirestoreTool',
+    'ToolRegistry',
+    'ToolResponseHandlerFactory',
+    # GCP tools
+    'BigQueryTool',
     'CloudStorageTool',
+    'FirestoreTool',
+    'GCPTool',  # Backward compatibility
+    'GoogleDriveTool',
+    # Project management
     'AtlassianTool',
-    'GitHubTool',
+    'ClickUpTool',
     'LinearTool',
+    'GitHubTool',
+    'NotionTool',
+    'ProjectManagementTool',
+    # Azure tools
+    'OneDriveTool',
+    'OutlookTool',
+    # Communication
+    'SlackTool',
+    # HR tools
+    'WorkdayTool',
+    # Internal
+    'SearchTool',
+    'DocManagementTool',
+    'UserManagementTool',
+    'ChatManagementTool',
+    'RagStorageTool',
+    'WorkingContextTool',
 ]

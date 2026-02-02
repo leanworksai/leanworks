@@ -5,7 +5,7 @@ This tool provides access to the WorkingContext that tracks active resources
 (files, document IDs, storage references) during AI agent sessions.
 """
 from typing import Dict, List, Any, Optional
-from .base_api_client import BaseAPIClient
+from leanworks.agent.tools.base_api_client import BaseAPIClient
 import logging
 
 logger = logging.getLogger(__name__)

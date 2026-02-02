@@ -26,7 +26,7 @@ class ConversationManager:
         self.conversation = []
 
         # Initialize background indexing manager for RAG
-        from leanworks.agent.tools.rag_storage import BackgroundIndexingManager
+        from leanworks.agent.tools.internal.rag_storage import BackgroundIndexingManager
         from leanworks.setting import LARGE_RESPONSE_CONFIG
         max_workers = LARGE_RESPONSE_CONFIG.get("rag_indexing_thread_pool_size", 2)
         self.background_indexing_manager = BackgroundIndexingManager(max_workers=max_workers)
@@ -218,13 +218,13 @@ class ConversationManager:
         """
         # Only add tool results if there's at least one previous message
         if not self.conversation:
-            print("Warning: Cannot add tool results to an empty conversation")
+            logger.warning("Cannot add tool results to an empty conversation")
             return
             
         # The previous message should be from the assistant
         prev_message = self.conversation[-1]
         if prev_message.get("role") != "assistant":
-            print("Warning: Tool results should follow an assistant message")
+            logger.warning("Tool results should follow an assistant message")
             # Still proceed with adding the results
             
         # Add the tool results as a user message
@@ -249,7 +249,7 @@ class ConversationManager:
         if len(self.conversation) > 0:
             initial_message = self.conversation[0]
             self.conversation = [initial_message]
-            print("Conversation reset to initial query for fresh attempt")
+            logger.info("Conversation reset to initial query for fresh attempt")
 
     def parse_and_format_tool_results(self, response, function_map):
         """
@@ -377,7 +377,7 @@ class ConversationManager:
                 
                 # Check if this is a server tool (executed by Anthropic's servers)
                 # Server tools don't need client-side execution - Anthropic handles them automatically
-                from leanworks.agent.tool_registry import ToolRegistry
+                from leanworks.agent.tools.tool_registry import ToolRegistry
                 is_server_tool = ToolRegistry.is_server_tool(tool_name)
                 
                 if is_server_tool:
@@ -406,7 +406,7 @@ class ConversationManager:
                         logger.info(f"Tool call result for {tool_name}: {result_preview}")
 
                         # Check if response is large and needs special handling
-                        from leanworks.agent.large_response_handler import LargeResponseHandler
+                        from leanworks.agent.utils.large_response_handler import LargeResponseHandler
                         from leanworks.setting import LARGE_RESPONSE_CONFIG
                         
                         # Configure handler with settings
@@ -921,7 +921,7 @@ FALLBACK ACCESS (RAG unavailable):
             # Get embedding client from tool_use
             embedding_client = getattr(self.tool_use, 'embedding_client', None)
             if embedding_client:
-                from leanworks.agent.tools.rag_storage import RAGStorageTool
+                from leanworks.agent.tools.internal.rag_storage import RAGStorageTool
                 from leanworks.setting import LARGE_RESPONSE_CONFIG
                 
                 config = LARGE_RESPONSE_CONFIG
@@ -1535,7 +1535,7 @@ Preview (first {preview_length} chars):
                         else:
                             return {"content": response.content[0].text, "answered": "false"}
                     except Exception as e:
-                        print(f"Claude JSON extraction failed: {e}")
+                        logger.error(f"Claude JSON extraction failed: {e}")
                         
             return {"content": text, "answered": "false"}
 

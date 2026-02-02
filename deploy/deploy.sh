@@ -8,8 +8,8 @@ set -e
 # Deploys to Google Kubernetes Engine (GKE) Autopilot cluster
 # Multi-tenant: Single deployment serves all clients (client determined at runtime)
 #
-# Usage: ./deploy.sh
-# Example: ./deploy.sh
+# Usage: ./deploy/deploy.sh
+# Example: ./deploy/deploy.sh
 
 # Load environment variables from .env file (optional)
 if [ -f .env ]; then
@@ -219,7 +219,7 @@ build_and_push_cloud_build() {
     CLOUDBUILD_SA="projects/$PROJECT_ID/serviceAccounts/$DEPLOYMENT_SA"
     
     if gcloud beta builds submit \
-        --config cloudbuild.yaml \
+        --config deploy/cloudbuild.yaml \
         --substitutions _IMAGE_TAG="$IMAGE_TAG",_IMAGE_NAME="$IMAGE_NAME",_REGISTRY="$REGISTRY",_REPO_NAME="$REPO_NAME" \
         --service-account="$CLOUDBUILD_SA" \
         --project="$PROJECT_ID" \
@@ -259,38 +259,33 @@ build_session_manager_image() {
     echo "=========================================="
     echo "Building Bash Session Manager Docker Image"
     echo "=========================================="
-    
+
     if [[ ! -f "deploy/Dockerfile.session-manager" ]]; then
         echo "Error: deploy/Dockerfile.session-manager not found."
         exit 1
     fi
-    
+
     SESSION_IMAGE_NAME="bash-session-manager"
     SESSION_REGISTRY="$REGISTRY/$PROJECT_ID/$REPO_NAME/$SESSION_IMAGE_NAME"
-    
-    echo "Step 1: Building Docker image from deploy/Dockerfile.session-manager..."
-    docker build -f deploy/Dockerfile.session-manager -t $SESSION_IMAGE_NAME:latest .
+
+    echo "Step 1: Setting up Docker buildx for cross-platform builds..."
+    # Create and use a buildx builder that supports multi-platform builds
+    docker buildx create --name leanworks-builder --use 2>/dev/null || docker buildx use leanworks-builder
+
+    echo "Step 2: Building Docker image from deploy/Dockerfile.session-manager for linux/amd64..."
+    # Build for linux/amd64 (x86_64) which is what GKE uses by default
+    docker buildx build \
+        --platform linux/amd64 \
+        --file deploy/Dockerfile.session-manager \
+        --tag $SESSION_REGISTRY:latest \
+        --push \
+        .
     if [ $? -ne 0 ]; then
-        echo "Error: Docker build failed"
+        echo "Error: Docker buildx failed"
         exit 1
     fi
-    echo "✓ Docker image built successfully"
-    
-    echo ""
-    echo "Step 2: Tagging image for Artifact Registry..."
-    docker tag $SESSION_IMAGE_NAME:latest $SESSION_REGISTRY:latest
-    echo "✓ Image tagged as: $SESSION_REGISTRY:latest"
-    
-    echo ""
-    echo "Step 3: Pushing image to Artifact Registry..."
-    docker push $SESSION_REGISTRY:latest
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to push image to Artifact Registry"
-        echo "Make sure you are authenticated with: gcloud auth configure-docker $REGISTRY"
-        exit 1
-    fi
-    echo "✓ Image pushed successfully: $SESSION_REGISTRY:latest"
-    
+    echo "✓ Docker image built and pushed successfully for linux/amd64: $SESSION_REGISTRY:latest"
+
     echo ""
     echo "=========================================="
     echo "Session Manager image build completed!"

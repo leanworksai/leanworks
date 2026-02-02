@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from session import SessionManager
+from .session import SessionManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

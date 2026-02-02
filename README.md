@@ -314,7 +314,7 @@ RECENCY_WEIGHT=0.6
 - Service exposure via ingress
 - Cloud storage integration
 
-**GCP Cloud Build** (`cloudbuild.yaml`)
+**GCP Cloud Build** (`deploy/cloudbuild.yaml`)
 - Automated build and deploy pipeline
 - Testing and validation stages
 

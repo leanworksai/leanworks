@@ -1,7 +1,7 @@
 from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
-from leanworks.agent.memory import MemoryManager
+from leanworks.agent.core.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.rag.span_selection import SpanSelector
 from leanworks.rag.data_source_formatter import DataSourceFormatter

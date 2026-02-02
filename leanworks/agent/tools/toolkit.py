@@ -1,18 +1,22 @@
-from leanworks.agent.tools.doc_management import DocManagementTool
-from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.outlook import OutlookTool
-from leanworks.agent.tools.cloud_storage import CloudStorageTool
-from leanworks.agent.tools.atlassian import AtlassianTool
-from leanworks.agent.tools.github import GitHubTool
-from leanworks.agent.tools.notion import NotionTool
-from leanworks.agent.tools.clickup import ClickUpTool
-from leanworks.agent.tools.linear import LinearTool
+from leanworks.agent.tools.internal.doc_management import DocManagementTool
+from leanworks.agent.tools.internal.search import SearchTool
+from leanworks.agent.tools.azure.outlook import OutlookTool
+from leanworks.agent.tools.gcp.gcp import GCPTool
+from leanworks.agent.tools.project_management.atlassian import AtlassianTool
+from leanworks.agent.tools.project_management.github import GitHubTool
+from leanworks.agent.tools.project_management.notion import NotionTool
+from leanworks.agent.tools.project_management.clickup import ClickUpTool
+from leanworks.agent.tools.project_management.linear import LinearTool
+from leanworks.agent.tools.gcp.google_drive import GoogleDriveTool
+from leanworks.agent.tools.azure.onedrive import OneDriveTool
+from leanworks.agent.tools.communication.slack import SlackTool
+from leanworks.agent.tools.hr.workday import WorkdayTool
 # New domain-specific management tools (API-based)
-from leanworks.agent.tools.project_management import ProjectManagementTool
-from leanworks.agent.tools.user_management import UserManagementTool
-from leanworks.agent.tools.chat_management import ChatManagementTool
-from leanworks.agent.tools.working_context_tool import WorkingContextTool
-from leanworks.agent.helpers import AgentHelpers
+from leanworks.agent.tools.project_management.project_management import ProjectManagementTool
+from leanworks.agent.tools.internal.user_management import UserManagementTool
+from leanworks.agent.tools.internal.chat_management import ChatManagementTool
+from leanworks.agent.tools.internal.working_context_tool import WorkingContextTool
+from leanworks.agent.utils.helpers import AgentHelpers
 from google.cloud import storage
 import logging
 import json
@@ -119,36 +123,55 @@ class ToolUse:
     def _initialize_bash_backend(self):
         """Initialize appropriate bash backend based on environment."""
         is_kubernetes = os.environ.get("KUBERNETES_SERVICE_HOST") is not None
-        
-        try:
-            if is_kubernetes:
-                # GKE production: use Session Manager backend
-                try:
-                    from .bash_backend_session_manager import SessionManagerBackend
-                    manager_url = os.environ.get(
-                        "BASH_SESSION_MANAGER_URL",
-                        "http://bash-session-manager-service:8080"
-                    )
-                    self._bash_backend = SessionManagerBackend(manager_url=manager_url)
-                    logger.info(f"Using Session Manager backend for bash sessions at {manager_url}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize Session Manager backend: {e}")
-                    logger.info("Falling back to Kubernetes backend")
-                    try:
-                        from .bash_backend_kubernetes import KubernetesBashBackend
-                        image_name = "us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"
-                        self._bash_backend = KubernetesBashBackend(image_name=image_name)
-                        logger.info("Using Kubernetes backend for bash sessions")
-                    except Exception as e2:
-                        logger.error(f"Failed to initialize Kubernetes backend: {e2}")
-                        raise
-            else:
-                # Local development: use Docker backend
-                self._bash_backend = self._create_docker_backend()
-        except Exception as e:
-            logger.error(f"Failed to initialize bash backend: {e}")
+
+        backends_to_try = []
+
+        if is_kubernetes:
+            # GKE production: prioritize backends based on reliability
+            # 1. Try Kubernetes backend first (most reliable in GKE)
+            try:
+                from .bash_backend_kubernetes import KubernetesBashBackend
+                backends_to_try.append((
+                    lambda: KubernetesBashBackend(image_name="us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"),
+                    "Kubernetes backend"
+                ))
+            except ImportError:
+                logger.warning("Kubernetes backend not available")
+
+            # 2. Try Session Manager backend (if service is available)
+            try:
+                from .bash_backend_session_manager import SessionManagerBackend
+                manager_url = os.environ.get(
+                    "BASH_SESSION_MANAGER_URL",
+                    "http://bash-session-manager-service:8080"
+                )
+                backends_to_try.append((
+                    lambda: SessionManagerBackend(manager_url=manager_url),
+                    f"Session Manager backend at {manager_url}"
+                ))
+            except ImportError:
+                logger.warning("Session Manager backend not available")
+        else:
+            # Local development: use Docker backend
+            backends_to_try.append((
+                self._create_docker_backend,
+                "Docker backend"
+            ))
+
+        # Try each backend until one works
+        for backend_factory, backend_name in backends_to_try:
+            try:
+                self._bash_backend = backend_factory()
+                logger.info(f"Successfully initialized {backend_name} for bash sessions")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to initialize {backend_name}: {e}")
+                continue
+        else:
+            # No backend worked
+            logger.error("Failed to initialize any bash backend")
             self._bash_backend = None
-        
+
         self._bash_session = None
     
     def _create_docker_backend(self):
@@ -379,28 +402,60 @@ class ToolUse:
             else:
                 self._tool_cache['chat_management_tool'] = None
         return self._tool_cache['chat_management_tool']
-    
+
+    @property
+    def bigquery_tool(self):
+        """Lazy-load BigQuery tool on first access."""
+        if 'bigquery_tool' not in self._tool_cache:
+            if ('bigquery' in self.requested_tools or 'gcp' in self.requested_tools):
+                try:
+                    # Initialize BigQuery client
+                    from google.cloud import bigquery
+                    from leanworks.agent.tools.gcp.bigquery import BigQueryTool
+
+                    bigquery_client = bigquery.Client.from_service_account_json(self.credential_path)
+
+                    self._tool_cache['bigquery_tool'] = BigQueryTool(
+                        bigquery_client=bigquery_client,
+                        credential_path=self.credential_path
+                    )
+                    if 'bigquery' not in self.enabled_tools:
+                        self.enabled_tools.append('bigquery')
+                    if 'gcp' not in self.enabled_tools:
+                        self.enabled_tools.append('gcp')
+                    logger.debug("BigQueryTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
+                    self._tool_cache['bigquery_tool'] = None
+            else:
+                self._tool_cache['bigquery_tool'] = None
+        return self._tool_cache['bigquery_tool']
+
     @property
     def cloud_storage_tool(self):
         """Lazy-load Cloud Storage tool on first access."""
         if 'cloud_storage_tool' not in self._tool_cache:
-            if 'cloud_storage' in self.requested_tools and self.org_slug:
+            if ('cloud_storage' in self.requested_tools or 'gcp' in self.requested_tools) and self.org_slug:
                 try:
                     # Initialize Storage client
+                    from leanworks.agent.tools.gcp.cloud_storage import CloudStorageTool
+
                     storage_client = storage.Client.from_service_account_json(self.credential_path)
-                    
+
                     self._tool_cache['cloud_storage_tool'] = CloudStorageTool(
-                        storage_client,
-                        self.org_slug,
+                        storage_client=storage_client,
+                        org_slug=self.org_slug,
                         credential_path=self.credential_path
                     )
                     if 'cloud_storage' not in self.enabled_tools:
                         self.enabled_tools.append('cloud_storage')
+                    if 'gcp' not in self.enabled_tools:
+                        self.enabled_tools.append('gcp')
                     logger.debug("CloudStorageTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize CloudStorageTool: {str(e)}")
                     self._tool_cache['cloud_storage_tool'] = None
-            elif 'cloud_storage' in self.requested_tools:
+            elif 'cloud_storage' in self.requested_tools or 'gcp' in self.requested_tools:
                 logger.warning("CloudStorageTool not initialized: missing org_slug")
                 self._tool_cache['cloud_storage_tool'] = None
             else:
@@ -575,16 +630,16 @@ class ToolUse:
                         full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
-                    
+
                     # Construct secret name from org_slug
                     # Convert underscores to hyphens for secret name
                     org_slug_for_secret = self.org_slug.replace('_', '-')
                     secret_name = f"integrations-{org_slug_for_secret}-linear"
-                    
+
                     # Retrieve and parse JSON secret
                     secret_json = get_secret(secret_name)
                     linear_credentials = json.loads(secret_json)
-                    
+
                     self._tool_cache['linear_tool'] = LinearTool(
                         api_key=linear_credentials.get('apiKey')
                     )
@@ -600,7 +655,160 @@ class ToolUse:
             else:
                 self._tool_cache['linear_tool'] = None
         return self._tool_cache['linear_tool']
-    
+
+    @property
+    def google_drive_tool(self):
+        """Lazy-load Google Drive tool on first access."""
+        if 'google_drive_tool' not in self._tool_cache:
+            if 'google_drive' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-google-drive"
+
+                    # Retrieve and parse service account JSON secret
+                    secret_json = get_secret(secret_name)
+                    service_account_info = json.loads(secret_json)
+
+                    self._tool_cache['google_drive_tool'] = GoogleDriveTool(
+                        service_account_info=service_account_info
+                    )
+                    if 'google_drive' not in self.enabled_tools:
+                        self.enabled_tools.append('google_drive')
+                    logger.debug("GoogleDriveTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize GoogleDriveTool: {str(e)}")
+                    self._tool_cache['google_drive_tool'] = None
+            elif 'google_drive' in self.requested_tools:
+                logger.warning("GoogleDriveTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['google_drive_tool'] = None
+            else:
+                self._tool_cache['google_drive_tool'] = None
+        return self._tool_cache['google_drive_tool']
+
+    @property
+    def onedrive_tool(self):
+        """Lazy-load OneDrive tool on first access."""
+        if 'onedrive_tool' not in self._tool_cache:
+            if 'onedrive' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-onedrive"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    onedrive_credentials = json.loads(secret_json)
+
+                    self._tool_cache['onedrive_tool'] = OneDriveTool(
+                        client_id=onedrive_credentials.get('clientId'),
+                        client_secret=onedrive_credentials.get('clientSecret'),
+                        tenant_id=onedrive_credentials.get('tenantId')
+                    )
+                    if 'onedrive' not in self.enabled_tools:
+                        self.enabled_tools.append('onedrive')
+                    logger.debug("OneDriveTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize OneDriveTool: {str(e)}")
+                    self._tool_cache['onedrive_tool'] = None
+            elif 'onedrive' in self.requested_tools:
+                logger.warning("OneDriveTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['onedrive_tool'] = None
+            else:
+                self._tool_cache['onedrive_tool'] = None
+        return self._tool_cache['onedrive_tool']
+
+    @property
+    def slack_tool(self):
+        """Lazy-load Slack tool on first access."""
+        if 'slack_tool' not in self._tool_cache:
+            if 'slack' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-slack"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    slack_credentials = json.loads(secret_json)
+
+                    self._tool_cache['slack_tool'] = SlackTool(
+                        bot_token=slack_credentials.get('botToken')
+                    )
+                    if 'slack' not in self.enabled_tools:
+                        self.enabled_tools.append('slack')
+                    logger.debug("SlackTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize SlackTool: {str(e)}")
+                    self._tool_cache['slack_tool'] = None
+            elif 'slack' in self.requested_tools:
+                logger.warning("SlackTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['slack_tool'] = None
+            else:
+                self._tool_cache['slack_tool'] = None
+        return self._tool_cache['slack_tool']
+
+    @property
+    def workday_tool(self):
+        """Lazy-load Workday tool on first access."""
+        if 'workday_tool' not in self._tool_cache:
+            if 'workday' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-workday"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    workday_credentials = json.loads(secret_json)
+
+                    self._tool_cache['workday_tool'] = WorkdayTool(
+                        client_id=workday_credentials.get('clientId'),
+                        client_secret=workday_credentials.get('clientSecret'),
+                        tenant_id=workday_credentials.get('tenantId'),
+                        base_url=workday_credentials.get('baseUrl')
+                    )
+                    if 'workday' not in self.enabled_tools:
+                        self.enabled_tools.append('workday')
+                    logger.debug("WorkdayTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize WorkdayTool: {str(e)}")
+                    self._tool_cache['workday_tool'] = None
+            elif 'workday' in self.requested_tools:
+                logger.warning("WorkdayTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['workday_tool'] = None
+            else:
+                self._tool_cache['workday_tool'] = None
+        return self._tool_cache['workday_tool']
+
     def _ensure_custom_image(self):
         """Ensure custom bash session image exists, build if needed."""
         import subprocess
@@ -1312,11 +1520,28 @@ EOF"""
                 ])
                 logger.info("Outlook tools added to tools list (lazy)")
 
+            # Add BigQuery tools if available
+            if self.bigquery_tool:
+                self._tools_cache.extend([
+                    self.bigquery_tool.gcp_bigquery_list_datasets_property,
+                    self.bigquery_tool.gcp_bigquery_list_tables_property,
+                    self.bigquery_tool.gcp_bigquery_get_table_schema_property,
+                    self.bigquery_tool.gcp_bigquery_query_property
+                ])
+                logger.info("BigQuery tools added to tools list (lazy)")
+
             # Add Cloud Storage tools if available
             if self.cloud_storage_tool:
                 self._tools_cache.extend([
-                    self.cloud_storage_tool.get_image_url_property,
-                    self.cloud_storage_tool.list_chat_images_property
+                    # General file operations
+                    self.cloud_storage_tool.gcp_storage_list_files_property,
+                    self.cloud_storage_tool.gcp_storage_get_signed_url_property,
+                    self.cloud_storage_tool.gcp_storage_upload_file_property,
+                    self.cloud_storage_tool.gcp_storage_download_file_property,
+                    self.cloud_storage_tool.gcp_storage_get_file_metadata_property,
+                    # Chat image operations (backward compatibility)
+                    self.cloud_storage_tool.gcp_cloud_storage_get_image_url_property,
+                    self.cloud_storage_tool.gcp_cloud_storage_list_chat_images_property
                 ])
                 logger.info("Cloud Storage tools added to tools list (lazy)")
 
@@ -1394,6 +1619,50 @@ EOF"""
                     self.linear_tool.search_users_property
                 ])
                 logger.info("Linear tools added to tools list (lazy)")
+
+            # Add Google Drive tools if available
+            if self.google_drive_tool:
+                self._tools_cache.extend([
+                    self.google_drive_tool.list_files_property,
+                    self.google_drive_tool.search_files_property,
+                    self.google_drive_tool.get_file_property,
+                    self.google_drive_tool.download_file_property,
+                    self.google_drive_tool.upload_file_property,
+                    self.google_drive_tool.create_folder_property
+                ])
+                logger.info("Google Drive tools added to tools list (lazy)")
+
+            # Add OneDrive tools if available
+            if self.onedrive_tool:
+                self._tools_cache.extend([
+                    self.onedrive_tool.list_files_property,
+                    self.onedrive_tool.search_files_property,
+                    self.onedrive_tool.get_file_property,
+                    self.onedrive_tool.download_file_property,
+                    self.onedrive_tool.upload_file_property,
+                    self.onedrive_tool.create_folder_property
+                ])
+                logger.info("OneDrive tools added to tools list (lazy)")
+
+            # Add Slack tools if available
+            if self.slack_tool:
+                self._tools_cache.extend([
+                    self.slack_tool.list_channels_property,
+                    self.slack_tool.get_channel_messages_property,
+                    self.slack_tool.post_message_property,
+                    self.slack_tool.get_user_info_property,
+                    self.slack_tool.create_channel_property
+                ])
+                logger.info("Slack tools added to tools list (lazy)")
+
+            # Add Workday tools if available
+            if self.workday_tool:
+                self._tools_cache.extend([
+                    self.workday_tool.get_employee_property,
+                    self.workday_tool.list_employees_property,
+                    self.workday_tool.search_employees_property
+                ])
+                logger.info("Workday tools added to tools list (lazy)")
 
             # Add client tools (bash and text_editor)
             # These are always available as they don't require external dependencies
@@ -1474,11 +1743,30 @@ EOF"""
                 })
                 logger.info("Outlook functions added to function_map (lazy)")
 
+            # Add BigQuery functions if available
+            if self.bigquery_tool:
+                self._function_map_cache.update({
+                    "gcp_bigquery_list_datasets": self.bigquery_tool.gcp_bigquery_list_datasets,
+                    "gcp_bigquery_list_tables": self.bigquery_tool.gcp_bigquery_list_tables,
+                    "gcp_bigquery_get_table_schema": self.bigquery_tool.gcp_bigquery_get_table_schema,
+                    "gcp_bigquery_query": self.bigquery_tool.gcp_bigquery_query
+                })
+                logger.info("BigQuery functions added to function_map (lazy)")
+
             # Add Cloud Storage functions if available
             if self.cloud_storage_tool:
                 self._function_map_cache.update({
-                    "get_image_url": self.cloud_storage_tool.get_image_url,
-                    "list_chat_images": self.cloud_storage_tool.list_chat_images
+                    # General file operations
+                    "gcp_storage_list_files": self.cloud_storage_tool.gcp_storage_list_files,
+                    "gcp_storage_get_signed_url": self.cloud_storage_tool.gcp_storage_get_signed_url,
+                    "gcp_storage_upload_file": self.cloud_storage_tool.gcp_storage_upload_file,
+                    "gcp_storage_download_file": self.cloud_storage_tool.gcp_storage_download_file,
+                    "gcp_storage_get_file_metadata": self.cloud_storage_tool.gcp_storage_get_file_metadata,
+                    # Chat image functions (backward compatibility)
+                    "get_image_url": self.cloud_storage_tool.gcp_cloud_storage_get_image_url,
+                    "list_chat_images": self.cloud_storage_tool.gcp_cloud_storage_list_chat_images,
+                    "gcp_cloud_storage_get_image_url": self.cloud_storage_tool.gcp_cloud_storage_get_image_url,
+                    "gcp_cloud_storage_list_chat_images": self.cloud_storage_tool.gcp_cloud_storage_list_chat_images
                 })
                 logger.info("Cloud Storage functions added to function_map (lazy)")
 
@@ -1557,6 +1845,50 @@ EOF"""
                 })
                 logger.info("Linear functions added to function_map (lazy)")
 
+            # Add Google Drive functions if available
+            if self.google_drive_tool:
+                self._function_map_cache.update({
+                    "google_drive_list_files": self.google_drive_tool.list_files,
+                    "google_drive_search_files": self.google_drive_tool.search_files,
+                    "google_drive_get_file": self.google_drive_tool.get_file,
+                    "google_drive_download_file": self.google_drive_tool.download_file,
+                    "google_drive_upload_file": self.google_drive_tool.upload_file,
+                    "google_drive_create_folder": self.google_drive_tool.create_folder
+                })
+                logger.info("Google Drive functions added to function_map (lazy)")
+
+            # Add OneDrive functions if available
+            if self.onedrive_tool:
+                self._function_map_cache.update({
+                    "onedrive_list_files": self.onedrive_tool.list_files,
+                    "onedrive_search_files": self.onedrive_tool.search_files,
+                    "onedrive_get_file": self.onedrive_tool.get_file,
+                    "onedrive_download_file": self.onedrive_tool.download_file,
+                    "onedrive_upload_file": self.onedrive_tool.upload_file,
+                    "onedrive_create_folder": self.onedrive_tool.create_folder
+                })
+                logger.info("OneDrive functions added to function_map (lazy)")
+
+            # Add Slack functions if available
+            if self.slack_tool:
+                self._function_map_cache.update({
+                    "slack_list_channels": self.slack_tool.list_channels,
+                    "slack_get_channel_messages": self.slack_tool.get_channel_messages,
+                    "slack_post_message": self.slack_tool.post_message,
+                    "slack_get_user_info": self.slack_tool.get_user_info,
+                    "slack_create_channel": self.slack_tool.create_channel
+                })
+                logger.info("Slack functions added to function_map (lazy)")
+
+            # Add Workday functions if available
+            if self.workday_tool:
+                self._function_map_cache.update({
+                    "workday_get_employee": self.workday_tool.get_employee,
+                    "workday_list_employees": self.workday_tool.list_employees,
+                    "workday_search_employees": self.workday_tool.search_employees
+                })
+                logger.info("Workday functions added to function_map (lazy)")
+
             # Add client tool function mappings (always available)
             # Note: bash and text_editor are client tools
             # text_editor tool uses name "str_replace_based_edit_tool" in the API for version 20250728
@@ -1591,7 +1923,7 @@ EOF"""
             # Check if search tool is available (which has vector DB client)
             if 'search' in self.requested_tools and self.search_tool:
                 try:
-                    from leanworks.agent.tools.rag_storage import RAGStorageTool
+                    from leanworks.agent.tools.internal.rag_storage import RAGStorageTool
                     from leanworks.setting import LARGE_RESPONSE_CONFIG
                     
                     # Reuse search tool's vector DB and embedding clients

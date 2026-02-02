@@ -9,7 +9,7 @@ import markdown
 import anthropic
 from datetime import datetime, timezone
 
-from .base_api_client import BaseAPIClient
+from leanworks.agent.tools.base_api_client import BaseAPIClient
 
 # Default AI agent ID for attribution when user_id is not provided
 AI_AGENT_ID = "leanworks-ai-agent"
