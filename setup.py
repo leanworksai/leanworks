@@ -13,6 +13,7 @@ setup(
         "google-auth-httplib2==0.2.0",
         "anthropic==0.75.0",
         "google-genai==1.24.0",
+        "google-cloud-aiplatform>=1.60.0",
         "openai==1.60.0",
         "google-api-python-client==2.159.0",
         "numpy==1.26.0",

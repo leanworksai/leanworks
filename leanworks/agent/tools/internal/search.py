@@ -61,8 +61,9 @@ class SearchTool:
         
         model_client = Anthropic(api_key=get_secret("claude-api-key"))
         
-        # Use the module-level imports directly
-        embedding_model_client = GoogleEmbedding(get_secret("gemini-api-key"))
+        # Use the module-level imports directly with service account authentication
+        from leanworks.utils.env import resolve_credential_path
+        embedding_model_client = GoogleEmbedding(gcp_credential_path=resolve_credential_path())
         
         pinecone_key = None
         if not use_gcp_vector_search():

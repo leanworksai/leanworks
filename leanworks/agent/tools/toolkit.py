@@ -2020,8 +2020,8 @@ EOF"""
                     self._large_response_vectordb_client = False
                     return None
                 
-                # Initialize embedding client
-                embedding_client = GoogleEmbedding(self.project_id)
+                # Initialize embedding client with service account authentication
+                embedding_client = GoogleEmbedding(gcp_credential_path=self.credential_path)
                 
                 # Create vectordb client for large responses
                 vectordb_client = create_vectordb_client(
