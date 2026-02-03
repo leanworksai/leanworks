@@ -1,4 +1,12 @@
-from pinecone import Pinecone, ServerlessSpec
+try:
+    from pinecone import Pinecone, ServerlessSpec
+except ImportError as e:
+    Pinecone = None
+    ServerlessSpec = None
+    import warnings
+    warnings.warn(
+        f"pinecone import failed: {e}. Install with: pip install pinecone"
+    )
 from leanworks.rag.embedding import GoogleEmbedding
 from leanworks.setting import ALPHA
 import logging
@@ -17,7 +25,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_DIMENSION = 768
 DEFAULT_VOCAB_SIZE = 20000  # Pinecone max sparse dimension is 20000
 UPSERT_BATCH_SIZE = 100
-SERVERLESS_SPEC = ServerlessSpec(cloud="gcp", region="us-central1")
+SERVERLESS_SPEC = ServerlessSpec(cloud="gcp", region="us-central1") if ServerlessSpec else None
 
 def sanitize_pinecone_index_name(name: str) -> str:
     """
@@ -47,8 +55,12 @@ def sanitize_pinecone_index_name(name: str) -> str:
     return sanitized
 
 class PineconeHybridIndex:
+    backend = "pinecone"
+
     def __init__(self, pinecone_key: str, embedding_model_client: GoogleEmbedding, 
                  chunk_size: int = 512, chunk_overlap: int = 128):
+        if Pinecone is None:
+            raise ImportError("pinecone is not installed. Install with: pip install pinecone")
         self.pc = Pinecone(api_key=pinecone_key)
         self.dense_index = None
         self.sparse_index = None
@@ -113,6 +125,8 @@ class PineconeHybridIndex:
         """
         try:
             logger.info(f"Creating serverless index '{index_name}' with dimension {dimension} and metric {metric}...")
+            if SERVERLESS_SPEC is None:
+                raise ImportError("pinecone is not installed. Install with: pip install pinecone")
             
             self.pc.create_index(
                 name=index_name,

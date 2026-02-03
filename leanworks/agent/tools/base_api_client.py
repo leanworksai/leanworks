@@ -6,6 +6,7 @@ import requests
 import os
 import logging
 from typing import Dict, Any, Optional
+from leanworks.utils.env import get_hub_url
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class BaseAPIClient:
         self.user_id = user_id
         
         # Environment-aware configuration
-        self.base_url = os.getenv('LEANWORKS_HUB_URL', 'http://localhost:3001')
+        self.base_url = get_hub_url()
         self.api_key = os.getenv('LEANWORKS_API_KEY')
         self.bearer_token = os.getenv('LEANWORKS_BEARER_TOKEN')
         

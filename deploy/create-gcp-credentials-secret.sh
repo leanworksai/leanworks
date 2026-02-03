@@ -1,13 +1,20 @@
 #!/bin/bash
 
 # Script to create Kubernetes secret for GCP credentials
-# Usage: ./create-gcp-credentials-secret.sh [namespace]
+# Usage: ./create-gcp-credentials-secret.sh [environment] [namespace]
 
 set -e
 
-NAMESPACE=${1:-default}
-SECRET_NAME="gcp-credentials"
-CREDENTIAL_FILE="gcp_credential.json"
+ENVIRONMENT=${1:-prod}
+NAMESPACE=${2:-default}
+
+if [ "$ENVIRONMENT" = "dev" ]; then
+    SECRET_NAME="gcp-credentials-dev"
+    CREDENTIAL_FILE="gcp_credential_dev.json"
+else
+    SECRET_NAME="gcp-credentials"
+    CREDENTIAL_FILE="gcp_credential.json"
+fi
 
 if [ ! -f "$CREDENTIAL_FILE" ]; then
     echo "Error: $CREDENTIAL_FILE not found in current directory"
@@ -15,7 +22,7 @@ if [ ! -f "$CREDENTIAL_FILE" ]; then
     exit 1
 fi
 
-echo "Creating Kubernetes secret '$SECRET_NAME' in namespace '$NAMESPACE'..."
+echo "Creating Kubernetes secret '$SECRET_NAME' in namespace '$NAMESPACE' for environment '$ENVIRONMENT'..."
 
 # Delete existing secret if it exists
 kubectl delete secret "$SECRET_NAME" -n "$NAMESPACE" 2>/dev/null || true
@@ -32,4 +39,3 @@ echo "  kubectl get secret $SECRET_NAME -n $NAMESPACE"
 echo ""
 echo "To view the secret (base64 encoded):"
 echo "  kubectl get secret $SECRET_NAME -n $NAMESPACE -o yaml"
-

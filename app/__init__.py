@@ -9,6 +9,7 @@ from quart import Quart
 from quart_cors import cors
 from google.cloud import firestore, secretmanager
 from google.oauth2 import service_account
+from leanworks.utils.env import get_firestore_database_name, resolve_credential_path
 
 # Configure logging first
 # Write to stdout instead of stderr so GKE doesn't treat all logs as errors
@@ -21,6 +22,16 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+
+# Configure logging based on environment
+from leanworks.utils.env import get_environment
+env = get_environment()
+if env == "local" or env == "dev":
+    logging.getLogger().setLevel(logging.INFO)
+else:  # prod
+    logging.getLogger().setLevel(logging.WARNING)
+    # Suppress verbose loggers in prod
+    logging.getLogger('leanworks.rag').setLevel(logging.WARNING)
 
 # Suppress verbose loggers while keeping essential tool/response logs
 logging.getLogger('leanworks.rag').setLevel(logging.WARNING)  # Covers query, chat, embedding, reranker, span_selection
@@ -51,7 +62,7 @@ if FIREBASE_AVAILABLE:
             logger.info("Using existing Firebase Admin SDK instance")
         except ValueError:
             # Initialize Firebase Admin SDK
-            cred = credentials.Certificate("gcp_credential.json")
+            cred = credentials.Certificate(resolve_credential_path())
             firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin SDK initialized successfully")
     except Exception as e:
@@ -68,33 +79,48 @@ _secret_manager_client = None
 def initialize_infrastructure():
     """Initialize shared GCP infrastructure clients"""
     global _leanworks_credentials, _project_id, _firestore_client, _secret_manager_client
-    
+
+    # Validate environment configuration
+    from leanworks.utils.env import validate_environment_config, get_environment
+    is_valid, errors = validate_environment_config()
+    env = get_environment()
+
+    if not is_valid:
+        logger.error(f"Environment configuration validation failed for {env}:")
+        for error in errors:
+            logger.error(f"  - {error}")
+        logger.warning("Continuing with available configuration...")
+    else:
+        logger.info(f"Environment configuration validated: {env}")
+
     try:
         logger.info("Initializing shared Leanworks infrastructure resources...")
         
         # Check if credential file exists - use it if available, otherwise use ADC
-        credential_file_exists = os.path.exists("gcp_credential.json")
+        credential_path = resolve_credential_path()
+        credential_file_exists = os.path.exists(credential_path)
         
         if credential_file_exists:
             # Use credential file if it exists (works in both local and Cloud Run)
-            logger.info("Using service account file: gcp_credential.json")
-            _leanworks_credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+            logger.info(f"Using service account file: {credential_path}")
+            _leanworks_credentials = service_account.Credentials.from_service_account_file(credential_path)
             
             # Load project_id once from credentials JSON
-            with open("gcp_credential.json", "r") as f:
+            with open(credential_path, "r") as f:
                 credential_data = json.load(f)
             _project_id = credential_data["project_id"]
         else:
             # Fallback to Application Default Credentials (ADC) if file doesn't exist
-            logger.info("gcp_credential.json not found, using Application Default Credentials")
+            logger.info(f"{credential_path} not found, using Application Default Credentials")
             from google.auth import default
             _leanworks_credentials, _project_id = default()
         
         # Initialize shared Firestore client (still needed for ChatAgent)
+        firestore_database = get_firestore_database_name()
         _firestore_client = firestore.Client(
             credentials=_leanworks_credentials, 
             project=_project_id, 
-            database="leanworks-prod"
+            database=firestore_database
         )
         
         # Initialize shared Secret Manager client
@@ -181,4 +207,3 @@ cors(app,
      allow_headers=["Content-Type", "Authorization", "X-API-Key"], 
      allow_methods=["GET", "POST", "OPTIONS"],
      allow_credentials=True)
-

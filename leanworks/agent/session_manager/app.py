@@ -9,7 +9,12 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from .session import SessionManager
+# Support both package imports (leanworks.agent.session_manager) and
+# running this folder as a standalone module inside the session-manager image.
+try:
+    from .session import SessionManager  # type: ignore
+except ImportError:  # pragma: no cover
+    from session import SessionManager  # type: ignore
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

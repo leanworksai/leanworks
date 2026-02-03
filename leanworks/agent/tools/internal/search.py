@@ -4,8 +4,9 @@ from anthropic import Anthropic
 import logging
 from typing import List, Dict, Any
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
+from leanworks.utils.env import get_project_id, get_secret_name, resolve_credential_path
 from leanworks.rag.embedding import GoogleEmbedding
-from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.vectordb_client import create_vectordb_client, use_gcp_vector_search
 from leanworks.rag.chat import AsyncChat
 
 
@@ -39,16 +40,22 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, firestore_client, org_slug, secret_manager_client, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, firestore_client, org_slug, secret_manager_client, read_document_ids: set | None = None, credential_path: str | None = None):
         # Read project_id from credential file
         import json
-        with open(credential_path, "r") as f:
-            credential_data = json.load(f)
-        project_id = credential_data.get("project_id")
+        resolved_path = credential_path or resolve_credential_path()
+        project_id = get_project_id(resolved_path)
+        if not project_id:
+            with open(resolved_path, "r") as f:
+                credential_data = json.load(f)
+            project_id = credential_data.get("project_id")
+        if not project_id:
+            raise ValueError(f"project_id not found in {resolved_path}")
         
         # Helper function to get secret
         def get_secret(name):
-            full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+            secret_name = get_secret_name(name)
+            full_name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
             response = secret_manager_client.access_secret_version(name=full_name)
             return response.payload.data.decode("UTF-8")
         
@@ -57,17 +64,16 @@ class SearchTool:
         # Use the module-level imports directly
         embedding_model_client = GoogleEmbedding(get_secret("gemini-api-key"))
         
-        # Initialize vector database client
-        vectordb_client = PineconeHybridIndex(
-            pinecone_key=get_secret("pinecone-api-key"),
-            embedding_model_client=embedding_model_client
-        )
-        
-        # Use shared indexes with namespaces instead of per-org indexes
-        # This matches the data-pipeline pattern to avoid hitting Pinecone index limits
-        vectordb_client.load_hybrid_index(
-            dense_index_name="leanworks-dense",
-            sparse_index_name="leanworks-sparse"
+        pinecone_key = None
+        if not use_gcp_vector_search():
+            pinecone_key = get_secret("pinecone-api-key")
+
+        vectordb_client = create_vectordb_client(
+            embedding_model_client=embedding_model_client,
+            pinecone_key=pinecone_key,
+            gcp_credential_path=resolved_path,
+            dense_index_name="leanworks-dense" if not use_gcp_vector_search() else None,
+            sparse_index_name="leanworks-sparse" if not use_gcp_vector_search() else None,
         )
         
         self.chat = AsyncChat(

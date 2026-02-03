@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any, Optional
 from google.cloud import bigquery
+from leanworks.utils.env import resolve_credential_path
 
 logger = logging.getLogger(__name__)
 
@@ -14,16 +15,16 @@ class BigQueryTool:
     Uses service account authentication.
     """
 
-    def __init__(self, bigquery_client, credential_path: str = "gcp_credential.json"):
+    def __init__(self, bigquery_client, credential_path: Optional[str] = None):
         """
         Initialize BigQueryTool with BigQuery client.
 
         Args:
             bigquery_client: Google Cloud BigQuery client instance
-            credential_path: Path to GCP credential JSON file
+            credential_path: Path to GCP credential JSON file (default: environment-aware)
         """
         self.bigquery_client = bigquery_client
-        self.credential_path = credential_path
+        self.credential_path = credential_path or resolve_credential_path()
 
     @property
     def gcp_bigquery_list_datasets_property(self):

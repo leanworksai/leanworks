@@ -5,8 +5,8 @@ setup(
     version="0.6.1",
     packages=find_packages(),
     install_requires=[
-        "pinecone==7.2.0",
         "google-cloud-storage>=3.1.1",
+        "google-cloud-vectorsearch>=0.1.0",
         "google-cloud-secret-manager==2.22.0",
         "google-auth==2.37.0",
         "google-auth-oauthlib==1.2.1",

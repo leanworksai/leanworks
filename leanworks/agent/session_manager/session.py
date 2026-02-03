@@ -4,8 +4,14 @@ Session lifecycle management.
 import logging
 import subprocess
 from typing import Dict, Any, Optional
-from .isolation import ProcessIsolation
-from .persistence import SessionPersistence
+# Support both package imports (leanworks.agent.session_manager) and
+# running this folder as a standalone module inside the session-manager image.
+try:
+    from .isolation import ProcessIsolation  # type: ignore
+    from .persistence import SessionPersistence  # type: ignore
+except ImportError:  # pragma: no cover
+    from isolation import ProcessIsolation  # type: ignore
+    from persistence import SessionPersistence  # type: ignore
 
 logger = logging.getLogger(__name__)
 

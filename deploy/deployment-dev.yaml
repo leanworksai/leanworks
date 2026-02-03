@@ -17,7 +17,7 @@ spec:
       serviceAccountName: ask-api-sa
       containers:
       - name: ask-api
-        image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/ask-api:20260129-200800
+        image: us-west1-docker.pkg.dev/leanworks-dev/leanworks-docker-images/ask-api:20260202-203350
         command: ["hypercorn"]
         args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
         ports:
@@ -40,20 +40,20 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: "500m"        # Increased for better performance and stability
-            memory: "512Mi"    # Increased to prevent OOM errors with large responses
+            cpu: "500m"
+            memory: "512Mi"
           limits:
-            cpu: "2"           # 2 CPUs (burst capacity)
-            memory: "2Gi"      # Increased to 2Gi to handle large AI responses and prevent OOM
+            cpu: "2"
+            memory: "2Gi"
         env:
         - name: VERIFY_API_KEY
           value: "true"
         - name: ENVIRONMENT
-          value: "prod"
+          value: "dev"
         - name: LEANWORKS_HUB_URL
-          value: "http://leanworks-hub-service"  # Kubernetes service DNS name for leanworks-hub
+          value: "http://leanworks-hub-service"
         - name: DB_HOST
-          value: "cloud-sql-proxy-service"  # Kubernetes service DNS name for shared Cloud SQL Proxy
+          value: "cloud-sql-proxy-service"
         - name: DB_PORT
           value: "5432"
         - name: DB_USER
@@ -61,13 +61,13 @@ spec:
         - name: DB_REGION
           value: "us-west1"
         - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/app/gcp_credential.json"
+          value: "/app/gcp_credential_dev.json"
         volumeMounts:
-        - name: gcp-credentials
-          mountPath: /app/gcp_credential.json
-          subPath: gcp_credential.json
+        - name: gcp-credentials-dev
+          mountPath: /app/gcp_credential_dev.json
+          subPath: gcp_credential_dev.json
           readOnly: true
       volumes:
-      - name: gcp-credentials
+      - name: gcp-credentials-dev
         secret:
-          secretName: gcp-credentials
+          secretName: gcp-credentials-dev

@@ -11,6 +11,7 @@ from anthropic import Anthropic
 from app import get_firestore_client, get_secret_manager_client, get_project_id
 from app.services.database import query_org
 from app.utils.cache import get_cache, set_cache
+from leanworks.utils.env import get_secret_name, get_storage_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ def get_client_info(org_slug: str) -> Tuple[Optional[str], list]:
 
 def get_cached_api_key(secret_name: str) -> Optional[str]:
     """Get API key with caching to reduce secret manager calls. Uses shared Secret Manager client."""
+    secret_name = get_secret_name(secret_name)
     cache_key = f"api_key:{secret_name}"
     cached_key = get_cache(cache_key)
     
@@ -137,7 +139,7 @@ def get_cached_storage_client(client_name: str):
         raise RuntimeError("Shared credentials not initialized")
     
     try:
-        storage_client = CloudStorage(credentials=leanworks_credentials, bucket="leanworks-prod")
+        storage_client = CloudStorage(credentials=leanworks_credentials, bucket=get_storage_bucket())
         set_cache(cache_key, storage_client)
         return storage_client
     except Exception as e:
@@ -199,4 +201,3 @@ async def initialize_clients_async(user_id: str, org_slug: str) -> Tuple[firesto
         logger.error(f"Error in initialize_clients_async for user {user_id} in org slug {org_slug}: {str(e)}")
         traceback.print_exc()
         raise
-

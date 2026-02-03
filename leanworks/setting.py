@@ -513,6 +513,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from typing import List
 import traceback
+from leanworks.utils.env import get_firestore_database_name, resolve_credential_path
 
 logger = logging.getLogger(__name__)
 
@@ -534,13 +535,14 @@ def _get_firestore_client():
             if not _firestore_initialized:
                 try:
                     if not firebase_admin._apps:
-                        cred = credentials.Certificate("gcp_credential.json")
+                        cred = credentials.Certificate(resolve_credential_path())
                         firebase_admin.initialize_app(cred)
                     # Use Firebase Admin SDK's firestore.client() with database_id parameter
                     # This is the recommended approach per Firebase documentation (firebase-admin 7.1.0+)
-                    _firestore_db = firestore.client(database_id="leanworks-prod")
+                    firestore_database = get_firestore_database_name()
+                    _firestore_db = firestore.client(database_id=firestore_database)
                     _firestore_initialized = True
-                    logger.info("Firestore client initialized (database: leanworks-prod)")
+                    logger.info(f"Firestore client initialized (database: {firestore_database})")
                 except Exception as e:
                     logger.error(f"Failed to initialize Firestore: {e}")
                     raise

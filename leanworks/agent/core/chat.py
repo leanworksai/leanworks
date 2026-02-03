@@ -7,6 +7,7 @@ from leanworks.agent.tools.tool_registry import ToolRegistry
 from leanworks.agent.tools.tool_response_handler import ToolResponseHandlerFactory
 from leanworks.agent.core.working_context import WorkingContext
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
+from leanworks.utils.env import resolve_credential_path
 from google.cloud import firestore, secretmanager
 from typing import Dict, Any, List
 import traceback
@@ -32,7 +33,7 @@ class ChatAgent:
                  clear_conversation=True,
                  tools=None,
                  additional_context=None,
-                 credential_path: str = "gcp_credential.json",
+                 credential_path: str | None = None,
                  ):
         """
         Initialize the ChatAgent with necessary clients and settings.
@@ -46,12 +47,14 @@ class ChatAgent:
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
             tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'postgres', 'duckdb']. ToolUse handles the processing and filtering.
-            credential_path (str): Path to GCP credential JSON file (default: "gcp_credential.json")
+            credential_path (str): Path to GCP credential JSON file (default: environment-aware)
         """
         self.org_slug = org_slug
         if not self.org_slug:
             raise ValueError("org_slug is required for ChatAgent initialization")
         
+        if credential_path is None:
+            credential_path = resolve_credential_path()
         # Read project_id from credential file
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         
@@ -77,7 +80,18 @@ class ChatAgent:
         self.working_context = WorkingContext()
 
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path, working_context=self.working_context)
+        self.tool_use = ToolUse(
+            org_slug=self.org_slug,
+            firestore_client=firestore_client,
+            secret_manager_client=secret_manager_client,
+            model_client=model_client,
+            read_document_ids=self.read_document_ids,
+            tools=tools,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            credential_path=credential_path,
+            working_context=self.working_context
+        )
 
         # Initialize UserManagementTool for user info retrieval
         self.user_management_tool = self.tool_use.user_management_tool

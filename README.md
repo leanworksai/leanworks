@@ -266,11 +266,11 @@ Flask/Quart-based REST API with cloud infrastructure integration.
    ↓
 4. Create file metadata record in Firestore
    ↓
-5. Extract content and chunk for Pinecone
+5. Extract content and chunk for Vector Search
    ↓
 6. Generate embeddings (rate-limited to 150/min)
    ↓
-7. Store vectors in Pinecone with org namespace
+7. Store vectors in Vertex AI Vector Search with org filters
    ↓
 8. Return file ID to user
 ```
@@ -284,17 +284,21 @@ Flask/Quart-based REST API with cloud infrastructure integration.
 GENERATION_MODEL=claude-haiku-4-5-20251001
 RERANK_MODEL=claude-3-haiku-20240307
 
-# Vector Database
-PINECONE_API_KEY=xxx
-PINECONE_ENVIRONMENT=xxx
+# Vector Database (Vertex AI Vector Search)
+USE_GCP_VECTOR_SEARCH=true
+GCP_VECTOR_SEARCH_LOCATION=us-central1
+GCP_VECTOR_SEARCH_COLLECTION_TEXT=leanworks-text
 
 # Cloud Services
 GCP_PROJECT_ID=xxx
-FIRESTORE_DATABASE_ID=xxx
-GOOGLE_APPLICATION_CREDENTIALS=path/to/credentials.json
+FIRESTORE_DATABASE_NAME=xxx
+GOOGLE_APPLICATION_CREDENTIALS=path/to/gcp_credential.json
+# Local/dev will prefer gcp_credential_dev.json when present
 
 # API Configuration
-LEANWORKS_HUB_URL=https://api.leanworks.ai
+LEANWORKS_HUB_URL=https://hub.leanworks.ai
+# For dev: https://dev.leanworks.ai
+# For local without hub running: set LEANWORKS_HUB_URL to dev hub or run leanworks-hub locally.
 LEANWORKS_API_KEY=xxx
 
 # RAG Parameters
@@ -485,10 +489,46 @@ python3 test_streaming.py \
 
 See [TEST_RESULTS.md](TEST_RESULTS.md) for example test runs and [STREAMING_QUICKSTART.md](STREAMING_QUICKSTART.md) for client implementation examples.
 
+## Local Development Setup
+
+### Prerequisites
+- Python 3.10+
+- `gcp_credential_dev.json` in project root (dev environment credentials)
+- Cloud SQL Proxy installed (optional, will auto-start if available)
+
+### Quick Start
+
+1. **Set up environment variables:**
+   ```bash
+   source scripts/setup-local.sh
+   # Or manually:
+   export ENVIRONMENT=local
+   export DB_HOST=127.0.0.1
+   ```
+
+2. **Start the application:**
+   ```bash
+   python run.py
+   ```
+
+### Environment Variables
+
+Copy `.env.local.example` to `.env.local` and adjust as needed:
+
+```bash
+cp .env.local.example .env.local
+```
+
+### Troubleshooting
+
+- **Credentials not found**: Ensure `gcp_credential_dev.json` exists in project root
+- **Database connection fails**: Check Cloud SQL Proxy is running on port 5432
+- **Hub connection fails**: Adjust `LEANWORKS_HUB_URL` if running hub locally
+
 ## Dependencies Overview
 
 - **LLM**: `anthropic`, `google-genai`, `openai` - Multiple LLM provider support
-- **Vector DB**: `pinecone` - Semantic search backend
+- **Vector DB**: `vertex-ai-vector-search` - Semantic search backend
 - **Cloud**: `google-cloud-storage`, `google-cloud-firestore`, `google-cloud-secret-manager`
 - **APIs**: `requests`, `google-api-python-client`, `msal` (Microsoft auth)
 - **Web**: `flask`, `quart`, `gunicorn`, `hypercorn` - API server

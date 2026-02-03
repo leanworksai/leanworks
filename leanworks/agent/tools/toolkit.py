@@ -17,6 +17,7 @@ from leanworks.agent.tools.internal.user_management import UserManagementTool
 from leanworks.agent.tools.internal.chat_management import ChatManagementTool
 from leanworks.agent.tools.internal.working_context_tool import WorkingContextTool
 from leanworks.agent.utils.helpers import AgentHelpers
+from leanworks.utils.env import get_secret_name, resolve_credential_path
 from google.cloud import storage
 import logging
 import json
@@ -36,7 +37,7 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json", working_context=None):
+    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: Optional[str] = None, working_context=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
 
@@ -48,7 +49,7 @@ class ToolUse:
             read_document_ids: Set of document IDs already read for deduplication
             tools: List of tools to enable. Internal tools ['search', 'duckdb', 'task_management', 'project_management', 'event_management', 'user_management', 'chat_management', 'doc_management'] are always available.
                     External tools (e.g., 'outlook') should be explicitly provided in this list.
-            credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
+            credential_path: Path to GCP credential JSON file (default: environment-aware)
             working_context: WorkingContext instance for tracking cited documents and resources
         """
         # Store initialization parameters for lazy loading
@@ -64,6 +65,8 @@ class ToolUse:
         self.firestore_client = firestore_client
         self.secret_manager_client = secret_manager_client
         self.model_client = model_client
+        if credential_path is None:
+            credential_path = resolve_credential_path()
         self.credential_path = credential_path
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
@@ -127,20 +130,9 @@ class ToolUse:
         backends_to_try = []
 
         if is_kubernetes:
-            # GKE production: prioritize backends based on reliability
-            # 1. Try Kubernetes backend first (most reliable in GKE)
+            # Dev/prod: always prefer the Session Manager backend for consistent flow
             try:
-                from .bash_backend_kubernetes import KubernetesBashBackend
-                backends_to_try.append((
-                    lambda: KubernetesBashBackend(image_name="us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"),
-                    "Kubernetes backend"
-                ))
-            except ImportError:
-                logger.warning("Kubernetes backend not available")
-
-            # 2. Try Session Manager backend (if service is available)
-            try:
-                from .bash_backend_session_manager import SessionManagerBackend
+                from .execution.bash_backend_session_manager import SessionManagerBackend
                 manager_url = os.environ.get(
                     "BASH_SESSION_MANAGER_URL",
                     "http://bash-session-manager-service:8080"
@@ -151,8 +143,22 @@ class ToolUse:
                 ))
             except ImportError:
                 logger.warning("Session Manager backend not available")
+
+            # Optional fallback if session manager is unavailable
+            try:
+                from .execution.bash_backend_kubernetes import KubernetesBashBackend
+                backends_to_try.append((
+                    lambda: KubernetesBashBackend(image_name="us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"),
+                    "Kubernetes backend"
+                ))
+            except ImportError:
+                logger.warning("Kubernetes backend not available")
         else:
-            # Local development: use Docker backend
+            # Local development: build docker image and use Docker backend
+            try:
+                self._ensure_custom_image()
+            except Exception as e:
+                logger.warning(f"Failed to prebuild Docker image: {e}. Will retry on first session.")
             backends_to_try.append((
                 self._create_docker_backend,
                 "Docker backend"
@@ -176,7 +182,7 @@ class ToolUse:
     
     def _create_docker_backend(self):
         """Create Docker backend with image building support."""
-        from .bash_backend_docker import DockerBashBackend
+        from .execution.bash_backend_docker import DockerBashBackend
         backend = DockerBashBackend(
             image_name="leanworks-bash-session:latest",
             ensure_image_fn=self._ensure_custom_image
@@ -276,7 +282,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -470,7 +477,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -509,7 +517,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -553,7 +562,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -590,7 +600,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -627,7 +638,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
 
@@ -664,7 +676,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
 
@@ -701,7 +714,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
 
@@ -740,7 +754,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
 
@@ -777,7 +792,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
 
@@ -1972,8 +1988,8 @@ EOF"""
         """
         if self._large_response_vectordb_client is None:
             try:
-                from leanworks.rag.vectordb import PineconeHybridIndex
                 from leanworks.rag.embedding import GoogleEmbedding
+                from leanworks.rag.vectordb_client import create_vectordb_client, use_gcp_vector_search
                 from leanworks.setting import LARGE_RESPONSE_CONFIG
                 import os
                 
@@ -1983,6 +1999,11 @@ EOF"""
                 
                 if not large_response_config.get("use_large_response_indexes", False):
                     logger.debug("Large response indexes are disabled in configuration")
+                    self._large_response_vectordb_client = False
+                    return None
+
+                if use_gcp_vector_search():
+                    logger.info("Large response indexes are not used with GCP Vector Search; falling back to default RAG storage.")
                     self._large_response_vectordb_client = False
                     return None
                 
@@ -2003,11 +2024,12 @@ EOF"""
                 embedding_client = GoogleEmbedding(self.project_id)
                 
                 # Create vectordb client for large responses
-                vectordb_client = PineconeHybridIndex(
-                    pinecone_key=pinecone_key,
+                vectordb_client = create_vectordb_client(
                     embedding_model_client=embedding_client,
+                    pinecone_key=pinecone_key,
+                    gcp_credential_path=self.credential_path,
                     chunk_size=config.get("rag_chunk_size", 512),
-                    chunk_overlap=config.get("rag_chunk_overlap", 128)
+                    chunk_overlap=config.get("rag_chunk_overlap", 128),
                 )
                 
                 # Load or create large response indexes
@@ -2017,12 +2039,13 @@ EOF"""
                 sparse_dimension = large_response_config.get("sparse_dimension", 30000)
                 
                 logger.info(f"Loading or creating large response indexes: {dense_name}, {sparse_name}")
-                vectordb_client.load_or_create_hybrid_index(
-                    dense_index_name=dense_name,
-                    sparse_index_name=sparse_name,
-                    dense_dimension=dense_dimension,
-                    sparse_dimension=sparse_dimension
-                )
+                if hasattr(vectordb_client, "load_or_create_hybrid_index"):
+                    vectordb_client.load_or_create_hybrid_index(
+                        dense_index_name=dense_name,
+                        sparse_index_name=sparse_name,
+                        dense_dimension=dense_dimension,
+                        sparse_dimension=sparse_dimension,
+                    )
                 
                 self._large_response_vectordb_client = vectordb_client
                 logger.info("Large response vectordb client initialized successfully")

@@ -5,6 +5,7 @@ from google.cloud import storage, bigquery
 from datetime import datetime, timedelta
 import json
 import re
+from leanworks.utils.env import get_storage_bucket, resolve_credential_path
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ class GCPTool:
     """
 
     def __init__(self, storage_client, bigquery_client, org_slug: str,
-                 bucket_name: str = "leanworks-prod", credential_path: str = "gcp_credential.json"):
+                 bucket_name: Optional[str] = None, credential_path: Optional[str] = None):
         """
         Initialize GCPTool with Cloud Storage and BigQuery clients.
 
@@ -26,14 +27,14 @@ class GCPTool:
             storage_client: Google Cloud Storage client instance
             bigquery_client: Google Cloud BigQuery client instance
             org_slug: Organization slug (e.g., 'leanworks.ai')
-            bucket_name: GCS bucket name (default: 'leanworks-prod')
-            credential_path: Path to GCP credential JSON file
+            bucket_name: GCS bucket name (default: environment-aware)
+            credential_path: Path to GCP credential JSON file (default: environment-aware)
         """
         self.storage_client = storage_client
         self.bigquery_client = bigquery_client
         self.org_slug = org_slug
-        self.bucket_name = bucket_name
-        self.credential_path = credential_path
+        self.bucket_name = bucket_name or get_storage_bucket()
+        self.credential_path = credential_path or resolve_credential_path()
 
         # Image URL expiration time (default: 1 year)
         self.image_url_expiration_days = 365

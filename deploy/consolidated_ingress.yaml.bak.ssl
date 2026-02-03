@@ -4,8 +4,8 @@ metadata:
   name: consolidated-ingress
   annotations:
     kubernetes.io/ingress.class: "gce"
-    kubernetes.io/ingress.global-static-ip-name: "leanworks-dev-hub-ip"
-    networking.gke.io/managed-certificates: "dev-leanworks-ai-ssl-cert"
+    kubernetes.io/ingress.global-static-ip-name: "leanworks-hub-ip"
+    networking.gke.io/managed-certificates: "leanworks-hub-ssl-cert"
     kubernetes.io/ingress.allow-http: "false"
     kubernetes.io/ingress.backend-config: '{"default": "ingress-backendconfig"}'
 spec:

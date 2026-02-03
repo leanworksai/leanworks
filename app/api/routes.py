@@ -382,7 +382,7 @@ async def ask():
         if tools is not None:
             try:
                 logger.info(f"Available tools from PostgreSQL integrations: {available_tools}")
-                
+
                 # Filter tools to only include those enabled in PostgreSQL integrations table
                 filtered_tools = []
                 for tool in tools:
@@ -391,17 +391,22 @@ async def ask():
                         logger.info(f"Tool '{tool}' is enabled in PostgreSQL integrations")
                     else:
                         logger.warning(f"Tool '{tool}' is not found in PostgreSQL integrations table, skipping")
-                
+
                 logger.info(f"Filtered tools: {filtered_tools}")
             except Exception as e:
                 logger.error(f"Error filtering tools against PostgreSQL integrations: {str(e)}")
                 # If there's an error filtering, use original tools
                 filtered_tools = tools
         else:
-            filtered_tools = None
+            # When no tools are explicitly requested, always use default internal tools
+            # This ensures basic functionality is available even without external integrations
+            filtered_tools = None  # None triggers default internal tools in ToolUse
         
         # Log tools being used
-        logger.info(f"Ask API - Tools being used: {json.dumps(filtered_tools if filtered_tools else available_tools, default=str)}")
+        if filtered_tools is None:
+            logger.info("Ask API - Tools being used: Default internal tools (no external tools specified)")
+        else:
+            logger.info(f"Ask API - Tools being used: {json.dumps(filtered_tools, default=str)}")
         print(f"Filtered tools: {filtered_tools}")
         
         # Web app now sends HTML positions directly - no conversion needed

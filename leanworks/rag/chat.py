@@ -1,4 +1,3 @@
-from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
 from leanworks.agent.core.memory import MemoryManager
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     """
-    Chat class for retrieving context from Pinecone and generating responses using OpenAI.
+    Chat class for retrieving context from vector search and generating responses.
     Provides synchronous functionality for RAG operations.
     """
     def __init__(
@@ -33,7 +32,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         Initialize Chat with vector database client and memory management.
         
         Args:
-            vectordb_client: Initialized PineconeHybridIndex client for hybrid search
+            vectordb_client: Initialized vector DB client for hybrid search
             firestore_client: Firestore client for memory persistence
             org_slug: Organization name for Firestore path
             model_client: Initialized OpenAI client for LLM generation
@@ -185,7 +184,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             search_namespace = namespace if namespace is not None else (self.org_slug if self.org_slug else "")
             
             for q in queries:
-                # Use hybrid search from PineconeHybridIndex
+                # Use hybrid search from vector DB client
                 hybrid_results = self.vectordb_client.hybrid_search(
                     query=q,
                     top_k=top_k,
@@ -194,13 +193,15 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                     filter=filters
                 )
                 
-                # Convert hybrid search results to match Pinecone response format
-                for result in hybrid_results:
-                    # Create match object with same structure as Pinecone response
+                # Convert hybrid search results to match response format
+                for rank, result in enumerate(hybrid_results):
+                    combined_score = result.get("combined_score")
+                    if not isinstance(combined_score, (int, float)):
+                        combined_score = 1.0 / (rank + 1)
                     match = SimpleNamespace(
-                        id=result['id'],
-                        score=result['combined_score'],  # Use combined hybrid score
-                        metadata=result['metadata']
+                        id=result["id"],
+                        score=combined_score,
+                        metadata=result["metadata"],
                     )
                     all_matches.append(match)
                 

@@ -8,8 +8,19 @@ set -e
 # Deploys to Google Kubernetes Engine (GKE) Autopilot cluster
 # Multi-tenant: Single deployment serves all clients (client determined at runtime)
 #
-# Usage: ./deploy/deploy.sh
-# Example: ./deploy/deploy.sh
+# Prerequisites:
+# - Service account with the following roles:
+#   * Artifact Registry Administrator/Repository Administrator
+#   * Cloud Build Service Account
+#   * Kubernetes Engine Admin
+#   * Secret Manager Admin
+#   * Storage Admin
+#   * Compute Network Admin (for static IP creation)
+#   * Service Usage Admin (for enabling APIs)
+#
+# Usage: ./deploy.sh [environment]
+# Example: ./deploy.sh dev
+# Example: ./deploy.sh prod
 
 # Load environment variables from .env file (optional)
 if [ -f .env ]; then
@@ -18,23 +29,45 @@ if [ -f .env ]; then
 fi
 
 # ---------------------------
+# Environment selection
+# ---------------------------
+
+ENVIRONMENT=${1:-prod}
+if [ "$ENVIRONMENT" != "prod" ] && [ "$ENVIRONMENT" != "dev" ]; then
+    echo "Invalid environment: $ENVIRONMENT"
+    echo "Usage: ./deploy/deploy.sh [dev|prod]"
+    exit 1
+fi
+
+if [ "$ENVIRONMENT" = "dev" ]; then
+    CREDENTIAL_FILE="gcp_credential_dev.json"
+    CLUSTER_NAME="leanworks-dev"
+    STATIC_IP_NAME="leanworks-dev-hub-ip"
+    CLIENT_DOMAIN="dev.leanworks.ai"
+else
+    CREDENTIAL_FILE="gcp_credential.json"
+    CLUSTER_NAME="leanworks-prod"
+    STATIC_IP_NAME="leanworks-hub-ip"
+    CLIENT_DOMAIN="leanworks.ai"
+fi
+
+# ---------------------------
 # Authenticate with Service Account
 # ---------------------------
 
-# Use service account from gcp_credential.json for all operations
-if [ ! -f "gcp_credential.json" ]; then
-    echo "Error: gcp_credential.json not found."
-    echo "Please ensure gcp_credential.json exists in the project root."
+if [ ! -f "$CREDENTIAL_FILE" ]; then
+    echo "Error: $CREDENTIAL_FILE not found."
+    echo "Please ensure the credential file exists in the project root."
     exit 1
 fi
 
 # Authenticate using the service account
-echo "Authenticating with service account from gcp_credential.json..."
-gcloud auth activate-service-account --key-file=gcp_credential.json --quiet
+echo "Authenticating with service account from $CREDENTIAL_FILE..."
+gcloud auth activate-service-account --key-file="$CREDENTIAL_FILE" --quiet
 
 # Get project ID from credentials
-PROJECT_ID=$(jq -r '.project_id' gcp_credential.json)
-DEPLOYMENT_SA=$(jq -r '.client_email' gcp_credential.json)
+PROJECT_ID=$(jq -r '.project_id' "$CREDENTIAL_FILE")
+DEPLOYMENT_SA=$(jq -r '.client_email' "$CREDENTIAL_FILE")
 
 echo "Using service account: $DEPLOYMENT_SA"
 echo "Project ID: $PROJECT_ID"
@@ -49,15 +82,13 @@ gcloud config set project "$PROJECT_ID"
 # PROJECT_ID and DEPLOYMENT_SA are already set from authentication step above
 
 # GKE Cluster configuration
-CLUSTER_NAME="leanworks-prod"
 CLUSTER_REGION="us-west1" # Use REGION for regional clusters
 CLUSTER_ZONE="" # Use ZONE for zonal clusters (leave empty if using region)
 
 # Shared infrastructure (multi-tenant)
 # Static IP and domain are shared across all clients
 # Using the same IP and certificate as leanworks-hub
-STATIC_IP_NAME="leanworks-hub-ip"
-CLIENT_DOMAIN="leanworks.ai"  # Shared domain for all clients
+# Static IP and domain are environment-specific
 
 # Container Registry Configuration
 # Uses Artifact Registry (required for Cloud Build)
@@ -75,6 +106,9 @@ DEPLOY_DIR="deploy"
 
 # Kubernetes Deployment/Service YAML files
 DEPLOYMENT_YAML="$DEPLOY_DIR/deployment.yaml"
+if [ "$ENVIRONMENT" = "dev" ]; then
+    DEPLOYMENT_YAML="$DEPLOY_DIR/deployment-dev.yaml"
+fi
 SERVICE_YAML="$DEPLOY_DIR/service.yaml"
 # Note: Using shared certificate from leanworks-hub (leanworks-hub-ssl-cert)
 # Do not create a separate certificate - the ingress references the shared one
@@ -98,15 +132,30 @@ command_exists() {
 
 # Function to create static IP address if it doesn't exist
 create_static_ip() {
-    echo "Checking if static IP address $STATIC_IP_NAME exists..."
-    if ! gcloud compute addresses describe "$STATIC_IP_NAME" --global 2>/dev/null; then
-        echo "Creating static IP address: $STATIC_IP_NAME"
-        gcloud compute addresses create "$STATIC_IP_NAME" --global
-        
+    echo "Checking static IP address $STATIC_IP_NAME..."
+
+    # Try to describe the IP to check if it exists
+    if gcloud compute addresses describe "$STATIC_IP_NAME" --global --format="value(address)" 2>/dev/null; then
+        STATIC_IP=$(gcloud compute addresses describe "$STATIC_IP_NAME" --global --format="value(address)")
+        echo "✓ Static IP $STATIC_IP_NAME exists: $STATIC_IP"
+        return 0
+    fi
+
+    # Check if the failure was due to permission denied vs IP not existing
+    if gcloud compute addresses describe "$STATIC_IP_NAME" --global 2>&1 | grep -q "PERMISSION_DENIED\|permission"; then
+        echo "⚠️ Cannot check static IP status due to insufficient permissions."
+        echo "   Assuming $STATIC_IP_NAME exists (may have been created by leanworks-hub)."
+        echo "   Continuing with deployment..."
+        return 0
+    fi
+
+    # If we reach here, the IP doesn't exist and we have permissions, try to create it
+    echo "Creating static IP address: $STATIC_IP_NAME"
+    if gcloud compute addresses create "$STATIC_IP_NAME" --global 2>/dev/null; then
         # Get the IP address that was just created
         STATIC_IP=$(gcloud compute addresses describe "$STATIC_IP_NAME" --global --format="value(address)")
-        echo "Static IP created: $STATIC_IP"
-        
+        echo "✓ Static IP created: $STATIC_IP"
+
         # Update the ingress YAML with the new static IP name
         if [[ -n "$INGRESS_YAML" && -f "$INGRESS_YAML" ]]; then
             echo "Updating ingress config with new static IP name..."
@@ -118,23 +167,56 @@ create_static_ip() {
             rm "${INGRESS_YAML}.bak"
         fi
     else
-        STATIC_IP=$(gcloud compute addresses describe "$STATIC_IP_NAME" --global --format="value(address)")
-        echo "Static IP $STATIC_IP_NAME already exists: $STATIC_IP"
+        echo "❌ Failed to create static IP $STATIC_IP_NAME"
+        echo "   This may be due to insufficient permissions or the IP already exists."
+        echo "   The deployment may still work if the IP was pre-created by an administrator."
+        echo "   Continuing with deployment..."
+        return 1
     fi
 }
 
 # Function to update ingress host with shared domain
 update_ingress_host() {
     if [[ -n "$INGRESS_YAML" && -f "$INGRESS_YAML" ]]; then
-        echo "Using shared domain: $CLIENT_DOMAIN"
-        # Ingress YAML already has the correct domain configured
-        # No need to update if it matches
-        if ! grep -q "host: \"$CLIENT_DOMAIN\"" "$INGRESS_YAML"; then
-            echo "Updating ingress host with shared domain: $CLIENT_DOMAIN"
-            cp "$INGRESS_YAML" "${INGRESS_YAML}.bak.domain"
-            sed -i "" "s/host: \".*\"/host: \"$CLIENT_DOMAIN\"/" "$INGRESS_YAML"
-            echo "Ingress host updated to $CLIENT_DOMAIN"
+        if [ "$ENVIRONMENT" = "dev" ]; then
+            DEV_DOMAIN="dev.leanworks.ai"
+            echo "Using dev domain: $DEV_DOMAIN"
+            # Verify dev domain is in ingress YAML
+            if ! grep -q "host: \"$DEV_DOMAIN\"" "$INGRESS_YAML"; then
+                echo "Warning: Dev domain $DEV_DOMAIN not found in ingress YAML"
+            fi
+        else
+            CLIENT_DOMAIN="leanworks.ai"
+            echo "Using prod domain: $CLIENT_DOMAIN"
         fi
+    fi
+}
+
+# Function to update ingress certificate and static IP based on environment
+update_ingress_ssl_config() {
+    if [[ -n "$INGRESS_YAML" && -f "$INGRESS_YAML" ]]; then
+        if [ "$ENVIRONMENT" = "dev" ]; then
+            CERT_NAME="dev-leanworks-ai-ssl-cert"
+            STATIC_IP_NAME="leanworks-dev-hub-ip"
+            echo "Using dev SSL certificate: $CERT_NAME"
+            echo "Using dev static IP: $STATIC_IP_NAME"
+        else
+            CERT_NAME="leanworks-hub-ssl-cert"
+            STATIC_IP_NAME="leanworks-hub-ip"
+            echo "Using prod SSL certificate: $CERT_NAME"
+            echo "Using prod static IP: $STATIC_IP_NAME"
+        fi
+
+        # Backup the original YAML
+        cp "$INGRESS_YAML" "${INGRESS_YAML}.bak.ssl"
+
+        # Update certificate annotation
+        sed -i "" "s/networking.gke.io\/managed-certificates: \".*\"/networking.gke.io\/managed-certificates: \"$CERT_NAME\"/" "$INGRESS_YAML"
+
+        # Update static IP annotation
+        sed -i "" "s/kubernetes.io\/ingress.global-static-ip-name: \".*\"/kubernetes.io\/ingress.global-static-ip-name: \"$STATIC_IP_NAME\"/" "$INGRESS_YAML"
+
+        echo "Updated ingress SSL configuration for $ENVIRONMENT environment"
     fi
 }
 
@@ -190,20 +272,24 @@ configure_kubectl() {
 # Function to enable required APIs
 enable_required_apis() {
     echo "Enabling required Google Cloud APIs..."
-    
+
     REQUIRED_APIS=(
         "cloudbuild.googleapis.com"
         "secretmanager.googleapis.com"
         "artifactregistry.googleapis.com"
         "container.googleapis.com"
     )
-    
+
     for api in "${REQUIRED_APIS[@]}"; do
         echo "Enabling $api..."
-        gcloud services enable "$api" --project="$PROJECT_ID"
+        if gcloud services enable "$api" --project="$PROJECT_ID" 2>/dev/null; then
+            echo "✓ $api enabled successfully"
+        else
+            echo "⚠️ Failed to enable $api (may already be enabled or insufficient permissions)"
+        fi
     done
-    
-    echo "All required APIs enabled."
+
+    echo "API enable check completed."
 }
 
 # Function to build and push Docker image using Cloud Build (default method)
@@ -215,13 +301,10 @@ build_and_push_cloud_build() {
     echo "You will see real-time build progress below..."
     
     # Submit build to Cloud Build
-    # Format service account for Cloud Build (needs full resource path)
-    CLOUDBUILD_SA="projects/$PROJECT_ID/serviceAccounts/$DEPLOYMENT_SA"
-    
+    # Use deployment SA for Cloud Build (same account)
     if gcloud beta builds submit \
         --config deploy/cloudbuild.yaml \
         --substitutions _IMAGE_TAG="$IMAGE_TAG",_IMAGE_NAME="$IMAGE_NAME",_REGISTRY="$REGISTRY",_REPO_NAME="$REPO_NAME" \
-        --service-account="$CLOUDBUILD_SA" \
         --project="$PROJECT_ID" \
         --region="$CLUSTER_REGION"; then
         echo "Cloud Build completed successfully!"
@@ -301,6 +384,9 @@ deploy_session_manager() {
     
     RBAC_YAML="$DEPLOY_DIR/bash-session-manager-rbac.yaml"
     DEPLOYMENT_YAML_SM="$DEPLOY_DIR/bash-session-manager-deployment.yaml"
+    if [ "$ENVIRONMENT" = "dev" ]; then
+        DEPLOYMENT_YAML_SM="$DEPLOY_DIR/bash-session-manager-deployment-dev.yaml"
+    fi
     SERVICE_YAML_SM="$DEPLOY_DIR/bash-session-manager-service.yaml"
     CRONJOB_YAML="$DEPLOY_DIR/bash-session-cleanup-cronjob.yaml"
     
@@ -449,14 +535,17 @@ apply_kubernetes_yaml() {
 # ---------------------------
 
 # Check if required commands are available
+echo "Checking required tools..."
 for cmd in gcloud kubectl jq yq; do
     if ! command_exists "$cmd"; then
-        echo "Error: $cmd is not installed. Please install it before running this script."
+        echo "❌ Error: $cmd is not installed. Please install it before running this script."
         exit 1
     fi
 done
+echo "✓ All required tools are available"
 
-# Enable required Google Cloud APIs
+# Enable required Google Cloud APIs (may fail if insufficient permissions)
+echo ""
 enable_required_apis
 
 # Create Artifact Registry repository (if using Artifact Registry)
@@ -469,6 +558,9 @@ create_static_ip
 
 # Verify ingress host matches shared domain
 update_ingress_host
+
+# Update ingress SSL configuration for environment
+update_ingress_ssl_config
 
 # Check if GKE cluster exists
 echo "Checking if GKE cluster $CLUSTER_NAME exists..."
@@ -536,4 +628,3 @@ echo "   curl http://localhost:8080/health"
 echo ""
 echo "Note: Client is determined at runtime from user_id"
 echo "=========================================="
-
