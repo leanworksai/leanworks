@@ -94,7 +94,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Initialize data source formatter
         self.data_source_formatter = DataSourceFormatter()
-            
+
         logger.info("RAG system initialized successfully")
 
     def _extract_timestamp_from_context(self, context_text: str) -> str:
@@ -152,7 +152,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         return None
 
-    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA, namespace: str = None) -> SimpleNamespace:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA, namespace: str = None, collection_scope: str = "all") -> SimpleNamespace:
         """
         Retrieve relevant context using hybrid search for one or multiple queries.
 
@@ -190,7 +190,8 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                     top_k=top_k,
                     alpha=alpha,
                     namespace=search_namespace,
-                    filter=filters
+                    filter=filters,
+                    collection_scope=collection_scope
                 )
                 
                 # Convert hybrid search results to match response format

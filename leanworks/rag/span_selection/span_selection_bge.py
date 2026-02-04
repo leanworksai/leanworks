@@ -186,7 +186,7 @@ class BGESpanSelector(BaseSpanSelector):
             
             # Step 4: Score spans with BGE
             span_scores = self._score_spans_with_bge(query, all_span_candidates)
-            
+
             # Step 5: Select top spans and group by document
             selected_spans_by_doc = self._select_top_spans_by_document(
                 span_scores, all_span_candidates, doc_span_mapping
@@ -666,6 +666,7 @@ class BGESpanSelector(BaseSpanSelector):
         
         logger.debug(f"Selected spans for {len(selected_spans_by_doc)} documents")
         return selected_spans_by_doc
+
     
     def _update_documents_with_spans(
         self, 

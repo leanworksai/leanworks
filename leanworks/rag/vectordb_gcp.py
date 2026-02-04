@@ -53,9 +53,10 @@ GCP_VECTOR_SEARCH_HYBRID_DENSE_WEIGHT = float(os.getenv("GCP_VECTOR_SEARCH_HYBRI
 GCP_VECTOR_SEARCH_HYBRID_TEXT_WEIGHT = float(os.getenv("GCP_VECTOR_SEARCH_HYBRID_TEXT_WEIGHT", "0.4"))
 
 # Collection names
-GCP_VECTOR_SEARCH_COLLECTION_TEXT = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_TEXT", "leanworks-text")
-GCP_VECTOR_SEARCH_COLLECTION_IMAGE = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_IMAGE", "leanworks-image")
+GCP_VECTOR_SEARCH_COLLECTION_TEXT = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_TEXT", "leanworks-multimodal")
+GCP_VECTOR_SEARCH_COLLECTION_IMAGE = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_IMAGE", "leanworks-image")  # Reserved for future use - current architecture uses multimodal text collection
 GCP_VECTOR_SEARCH_COLLECTION_CODES = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_CODES", "leanworks-codes")
+GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES = os.getenv("GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES", "leanworks-tool-responses")
 
 # Error handling settings
 MAX_RETRIES = 3
@@ -66,19 +67,23 @@ EXPONENTIAL_BACKOFF_MULTIPLIER = 2
 def retry_on_error(max_retries: int = MAX_RETRIES, delay: int = RETRY_DELAY):
     """Decorator for retrying operations on errors."""
     def decorator(func):
-        def wrapper(*args, **kwargs):
+        def wrapper(instance, *args, **kwargs):
             last_error = None
             for attempt in range(max_retries):
                 try:
-                    return func(*args, **kwargs)
+                    return func(instance, *args, **kwargs)
                 except Exception as e:
                     last_error = e
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 1 and instance._is_retryable_error(e):
                         wait_time = delay * (EXPONENTIAL_BACKOFF_MULTIPLIER ** attempt)
                         logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        logger.error(f"All {max_retries} attempts failed. Last error: {e}")
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Attempt {attempt + 1} failed: {e}. Not retryable, failing immediately.")
+                        else:
+                            logger.error(f"All {max_retries} attempts failed. Last error: {e}")
+                        raise e
             raise last_error
         return wrapper
     return decorator
@@ -115,6 +120,7 @@ class GCPVectorSearchIndex:
         self.chunk_overlap = chunk_overlap
         self.project_id = self._resolve_project_id()
         self._tokenizer = tiktoken.get_encoding("o200k_base")
+        self._unavailable_collections = set()
 
         self._init_gcp_clients()
 
@@ -147,6 +153,17 @@ class GCPVectorSearchIndex:
         error_str = str(error).lower()
         error_type = type(error).__name__.lower()
 
+        # Non-retryable errors (fail immediately)
+        non_retryable_conditions = [
+            "not found" in error_str,
+            "404" in error_str,
+            "does not exist" in error_str,
+        ]
+
+        if any(non_retryable_conditions):
+            return False
+
+        # Retryable errors
         retryable_conditions = [
             "timeout" in error_str,
             "timeout" in error_type,
@@ -162,6 +179,17 @@ class GCPVectorSearchIndex:
         ]
 
         return any(retryable_conditions)
+
+    def _is_not_found_error(self, error: Exception) -> bool:
+        """Check if an error indicates a missing collection/resource."""
+        error_str = str(error).lower()
+        not_found_conditions = [
+            "not found" in error_str,
+            "404" in error_str,
+            "does not exist" in error_str,
+        ]
+        return any(not_found_conditions)
+
 
     def _format_exception_details(self, exception: Exception) -> str:
         """Format exception details for better error reporting."""
@@ -264,6 +292,78 @@ class GCPVectorSearchIndex:
             return clauses[0]
         return {"$and": clauses}
 
+    def _flatten_logical_filter(self, filter_expr: Dict[str, Any]) -> Dict[str, Any]:
+        """Flatten nested $and/$or blocks where possible."""
+        if not isinstance(filter_expr, dict):
+            return filter_expr
+        if "$and" in filter_expr:
+            clauses = []
+            for clause in filter_expr.get("$and", []):
+                clause = self._flatten_logical_filter(clause)
+                if isinstance(clause, dict) and "$and" in clause and len(clause) == 1:
+                    clauses.extend(clause.get("$and", []))
+                else:
+                    clauses.append(clause)
+            return {"$and": clauses}
+        if "$or" in filter_expr:
+            clauses = []
+            for clause in filter_expr.get("$or", []):
+                clause = self._flatten_logical_filter(clause)
+                if isinstance(clause, dict) and "$or" in clause and len(clause) == 1:
+                    clauses.extend(clause.get("$or", []))
+                else:
+                    clauses.append(clause)
+            return {"$or": clauses}
+        return filter_expr
+
+    def _logical_depth(self, filter_expr: Dict[str, Any]) -> int:
+        """Compute logical operator nesting depth."""
+        if not isinstance(filter_expr, dict):
+            return 0
+        if "$and" in filter_expr:
+            clauses = filter_expr.get("$and", [])
+            return 1 + max((self._logical_depth(c) for c in clauses), default=0)
+        if "$or" in filter_expr:
+            clauses = filter_expr.get("$or", [])
+            return 1 + max((self._logical_depth(c) for c in clauses), default=0)
+        return 0
+
+    def _collect_leaf_filters(self, filter_expr: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect non-logical filter clauses from a nested filter."""
+        if not isinstance(filter_expr, dict):
+            return []
+        if "$and" in filter_expr or "$or" in filter_expr:
+            op = "$and" if "$and" in filter_expr else "$or"
+            leaves: List[Dict[str, Any]] = []
+            for clause in filter_expr.get(op, []):
+                leaves.extend(self._collect_leaf_filters(clause))
+            return leaves
+        return [filter_expr]
+
+    def _normalize_filter_expression(self, filter_expr: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Normalize filter expression to comply with Vertex filter constraints."""
+        if not filter_expr:
+            return None
+        normalized = self._flatten_logical_filter(filter_expr)
+        depth = self._logical_depth(normalized)
+        if depth <= 2:
+            return normalized
+        logger.warning(
+            "Filter expression nesting depth %s exceeds Vertex limits; "
+            "flattening to top-level logical clauses.",
+            depth,
+        )
+        root_op = None
+        if isinstance(normalized, dict):
+            if "$and" in normalized:
+                root_op = "$and"
+            elif "$or" in normalized:
+                root_op = "$or"
+        leaf_filters = self._collect_leaf_filters(normalized)
+        if not leaf_filters:
+            return None
+        return {root_op or "$and": leaf_filters}
+
     def _init_gcp_clients(self):
         """Initialize GCP Vector Search clients."""
         if vectorsearch_v1beta is None:
@@ -311,8 +411,6 @@ class GCPVectorSearchIndex:
 
     def _build_collection_schemas(self, collection_name: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Build data and vector schemas for a collection."""
-        vector_dimensions = self._get_vector_dimensions_for_collection(collection_name)
-
         data_schema = {
             "type": "object",
             "properties": {
@@ -321,6 +419,7 @@ class GCPVectorSearchIndex:
                 "chunk_text": {"type": "string"},
                 "org_slug": {"type": "string"},
                 "type": {"type": "string"},
+                "tool_name": {"type": "string"},
                 "data_source": {"type": "string"},
                 "vector_type": {"type": "string"},
                 "timestamp": {"type": "number"},
@@ -328,13 +427,29 @@ class GCPVectorSearchIndex:
             },
         }
 
-        vector_schema = {
-            "embedding": vectorsearch_v1beta.VectorField(
-                dense_vector=vectorsearch_v1beta.DenseVectorField(
-                    dimensions=vector_dimensions
+        # Multimodal text collection uses named text/image vector fields
+        if collection_name == GCP_VECTOR_SEARCH_COLLECTION_TEXT:
+            vector_schema = {
+                "text_embedding": vectorsearch_v1beta.VectorField(
+                    dense_vector=vectorsearch_v1beta.DenseVectorField(
+                        dimensions=DEFAULT_EMBEDDING_DIMENSION
+                    )
+                ),
+                "image_embedding": vectorsearch_v1beta.VectorField(
+                    dense_vector=vectorsearch_v1beta.DenseVectorField(
+                        dimensions=DEFAULT_IMAGE_EMBEDDING_DIMENSION
+                    )
+                ),
+            }
+        else:
+            vector_dimensions = self._get_vector_dimensions_for_collection(collection_name)
+            vector_schema = {
+                "embedding": vectorsearch_v1beta.VectorField(
+                    dense_vector=vectorsearch_v1beta.DenseVectorField(
+                        dimensions=vector_dimensions
+                    )
                 )
-            )
-        }
+            }
 
         return data_schema, vector_schema
 
@@ -460,6 +575,7 @@ class GCPVectorSearchIndex:
             "chunk_text",
             "org_slug",
             "type",
+            "tool_name",
             "data_source",
             "vector_type",
             "timestamp",
@@ -485,13 +601,23 @@ class GCPVectorSearchIndex:
         data["metadata_json"] = json.dumps(metadata or {}, ensure_ascii=True, default=str)
 
         data_object_id = self._normalize_data_object_id(chunk_id)
-        data_object = vectorsearch_v1beta.DataObject(
-            data=data,
-            vectors={
+        collection_name = self._determine_collection_name_from_metadata(metadata)
+        if collection_name == GCP_VECTOR_SEARCH_COLLECTION_TEXT:
+            vectors = {
+                "text_embedding": vectorsearch_v1beta.Vector(
+                    dense=vectorsearch_v1beta.DenseVector(values=dense_embedding)
+                )
+            }
+        else:
+            vectors = {
                 "embedding": vectorsearch_v1beta.Vector(
                     dense=vectorsearch_v1beta.DenseVector(values=dense_embedding)
                 )
-            },
+            }
+
+        data_object = vectorsearch_v1beta.DataObject(
+            data=data,
+            vectors=vectors,
         )
 
         return {
@@ -591,6 +717,7 @@ class GCPVectorSearchIndex:
         alpha: float = 0.5,
         namespace: str = "",
         filter: Optional[Dict[str, Any]] = None,
+        collection_scope: str = "all",  # "all", "docs", "codes", "tool_responses"
     ) -> List[Dict[str, Any]]:
         """
         Perform hybrid search matching Pinecone API signature.
@@ -610,7 +737,27 @@ class GCPVectorSearchIndex:
                 [filter_expr, {"type": {"$ne": "tool_response"}}]
             )
 
-        collection_name = self._determine_collection_for_namespace(namespace)
+        # Determine which collections to search based on collection_scope
+        if collection_scope == "docs":
+            # Docs scope includes text and images (multimodal collection)
+            collections_to_search = [GCP_VECTOR_SEARCH_COLLECTION_TEXT]
+        elif collection_scope == "codes":
+            collections_to_search = [GCP_VECTOR_SEARCH_COLLECTION_CODES]
+        elif collection_scope == "tool_responses":
+            collections_to_search = [GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES]
+        elif collection_scope == "all":
+            collections_to_search = [
+                GCP_VECTOR_SEARCH_COLLECTION_TEXT,  # includes both text and images
+                GCP_VECTOR_SEARCH_COLLECTION_CODES,
+                GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES,
+            ]
+        else:
+            # Default to all collections
+            collections_to_search = [
+                GCP_VECTOR_SEARCH_COLLECTION_TEXT,
+                GCP_VECTOR_SEARCH_COLLECTION_CODES,
+                GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES,
+            ]
 
         output_fields = {
             "data_fields": [
@@ -630,7 +777,9 @@ class GCPVectorSearchIndex:
             {
                 "vector_search": {
                     "vector": {"values": query_embedding},
-                    "search_field": "embedding",
+                    "search_field": self._get_vector_search_field(
+                        collections_to_search[0] if len(collections_to_search) == 1 else GCP_VECTOR_SEARCH_COLLECTION_TEXT
+                    ),
                     "top_k": top_k * 2,
                     "filter": filter_expr,
                     "output_fields": output_fields,
@@ -646,21 +795,166 @@ class GCPVectorSearchIndex:
             },
         ]
 
-        response = self._execute_batch_search(
-            collection_name,
-            search_requests,
-            combine={
-                "ranker": {
-                    "rrf": {
-                        "weights": [alpha, 1.0 - alpha],
-                    }
-                },
-                "top_k": top_k,
-                "output_fields": output_fields,
-            },
-        )
+        if len(collections_to_search) == 1:
+            # Single collection search
+            collection_name = collections_to_search[0]
+            if collection_name in self._unavailable_collections:
+                return []
+            try:
+                response = self._execute_batch_search(
+                    collection_name,
+                    search_requests,
+                    combine={
+                        "ranker": {
+                            "rrf": {
+                                "weights": [alpha, 1.0 - alpha],
+                            }
+                        },
+                        "top_k": top_k,
+                        "output_fields": output_fields,
+                    },
+                )
+                return self._format_combined_results(response, local_filter_expr)
+            except Exception as e:
+                if self._is_not_found_error(e):
+                    self._unavailable_collections.add(collection_name)
+                    logger.warning(f"Failed to search collection {collection_name}: {str(e)}")
+                    return []
+                raise
+        else:
+            # Multi-collection parallel search
+            return self._search_multiple_collections(
+                query_embedding, query, top_k, alpha, filter_expr, collections_to_search
+            )
 
-        return self._format_combined_results(response, local_filter_expr)
+    def _search_multiple_collections(
+        self,
+        query_embedding: List[float],
+        query: str,
+        top_k: int,
+        alpha: float,
+        filter_expr: Optional[Dict],
+        collection_names: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Search multiple collections in parallel and merge with RRF."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def search_collection(collection_name: str) -> List[Dict[str, Any]]:
+            """Search a single collection and return formatted results."""
+            if collection_name in self._unavailable_collections:
+                return []
+            try:
+                vector_field = self._get_vector_search_field(collection_name)
+                output_fields = {
+                    "data_fields": [
+                        "chunk_id",
+                        "document_id",
+                        "chunk_text",
+                        "org_slug",
+                        "type",
+                        "data_source",
+                        "vector_type",
+                        "timestamp",
+                        "metadata_json",
+                    ]
+                }
+
+                search_requests = [
+                    {
+                        "vector_search": {
+                            "vector": {"values": query_embedding},
+                            "search_field": vector_field,
+                            "top_k": top_k * 2,
+                            "filter": filter_expr,
+                            "output_fields": output_fields,
+                        }
+                    },
+                    {
+                        "text_search": {
+                            "search_text": query,
+                            "data_field_names": ["chunk_text"],
+                            "top_k": top_k * 2,
+                            "output_fields": output_fields,
+                        }
+                    },
+                ]
+
+                response = self._execute_batch_search(
+                    collection_name,
+                    search_requests,
+                    combine={
+                        "ranker": {
+                            "rrf": {
+                                "weights": [alpha, 1.0 - alpha],
+                            }
+                        },
+                        "top_k": top_k,
+                        "output_fields": output_fields,
+                    },
+                )
+
+                results = self._format_combined_results(response, filter_expr)
+                # Add collection metadata to results
+                for result in results:
+                    result["_collection"] = collection_name
+                return results
+
+            except Exception as e:
+                if self._is_not_found_error(e):
+                    if collection_name not in self._unavailable_collections:
+                        logger.warning(f"Failed to search collection {collection_name}: {str(e)}")
+                        self._unavailable_collections.add(collection_name)
+                else:
+                    logger.warning(f"Failed to search collection {collection_name}: {str(e)}")
+                return []
+
+        # Execute searches in parallel
+        with ThreadPoolExecutor(max_workers=len(collection_names)) as executor:
+            futures = {executor.submit(search_collection, col): col
+                       for col in collection_names}
+
+            all_results = []
+            for future in futures:
+                try:
+                    results = future.result(timeout=30)  # 30 second timeout per collection
+                    all_results.extend(results)
+                except Exception as e:
+                    collection_name = futures[future]
+                    logger.error(f"Error getting results from collection {collection_name}: {str(e)}")
+
+        # Apply RRF merging across all collections
+        merged_results = self._merge_multi_collection_results(all_results, top_k)
+
+        logger.info(f"Multi-collection search completed: {len(collection_names)} collections, {len(merged_results)} final results")
+        return merged_results
+
+    def _merge_multi_collection_results(
+        self,
+        all_results: List[Dict[str, Any]],
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """Merge results from multiple collections using RRF."""
+        if not all_results:
+            return []
+
+        # Group by document ID and apply collection-level RRF
+        doc_groups = {}
+        for result in all_results:
+            doc_id = result.get("id")
+            if doc_id not in doc_groups:
+                doc_groups[doc_id] = []
+            doc_groups[doc_id].append(result)
+
+        # For each document, keep the highest scoring instance across collections
+        merged_by_doc = []
+        for doc_id, results in doc_groups.items():
+            # Sort by score within the document group and take the best
+            best_result = max(results, key=lambda x: x.get("combined_score", 0))
+            merged_by_doc.append(best_result)
+
+        # Sort by combined_score and limit to top_k
+        merged_by_doc.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
+        return merged_by_doc[:top_k]
 
     @retry_on_error()
     def _execute_batch_search(
@@ -766,9 +1060,10 @@ class GCPVectorSearchIndex:
 
         if not filters:
             return None
-        if len(filters) == 1:
-            return filters[0]
-        return {"$and": filters}
+        combined = filters[0] if len(filters) == 1 else {"$and": filters}
+        normalized = self._normalize_filter_expression(combined)
+        logger.info("Vertex filter expression: %s", normalized)
+        return normalized
 
     def _convert_pinecone_filter_to_gcp(self, filter_dict: Dict) -> Dict[str, Any]:
         """Convert Pinecone filter syntax to GCP filter expression."""
@@ -863,6 +1158,34 @@ class GCPVectorSearchIndex:
 
     def _determine_collection_name(self, data_objects: List[Dict]) -> str:
         """Determine which collection to use based on data object content."""
+        if not data_objects:
+            return GCP_VECTOR_SEARCH_COLLECTION_TEXT
+
+        first_obj = data_objects[0]
+        data_source = first_obj.get('data', {}).get('data_source', '')
+
+        # Route code sources to codes collection
+        if data_source in ["github_codes", "gitlab_codes"]:
+            return GCP_VECTOR_SEARCH_COLLECTION_CODES
+
+        # Route tool responses to dedicated collection
+        if first_obj.get('data', {}).get('type') == 'tool_response':
+            return GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES
+
+        # Route ALL other sources (including leanworks_image) to multimodal text collection
+        # The multimodal collection handles both text and image embeddings
+        return GCP_VECTOR_SEARCH_COLLECTION_TEXT
+
+    def _determine_collection_name_from_metadata(self, metadata: Dict[str, Any]) -> str:
+        """Determine collection name based on metadata fields."""
+        data_source = metadata.get("data_source", "")
+
+        if data_source in ["github_codes", "gitlab_codes"]:
+            return GCP_VECTOR_SEARCH_COLLECTION_CODES
+
+        if metadata.get("type") == "tool_response":
+            return GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES
+
         return GCP_VECTOR_SEARCH_COLLECTION_TEXT
 
     def _determine_collection_for_namespace(self, namespace: str) -> str:
@@ -874,6 +1197,12 @@ class GCPVectorSearchIndex:
         if "image" in collection_name:
             return DEFAULT_IMAGE_EMBEDDING_DIMENSION
         return DEFAULT_EMBEDDING_DIMENSION
+
+    def _get_vector_search_field(self, collection_name: str) -> str:
+        """Resolve vector field name for search."""
+        if collection_name == GCP_VECTOR_SEARCH_COLLECTION_TEXT:
+            return "text_embedding"
+        return "embedding"
 
     def _get_collection_path(self, collection_name: str) -> str:
         """Get full collection path."""
@@ -895,6 +1224,7 @@ class GCPVectorSearchIndex:
                 GCP_VECTOR_SEARCH_COLLECTION_TEXT,
                 GCP_VECTOR_SEARCH_COLLECTION_IMAGE,
                 GCP_VECTOR_SEARCH_COLLECTION_CODES,
+                GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES,
             ]
 
         for collection_name in collection_names:
