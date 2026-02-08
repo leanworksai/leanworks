@@ -127,7 +127,7 @@ class FilterExtractor:
             }
         filter_dict = {}
             
-        # Prepare filter dict for Pinecone
+        # Prepare filter dict for vector search
         if time_filters["start_timestamp"]:
             filter_dict["timestamp"] = {"$gte": time_filters["start_timestamp"]}
             logger.debug(f"Applied start timestamp filter: {time_filters['start_timestamp']}")

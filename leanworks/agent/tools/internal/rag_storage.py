@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from leanworks.rag.vectordb import UPSERT_BATCH_SIZE
+from leanworks.rag.vectordb_gcp import UPSERT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class RAGStorageTool:
         self.org_slug = org_slug
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.backend = getattr(vectordb_client, "backend", "pinecone")
+        self.backend = getattr(vectordb_client, "backend", "gcp")
         self.use_large_response_indexes = use_large_response_indexes
         
         # Set namespace based on index type

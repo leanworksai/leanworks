@@ -1,7 +1,7 @@
 """
 GCP Vector Search implementation (Vertex AI Vector Search).
 
-Provides a Pinecone-compatible hybrid_search API for Leanworks integration.
+Provides hybrid_search API for Leanworks integration.
 """
 
 import hashlib
@@ -46,6 +46,7 @@ DEFAULT_IMAGE_EMBEDDING_DIMENSION = 1408
 GCP_VECTOR_SEARCH_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "leanworks-474204")
 GCP_VECTOR_SEARCH_LOCATION = os.getenv("GCP_VECTOR_SEARCH_LOCATION", "us-central1")
 GCP_VECTOR_SEARCH_BATCH_SIZE = int(os.getenv("GCP_VECTOR_SEARCH_BATCH_SIZE", "100"))
+UPSERT_BATCH_SIZE = 100  # Batch size for upsert operations (e.g. in rag_storage)
 GCP_VECTOR_SEARCH_REQUEST_TIMEOUT = int(os.getenv("GCP_VECTOR_SEARCH_REQUEST_TIMEOUT", "60"))
 
 # Hybrid search weights (used only for RRF combine weights)
@@ -91,9 +92,9 @@ def retry_on_error(max_retries: int = MAX_RETRIES, delay: int = RETRY_DELAY):
 
 class GCPVectorSearchIndex:
     """
-    GCP Vector Search implementation replacing PineconeHybridIndex.
+    GCP Vector Search implementation.
 
-    Maintains a Pinecone-compatible hybrid_search API for Leanworks integration.
+    Provides hybrid_search API for Leanworks integration.
     """
 
     backend = "gcp"
@@ -720,7 +721,7 @@ class GCPVectorSearchIndex:
         collection_scope: str = "all",  # "all", "docs", "codes", "tool_responses"
     ) -> List[Dict[str, Any]]:
         """
-        Perform hybrid search matching Pinecone API signature.
+        Perform hybrid search.
 
         Returns list of dicts with id, metadata, combined_score.
         """
@@ -982,7 +983,7 @@ class GCPVectorSearchIndex:
         gcp_response,
         filter_expr: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Format combined results to match Pinecone output with fallback scores."""
+        """Format combined results with fallback scores."""
         if gcp_response is None:
             return []
 
@@ -1056,7 +1057,7 @@ class GCPVectorSearchIndex:
                 filters.append({"org_slug": {"$eq": namespace}})
 
         if filter_dict:
-            filters.append(self._convert_pinecone_filter_to_gcp(filter_dict))
+            filters.append(self._convert_metadata_filter_to_gcp(filter_dict))
 
         if not filters:
             return None
@@ -1065,8 +1066,8 @@ class GCPVectorSearchIndex:
         logger.info("Vertex filter expression: %s", normalized)
         return normalized
 
-    def _convert_pinecone_filter_to_gcp(self, filter_dict: Dict) -> Dict[str, Any]:
-        """Convert Pinecone filter syntax to GCP filter expression."""
+    def _convert_metadata_filter_to_gcp(self, filter_dict: Dict) -> Dict[str, Any]:
+        """Convert metadata filter dict to GCP filter expression."""
         if not filter_dict:
             return {}
 

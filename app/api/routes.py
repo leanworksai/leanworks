@@ -24,6 +24,7 @@ from app.services.client import (
 )
 from app.services.database import query_org_one, get_domain_from_email
 from app.utils.cache import clear_cache
+from app.api.plans_ai import setup_plans_ai_endpoints
 from leanworks.setting import MAX_IMAGES_PER_REQUEST, MAX_IMAGE_SIZE_MB, VISION_SUPPORTED_IMAGE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -1413,4 +1414,10 @@ async def clear_cache_endpoint():
     clear_cache()
     logger.info("All caches cleared")
     return {"status": "success", "message": "All caches cleared"}, 200
+
+# ============================================================================
+# PLANS AI ENDPOINTS
+# ============================================================================
+
+setup_plans_ai_endpoints(app)
 

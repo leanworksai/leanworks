@@ -393,10 +393,15 @@ print(response)
 
 ```python
 from leanworks.rag.chat import Chat
-from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.vectordb_client import create_vectordb_client
+from leanworks.rag.embedding import GoogleEmbedding
 
-# Initialize RAG
-vectordb = PineconeHybridIndex(index_name='myindex')
+# Initialize RAG (uses GCP Vector Search)
+embedding_client = GoogleEmbedding(gcp_credential_path="/path/to/credentials.json")
+vectordb = create_vectordb_client(
+    embedding_model_client=embedding_client,
+    gcp_credential_path="/path/to/credentials.json",
+)
 rag_chat = Chat(
     vectordb_client=vectordb,
     firestore_client=firestore_client,

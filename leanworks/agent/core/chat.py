@@ -13,6 +13,7 @@ from typing import Dict, Any, List
 import traceback
 import logging
 import pytz
+import time
 logger = logging.getLogger(__name__)
 
 class ChatAgent:
@@ -204,7 +205,7 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": all_tools,
-            "max_tokens": 8192,  # Increased from 1024 to support longer responses
+            "max_tokens": 16384,  # Increased from 8192 for document workflows
             "temperature": 0.1,
             "timeout": 60
         }
@@ -1353,15 +1354,17 @@ class ChatAgent:
                         for block in response.content
                     )
                     
-                    if stop_reason == "tool_use" and has_tool_calls:
-                        # Extract and stream tool execution
+                    # Check for tool calls FIRST (regardless of stop_reason)
+                    if has_tool_calls:
+                        # Execute tools regardless of stop_reason (tool_use, max_tokens, etc.)
+                        logger.info(f"Streaming: Executing tools (stop_reason={stop_reason})")
+                        
                         tool_calls = [
                             block for block in response.content 
                             if getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
                         ]
                         
-                        logger.info(f"Streaming: Executing {len(tool_calls)} tools")
-                        
+                        # Yield tool_start events
                         for tool_block in tool_calls:
                             tool_name = getattr(tool_block, 'name', 'unknown_tool')
                             
@@ -1394,9 +1397,70 @@ class ChatAgent:
                                 'memory_manager': self.memory_manager
                             }
                             return handler.handle(response, context)
-                        
-                        await loop.run_in_executor(None, execute_tools)
-                        
+
+                        # Execute tools in executor and wrap for asyncio coordination
+                        tool_future = loop.run_in_executor(None, execute_tools)
+                        tool_task = asyncio.wrap_future(tool_future)
+
+                        # Heartbeat loop to keep connection alive
+                        heartbeat_interval = 3.0  # seconds
+                        while not tool_future.done():
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(tool_task),
+                                    timeout=heartbeat_interval
+                                )
+                                break  # Task completed
+                            except asyncio.TimeoutError:
+                                # Task still running, emit heartbeat
+                                yield {
+                                    "type": "heartbeat",
+                                    "timestamp": time.time()
+                                }
+
+                        # Get result
+                        tool_results = await tool_task
+
+                        # After tools execute, check for document progress metadata
+                        for tool_block in tool_calls:
+                            tool_name = getattr(tool_block, 'name', 'unknown_tool')
+
+                            # Check if this is prepare_section_context (doc drafting workflow)
+                            if tool_name == "prepare_section_context":
+                                # Find corresponding tool result to extract progress
+                                for tool_result in tool_results:
+                                    try:
+                                        # Tool results have content that may be JSON with _progress
+                                        content = tool_result.get("content", "")
+                                        if isinstance(content, str) and content.strip().startswith("{"):
+                                            import json
+                                            result_data = json.loads(content)
+
+                                            if "_progress" in result_data:
+                                                progress = result_data["_progress"]
+                                                yield {
+                                                    "type": "doc_progress",
+                                                    "stage": "preparing",
+                                                    "current": progress["current"],
+                                                    "total": progress["total"],
+                                                    "heading": progress["heading"],
+                                                    "message": f"Preparing section {progress['current']} of {progress['total']}: {progress['heading']}"
+                                                }
+                                                break
+                                    except (json.JSONDecodeError, KeyError):
+                                        pass
+
+                            # Detect bash file append (section writing)
+                            elif tool_name == "bash":
+                                tool_input = getattr(tool_block, 'input', {})
+                                command = tool_input.get("command", "")
+                                if ">>" in command and ("/workspace/" in command or "working_doc" in command):
+                                    yield {
+                                        "type": "doc_progress",
+                                        "stage": "writing",
+                                        "message": "Writing section to document..."
+                                    }
+
                         # Yield tool_end events
                         for tool_block in tool_calls:
                             tool_name = getattr(tool_block, 'name', 'unknown_tool')
@@ -1417,11 +1481,18 @@ class ChatAgent:
                             
                             logger.debug(f"Streaming: Tool {tool_name} completed")
                         
-                        # Continue loop for next API call
-                        continue
+                        # After tool execution, check if we should continue or end
+                        if stop_reason in ["tool_use", "max_tokens"]:
+                            # Continue loop for more tool execution or to get continuation
+                            logger.info(f"Streaming: Continuing after tool execution (stop_reason={stop_reason})")
+                            continue
+                        else:
+                            # Other stop reasons after tool execution - end gracefully
+                            logger.info(f"Streaming: Ending after tool execution (stop_reason={stop_reason})")
+                            break
                     
-                    elif stop_reason == "end_turn" or not has_tool_calls:
-                        # Extract final text response
+                    elif stop_reason == "end_turn":
+                        # Text-only response - normal completion
                         text_content = next(
                             (block.text for block in response.content if block.type == "text"),
                             ""
@@ -1465,8 +1536,66 @@ class ChatAgent:
                         
                         break
                     
+                    elif stop_reason == "max_tokens":
+                        # max_tokens without tool calls - partial text response
+                        logger.warning("Streaming: max_tokens without tool calls - partial response")
+                        text_content = next(
+                            (block.text for block in response.content if block.type == "text"),
+                            ""
+                        )
+                        
+                        if text_content:
+                            # Add truncation indicator
+                            truncation_msg = "\n\n[Response truncated due to token limit. Please ask me to continue if you need more information.]"
+                            response_text = text_content + truncation_msg
+                            
+                            # Save to conversation
+                            self.conversation.add_assistant_message(response_text)
+                            
+                            # Stream the partial text
+                            words = text_content.split()
+                            current_chunk = ""
+                            
+                            for word in words:
+                                current_chunk += word + " "
+                                if len(current_chunk) > 20:
+                                    yield {
+                                        "type": "text_delta",
+                                        "text": current_chunk
+                                    }
+                                    current_chunk = ""
+                                    await asyncio.sleep(0.001)
+                            
+                            if current_chunk.strip():
+                                yield {
+                                    "type": "text_delta",
+                                    "text": current_chunk
+                                }
+                            
+                            # Stream truncation notice
+                            yield {
+                                "type": "text_delta",
+                                "text": truncation_msg
+                            }
+                            
+                            # Update memory manager
+                            if self.memory_manager:
+                                assistant_message_obj = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": response_text}]
+                                }
+                                self.memory_manager.update_assistant_response(assistant_message_obj)
+                        
+                        # End gracefully (conversation state is saved, user can continue)
+                        break
+                    
+                    elif stop_reason == "refusal":
+                        logger.warning("Streaming: Claude refused to respond")
+                        yield {"type": "error", "error": "Request was refused by the model"}
+                        break
+                    
                     else:
-                        # Unexpected stop reason
+                        # Truly unexpected stop reasons (rare)
                         logger.warning(f"Streaming: Unexpected stop_reason: {stop_reason}")
                         yield {
                             "type": "error",
@@ -1542,6 +1671,8 @@ class ChatAgent:
             "create_doc": "Creating a document",
             "update_doc": "Updating a document",
             "search_docs": "Searching documents",
+            "prepare_section_context": "Preparing document section",
+            "draft_document_iteratively": "Starting document workflow",
         }
         return descriptions.get(tool_name, f"Executing {tool_name}")
     

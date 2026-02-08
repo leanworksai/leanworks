@@ -383,15 +383,36 @@ class DocManagementTool(BaseAPIClient):
 
         IMPORTANT: This tool can only be called after get_create_doc_instruction, get_understand_doc_instruction, or get_update_doc_instruction tools.
 
+        **UPLOADED FILE PREVIEW BEHAVIOR:**
+        For uploaded files, the returned data contains limited preview information:
+
+        1. **Excel/CSV files** (docType='xlsx' or 'csv'):
+           - fileMetadata.previewData: TRUNCATED preview (first 100 rows × 20 columns only)
+           - content: Plain text extraction for search indexing
+           - storagePath: Path to the full file in GCS
+
+        2. **PowerPoint files** (docType='pptx'):
+           - content: Plain text extraction only (no formatting, layout, or images)
+           - fileMetadata.layoutJson: Structured slide data (but limited for complex presentations)
+           - storagePath: Path to original PPTX file in GCS
+           - fileMetadata.pdfStoragePath: Path to converted PDF (if conversion succeeded)
+
+        If you need the FULL file for detailed processing:
+        1. Check if docType is 'xlsx', 'csv', or 'pptx' AND storagePath exists
+        2. Call get_doc_full_file(docId=...) to download and save the full file to /workspace/
+        3. Process the file using appropriate tools:
+           - Excel/CSV: xlsx2csv, pandas, openpyxl
+           - PowerPoint: python-pptx for slide manipulation, or use the converted PDF
+
         Parameters:
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
 
         Returns:
-        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata
+        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata, docType, storagePath, fileMetadata (may contain previewData), processingStatus
         - Success (large response): File path and summary. Access content using tools from <core_tools_reference> in system prompt. Semantic search available after RAG indexing completes.
         - Error: Dictionary with error message
 
-        Note: Content is always returned as HTML format (converted from TipTap JSON stored in database). Large responses are automatically handled by the system.
+        Note: Content is always returned as HTML format (converted from TipTap JSON stored in database) for rich_text documents. For uploaded files (xlsx, csv, pdf, docx, pptx), content field contains extracted text for search indexing. Large responses are automatically handled by the system.
 
         Example Use Cases:
         - Read a specific document's full content for editing
@@ -532,7 +553,235 @@ For large documents (file path returned), use this tool.
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
     
-    
+    @property
+    def get_doc_full_file_property(self):
+        """Property definition for get_doc_full_file tool."""
+        return {
+            "type": "custom",
+            "name": "get_doc_full_file",
+            "description": f"""
+Download the full file content for an uploaded document (Excel, CSV, PDF, etc.) for org `{self.org_slug}`.
+
+WHEN TO USE: When get_doc returns a document with limited preview data and you need the full file:
+- Excel/CSV (docType='xlsx' or 'csv'): Full spreadsheet beyond 100×20 preview
+- PowerPoint (docType='pptx'): Original presentation with formatting, layout, images, or to convert to other formats
+
+WHAT IT DOES:
+- Downloads the complete file from GCS via the leanworks-hub API
+- Saves it to /workspace/ with the original filename
+- Returns the local file path for processing with bash/python tools
+
+PARAMETERS:
+- docId (required): The document ID to download
+
+RETURNS:
+- file_path: Local path to downloaded file (e.g., /workspace/report.xlsx)
+- original_name: Original filename
+- size: File size in bytes
+- mime_type: MIME type of the file
+
+NEXT STEPS after download:
+- For Excel/CSV: Use xlsx2csv, pandas (python), or openpyxl for full data processing
+- For PowerPoint: Use python-pptx for slide manipulation, or process the converted PDF
+- For PDF/DOCX: Use appropriate processing tools (pdftotext, python-docx, etc.)
+""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "docId": {
+                        "type": "string",
+                        "description": "Document ID to download full file for"
+                    }
+                },
+                "required": ["docId"]
+            }
+        }
+
+    def get_doc_full_file(self, docId: str, **kwargs) -> Dict[str, Any]:
+        """
+        Download the full file content for an uploaded document.
+        
+        Args:
+            docId: Document ID to download
+            
+        Returns:
+            Dictionary with file_path, original_name, size, mime_type
+        """
+        try:
+            import tempfile
+            import os
+            
+            # First get document metadata to get original filename
+            doc = self._make_request('GET', f'/api/docs/{docId}')
+            if not doc:
+                return {"error": f"Document {docId} not found"}
+            
+            doc_type = doc.get('docType', 'rich_text')
+            if doc_type == 'rich_text':
+                return {"error": "This document is a rich_text document, not an uploaded file. Use get_doc to retrieve its content."}
+            
+            storage_path = doc.get('storagePath')
+            if not storage_path:
+                return {"error": "No storage path found for this document"}
+            
+            # Get original filename from fileMetadata
+            file_metadata = doc.get('fileMetadata', {})
+            original_name = file_metadata.get('originalName', f"document_{docId}")
+            mime_type = doc.get('mimeType', 'application/octet-stream')
+            
+            # Download file content from leanworks-hub API
+            # This endpoint returns raw file content from GCS
+            response = self._make_request(
+                'GET', 
+                f'/api/docs/{docId}/content',
+                raw=True  # Request raw response, not JSON
+            )
+            
+            if isinstance(response, dict) and 'error' in response:
+                return response
+            
+            # Save to /workspace/ directory
+            workspace_dir = '/workspace'
+            if not os.path.exists(workspace_dir):
+                os.makedirs(workspace_dir, exist_ok=True)
+            
+            # Sanitize filename to avoid path traversal
+            safe_filename = os.path.basename(original_name)
+            file_path = os.path.join(workspace_dir, safe_filename)
+            
+            # Write file content
+            with open(file_path, 'wb') as f:
+                f.write(response)
+            
+            file_size = len(response)
+            
+            logger.info(f"Downloaded full file for doc {docId} to {file_path} ({file_size} bytes)")
+            
+            return {
+                "file_path": file_path,
+                "original_name": original_name,
+                "size": file_size,
+                "mime_type": mime_type,
+                "message": f"Full file downloaded to {file_path}. You can now process it with bash/python tools."
+            }
+            
+        except Exception as e:
+            logger.error(f"Error downloading full file for doc {docId}: {str(e)}")
+            return {"error": f"Failed to download full file: {str(e)}"}
+
+    @property
+    def upload_doc_property(self):
+        """Property definition for upload_doc tool."""
+        return {
+            "type": "custom",
+            "name": "upload_doc",
+            "description": f"""
+Upload a file to docs for org `{self.org_slug}`. Supported types: Excel (.xlsx, .xls), CSV, PDF, PowerPoint (.pptx, .ppt), Word (.docx, .doc).
+
+The document is stored and processed asynchronously. After upload, use get_doc or get_doc_full_file to access content once processing completes.
+
+PARAMETERS:
+- file_path (required): Local path to the file to upload (e.g. /workspace/report.xlsx or path in workspace)
+- title (optional): Document title; if omitted, the filename is used
+- projectId (optional): Associate with a project ID
+- teamId (optional): Associate with a team ID
+
+RETURNS:
+- id: Document ID
+- title: Document title
+- docType: Detected type (e.g. xlsx, csv, pdf, pptx)
+- processingStatus: Initial status (e.g. uploading); processing continues asynchronously
+- createdAt: Creation timestamp
+- message: Success message
+""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Local path to the file to upload (Excel, CSV, PDF, or PowerPoint)"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional document title; defaults to filename"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Optional project ID to associate with the document"
+                    },
+                    "teamId": {
+                        "type": "string",
+                        "description": "Optional team ID to associate with the document"
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+
+    # Extensions allowed by leanworks-hub POST /api/docs/upload (file-validation)
+    _UPLOAD_ALLOWED_EXTENSIONS = frozenset({".pdf", ".xlsx", ".xls", ".csv", ".pptx", ".ppt", ".docx", ".doc"})
+
+    def upload_doc(
+        self,
+        file_path: str,
+        title: Optional[str] = None,
+        projectId: Optional[str] = None,
+        teamId: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Upload a file (Excel, CSV, PDF, PPTX, or DOCX) to docs via leanworks-hub.
+
+        Args:
+            file_path: Local path to the file to upload
+            title: Optional document title; defaults to filename
+            projectId: Optional project ID
+            teamId: Optional team ID
+
+        Returns:
+            Dict with id, title, docType, processingStatus, createdAt, message; or error dict
+        """
+        try:
+            if not file_path or not file_path.strip():
+                return {"error": "file_path is required"}
+            file_path = file_path.strip()
+            if not os.path.isfile(file_path):
+                return {"error": f"File not found: {file_path}"}
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext not in self._UPLOAD_ALLOWED_EXTENSIONS:
+                return {
+                    "error": (
+                        f"Unsupported file type '{ext}'. "
+                        f"Allowed: .pdf, .xlsx, .xls, .csv, .pptx, .ppt, .docx, .doc"
+                    )
+                }
+            extra_data = {}
+            if title is not None and str(title).strip():
+                extra_data["title"] = str(title).strip()
+            if projectId is not None and str(projectId).strip():
+                extra_data["projectId"] = str(projectId).strip()
+            if teamId is not None and str(teamId).strip():
+                extra_data["teamId"] = str(teamId).strip()
+
+            result = self._make_upload_request(
+                "/api/docs/upload",
+                file_path,
+                extra_data=extra_data if extra_data else None,
+            )
+            if result is None:
+                return {"error": "Upload succeeded but no response body returned"}
+            return {
+                "id": result.get("id"),
+                "title": result.get("title"),
+                "docType": result.get("docType"),
+                "processingStatus": result.get("processingStatus"),
+                "createdAt": result.get("createdAt"),
+                "message": result.get("message", "Document uploaded successfully. Processing will begin shortly."),
+            }
+        except Exception as e:
+            logger.error(f"Error uploading document: {str(e)}")
+            error_msg = str(e).split("\n")[0] if "\n" in str(e) else str(e)
+            return {"error": error_msg}
 
     def summarize_doc(
         self,
@@ -1997,7 +2246,15 @@ This ensures fluent transitions between sections.""",
                 "properties": {
                     "section_info": {"type": "object", "description": "Section information (heading, description, level)"},
                     "previous_content": {"type": "string", "description": "Previously drafted content"},
-                    "next_section_heading": {"type": "string", "description": "Heading of next section (optional)"}
+                    "next_section_heading": {"type": "string", "description": "Heading of next section (optional)"},
+                    "section_number": {
+                        "type": "integer",
+                        "description": "Current section number (1-indexed, e.g., 2 for second section)"
+                    },
+                    "total_sections": {
+                        "type": "integer",
+                        "description": "Total number of sections in document"
+                    }
                 },
                 "required": ["section_info", "previous_content"]
             }
@@ -2428,16 +2685,20 @@ Please proceed with the appropriate workflow."""
         self,
         section_info: Dict[str, Any],
         previous_content: str,
-        next_section_heading: Optional[str] = None
+        next_section_heading: Optional[str] = None,
+        section_number: Optional[int] = None,  # NEW
+        total_sections: Optional[int] = None   # NEW
     ) -> Dict[str, Any]:
         """
         Prepare context sandwich for drafting a section.
-        
+
         Args:
             section_info: Section information (heading, description, level)
             previous_content: Previously drafted content
             next_section_heading: Heading of next section (if any)
-            
+            section_number: Current section number (1-indexed, e.g., 2 for second section)
+            total_sections: Total number of sections in document
+
         Returns:
             Context package for agent
         """
@@ -2473,12 +2734,23 @@ Please proceed with the appropriate workflow."""
         prompt_parts.append("4. **Change log**: Brief note on what was added\n")
         prompt_parts.append("\n**Evidence Rule**: Use TODO or ASSUMPTION tags for unsourced claims\n")
         
-        return {
+        result = {
             "section_info": section_info,
             "context_above": context_above,
             "next_section_heading": next_section_heading,
             "drafting_prompt": ''.join(prompt_parts)
         }
+
+        # Add progress metadata for streaming display
+        if section_number and total_sections:
+            result["_progress"] = {
+                "current": section_number,
+                "total": total_sections,
+                "heading": section_info.get('heading', 'Untitled'),
+                "stage": "preparing"
+            }
+
+        return result
     
     def get_section_list_from_toc(self, toc: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -2546,33 +2818,32 @@ Please proceed with the appropriate workflow."""
             "output_file": output_file,
             "total_sections": len(sections),
             "sections": sections,
-            "instructions": """Draft each section iteratively:
+            "instructions": f"""Draft each section iteratively with progress tracking:
 
-For each section:
-1. Call prepare_section_context() to get context sandwich
+For each section i (from 0 to {len(sections)-1}):
+1. Call prepare_section_context() with progress info:
+   prepare_section_context(
+       section_info=sections[i],
+       previous_content=<read from {output_file}>,
+       next_section_heading=sections[i+1].heading if i+1 < len(sections) else None,
+       section_number=i+1,           # IMPORTANT: pass current position
+       total_sections={len(sections)} # IMPORTANT: pass total count
+   )
+
 2. Draft the section content with:
    - Bridge-in (1-3 sentences from previous section)
    - Main content (follow outline and description)
    - Bridge-out (1-3 sentences to next section)
-   - Change log entry
-3. Append to document using bash tool:
-   bash(command='cat >> "{output_file}" << "EOF"
 
-{section_content}
-EOF')
+3. Append to document using bash tool:
+   bash(command=f'echo "{{{{section_content}}}}" >> "{output_file}"')
+
 4. Move to next section
 
-After all sections are drafted:
-- Run quality passes (continuity, formatting, compression if needed)
-- Create final document by calling create_doc() with file_path parameter:
-  * Use the output_file path returned in this response
-  * Pass it as file_path parameter to create_doc()
-  * Example: create_doc(title="Document Title", file_path="/workspace/working_doc.html")
-
-FILE OPERATIONS:
-- Use bash tool for all file operations (create, append, etc.)
-- Use heredoc syntax (<<'EOF'...EOF) for multi-line content
-- Example: bash(command='cat > /workspace/file.md << "EOF"\\n{content}\\nEOF')"""
+After all {len(sections)} sections are drafted:
+- Run quality passes if needed
+- Create final document: create_doc(title=..., file_path="{output_file}")
+"""
         }
     
     # ============================================================================

@@ -44,7 +44,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         self.vectordb_client = vectordb_client
         
         self.model_client = model_client
-        # Store org_slug for namespace usage in Pinecone queries
+        # Store org_slug for namespace usage in vector search queries
         self.org_slug = org_slug
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
@@ -228,7 +228,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             
         except Exception as e:
             logger.error(f"Error performing hybrid search: {str(e)}")
-            # Return an empty result structure with similar interface as Pinecone response
+            # Return an empty result structure with similar interface as vector search response
             empty_response = SimpleNamespace(matches=[])
             return empty_response
     
@@ -243,10 +243,10 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
-        Process retrieved nodes from Pinecone and extract context information.
-        
+        Process retrieved nodes from vector search and extract context information.
+
         Args:
-            nodes: The query results from Pinecone
+            nodes: The query results from vector search
             query: The user query
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
             use_span_selection: Whether to apply span selection
@@ -565,7 +565,7 @@ class AsyncChat(Chat):
         Asynchronous version of postprocess_nodes that uses async reranking for better performance.
         
         Args:
-            nodes: The query results from Pinecone
+            nodes: The query results from vector search
             query: The user query
             use_reranker: Whether to apply reranking
             use_span_selection: Whether to apply span selection

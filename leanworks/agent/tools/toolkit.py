@@ -1482,6 +1482,8 @@ EOF"""
                     self.doc_management_tool.create_doc_property,
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
+                    self.doc_management_tool.get_doc_full_file_property,
+                    self.doc_management_tool.upload_doc_property,
                     self.doc_management_tool.list_docs_property,
                     # HTML-based doc management tools (removed - use create_doc/update_doc directly)
                     # Workflow tools (now part of DocManagementTool)
@@ -1705,6 +1707,8 @@ EOF"""
                     "create_doc": self.doc_management_tool.create_doc,
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
+                    "get_doc_full_file": self.doc_management_tool.get_doc_full_file,
+                    "upload_doc": self.doc_management_tool.upload_doc,
                     "list_docs": self.doc_management_tool.list_docs,
                     # HTML-based doc management functions (removed - use create_doc/update_doc directly)
                     # Workflow functions (now part of DocManagementTool)
@@ -1984,14 +1988,13 @@ EOF"""
         Creates new indexes specifically for large unstructured responses.
         
         Returns:
-            PineconeHybridIndex instance for large responses, or None if not available
+            Vector DB client for large responses, or None if not available
         """
         if self._large_response_vectordb_client is None:
             try:
                 from leanworks.rag.embedding import GoogleEmbedding
                 from leanworks.rag.vectordb_client import create_vectordb_client, use_gcp_vector_search
                 from leanworks.setting import LARGE_RESPONSE_CONFIG
-                import os
                 
                 # Get configuration for large response indexes
                 config = LARGE_RESPONSE_CONFIG
@@ -2007,26 +2010,12 @@ EOF"""
                     self._large_response_vectordb_client = False
                     return None
                 
-                # Get Pinecone API key from secret manager (same as search tool)
-                try:
-                    from app.services.client import get_cached_api_key
-                    pinecone_key = get_cached_api_key('pinecone-api-key')
-                except ImportError:
-                    # Fallback to environment variable if app.services.client is not available
-                    pinecone_key = os.environ.get('PINECONE_API_KEY')
-                
-                if not pinecone_key:
-                    logger.warning("pinecone-api-key not found in secret manager or environment variables")
-                    self._large_response_vectordb_client = False
-                    return None
-                
                 # Initialize embedding client with service account authentication
                 embedding_client = GoogleEmbedding(gcp_credential_path=self.credential_path)
                 
                 # Create vectordb client for large responses
                 vectordb_client = create_vectordb_client(
                     embedding_model_client=embedding_client,
-                    pinecone_key=pinecone_key,
                     gcp_credential_path=self.credential_path,
                     chunk_size=config.get("rag_chunk_size", 512),
                     chunk_overlap=config.get("rag_chunk_overlap", 128),

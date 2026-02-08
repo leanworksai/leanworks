@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
 from leanworks.utils.env import get_project_id, get_secret_name, resolve_credential_path
 from leanworks.rag.embedding import GoogleEmbedding
-from leanworks.rag.vectordb_client import create_vectordb_client, use_gcp_vector_search
+from leanworks.rag.vectordb_client import create_vectordb_client
 from leanworks.rag.chat import AsyncChat
 
 
@@ -65,16 +65,9 @@ class SearchTool:
         from leanworks.utils.env import resolve_credential_path
         embedding_model_client = GoogleEmbedding(gcp_credential_path=resolve_credential_path())
         
-        pinecone_key = None
-        if not use_gcp_vector_search():
-            pinecone_key = get_secret("pinecone-api-key")
-
         vectordb_client = create_vectordb_client(
             embedding_model_client=embedding_model_client,
-            pinecone_key=pinecone_key,
             gcp_credential_path=resolved_path,
-            dense_index_name="leanworks-dense" if not use_gcp_vector_search() else None,
-            sparse_index_name="leanworks-sparse" if not use_gcp_vector_search() else None,
         )
         
         self.chat = AsyncChat(
@@ -374,7 +367,7 @@ class SearchTool:
 
         Args:
             queries: List of query strings (original + rewrites)
-            namespace: Pinecone namespace to search
+            namespace: Vector search namespace to search
             top_k: Number of results to retrieve
             filters: Optional metadata filters
 
