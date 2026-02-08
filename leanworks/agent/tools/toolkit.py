@@ -826,40 +826,60 @@ class ToolUse:
         return self._tool_cache['workday_tool']
 
     def _ensure_custom_image(self):
-        """Ensure custom bash session image exists, build if needed."""
-        import subprocess
-        
+        """Ensure custom bash session image exists, build if needed.
+        Rebuilds when the Dockerfile is newer than the existing image so updates
+        (e.g. adding Python) are picked up instead of reusing an old tag.
+        """
+        from datetime import datetime
+
         image_name = "leanworks-bash-session:latest"
-        
-        # Check if image exists
+        dockerfile_path = os.path.join(
+            os.path.dirname(__file__), '../../../deploy/Dockerfile.bash-session'
+        )
+
+        if not os.path.exists(dockerfile_path):
+            logger.warning(f"Dockerfile not found at {dockerfile_path}, falling back to alpine")
+            return "alpine:latest"
+
+        dockerfile_mtime = os.path.getmtime(dockerfile_path)
+        need_build = True
+
+        # If image exists, reuse it only if it's not older than the Dockerfile
         try:
             check_cmd = ['docker', 'images', '-q', image_name]
             result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-            
             if result.stdout.strip():
-                logger.debug(f"Custom image {image_name} already exists")
-                return image_name
+                inspect_cmd = ['docker', 'inspect', '--format', '{{.Created}}', image_name]
+                inspect_result = subprocess.run(
+                    inspect_cmd, capture_output=True, text=True, timeout=5
+                )
+                if inspect_result.returncode == 0 and inspect_result.stdout.strip():
+                    try:
+                        created_str = inspect_result.stdout.strip().replace('Z', '+00:00')
+                        image_created = datetime.fromisoformat(created_str).timestamp()
+                        if image_created >= dockerfile_mtime:
+                            need_build = False
+                            logger.debug(f"Custom image {image_name} already exists and is up to date")
+                            return image_name
+                        logger.info(
+                            f"Dockerfile is newer than image {image_name}, rebuilding..."
+                        )
+                    except (ValueError, OSError):
+                        pass
         except Exception as e:
             logger.debug(f"Error checking for image: {e}")
-        
+
         # Build image from Dockerfile
         try:
             logger.info(f"Building custom image {image_name}...")
-            dockerfile_path = os.path.join(os.path.dirname(__file__), '../../../deploy/Dockerfile.bash-session')
-            
-            if not os.path.exists(dockerfile_path):
-                logger.warning(f"Dockerfile not found at {dockerfile_path}, falling back to alpine")
-                return "alpine:latest"
-            
-            # Get the directory containing the Dockerfile for build context
             build_context = os.path.dirname(dockerfile_path)
-            build_cmd = ['docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context]
-            result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=60)
-            
+            build_cmd = [
+                'docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context
+            ]
+            result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 logger.warning(f"Failed to build custom image: {result.stderr}")
                 return "alpine:latest"
-            
             logger.info(f"Successfully built custom image {image_name}")
             return image_name
         except Exception as e:
@@ -944,7 +964,8 @@ class ToolUse:
         """
         try:
             # Validate command for dangerous patterns
-            dangerous_patterns = ['rm -rf /', 'format', ':(){:|:&};:']
+            # Do not add 'format' — it blocks legitimate Python/openpyxl scripts
+            dangerous_patterns = ['rm -rf /', ':(){:|:&};:']
             for pattern in dangerous_patterns:
                 if pattern in command:
                     return {

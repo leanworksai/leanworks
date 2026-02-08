@@ -132,7 +132,6 @@ class DocManagementTool(BaseAPIClient):
         - content (optional): Document content in HTML format. Required if file_path not provided.
         - file_path (optional): Path to HTML file to read content from. Required if content not provided.
         - projectId (optional): Associated project ID
-        - teamId (optional): Associated team ID
         - tags (optional): Array of tag strings
         - visibility (optional): 'all_members' or 'specific_members' (default: 'all_members')
         - visibleToMembers (optional): Array of email addresses
@@ -170,10 +169,6 @@ class DocManagementTool(BaseAPIClient):
                         "type": "string",
                         "description": "Associated project ID"
                     },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Associated team ID"
-                    },
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -204,7 +199,6 @@ class DocManagementTool(BaseAPIClient):
         content: Optional[str] = None,
         file_path: Optional[str] = None,
         projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
         tags: Optional[List[str]] = None,
         visibility: str = "all_members",
         visibleToMembers: Optional[List[str]] = None,
@@ -219,7 +213,6 @@ class DocManagementTool(BaseAPIClient):
             content: Document content in HTML format (required if file_path not provided)
             file_path: Path to HTML file to read content from (alternative to content parameter)
             projectId: Associated project ID
-            teamId: Associated team ID
             tags: Array of tag strings
             visibility: Document visibility
             visibleToMembers: Array of email addresses
@@ -262,7 +255,6 @@ class DocManagementTool(BaseAPIClient):
                 "title": title,
                 "content": html_content,  # API converts HTML to TipTap JSON
                 "projectId": projectId,
-                "teamId": teamId,
                 "tags": tags or [],
                 "visibility": doc_visibility,
                 "visibleToMembers": visible_to_members_array
@@ -283,7 +275,6 @@ class DocManagementTool(BaseAPIClient):
                 "content": html_content,  # Return HTML, not TipTap JSON
                 "ownerEmail": result.get('ownerEmail'),
                 "projectId": projectId,
-                "teamId": teamId,
                 "tags": tags or [],
                 "visibility": doc_visibility,
                 "visibleToMembers": visible_to_members_array
@@ -304,7 +295,6 @@ class DocManagementTool(BaseAPIClient):
         - content (optional): Update content in HTML format
         - file_path (optional): Path to HTML file to read content from (alternative to content parameter)
         - projectId (optional): Update project association
-        - teamId (optional): Update team association
         - tags (optional): Update tags array
         - visibility (optional): Update visibility
         - visibleToMembers (optional): Update visible members
@@ -344,10 +334,6 @@ class DocManagementTool(BaseAPIClient):
                     "projectId": {
                         "type": "string",
                         "description": "Update project association"
-                    },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Update team association"
                     },
                     "tags": {
                         "type": "array",
@@ -408,7 +394,7 @@ class DocManagementTool(BaseAPIClient):
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
 
         Returns:
-        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, team_id, tags, visibility, visible_to_members, created_at, updated_at, metadata, docType, storagePath, fileMetadata (may contain previewData), processingStatus
+        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, tags, visibility, visible_to_members, created_at, updated_at, metadata, docType, storagePath, fileMetadata (may contain previewData), processingStatus
         - Success (large response): File path and summary. Access content using tools from <core_tools_reference> in system prompt. Semantic search available after RAG indexing completes.
         - Error: Dictionary with error message
 
@@ -525,8 +511,6 @@ For large documents (file path returned), use this tool.
                             doc['owner_email'] = doc.pop('ownerEmail')
                         if 'projectId' in doc:
                             doc['project_id'] = doc.pop('projectId')
-                        if 'teamId' in doc:
-                            doc['team_id'] = doc.pop('teamId')
                         if 'visibleToMembers' in doc:
                             doc['visible_to_members'] = doc.pop('visibleToMembers')
                         if 'createdAt' in doc:
@@ -560,7 +544,7 @@ For large documents (file path returned), use this tool.
             "type": "custom",
             "name": "get_doc_full_file",
             "description": f"""
-Download the full file content for an uploaded document (Excel, CSV, PDF, etc.) for org `{self.org_slug}`.
+Download the full file content for an uploaded document (Excel, CSV, PDF, etc.).
 
 WHEN TO USE: When get_doc returns a document with limited preview data and you need the full file:
 - Excel/CSV (docType='xlsx' or 'csv'): Full spreadsheet beyond 100×20 preview
@@ -676,15 +660,14 @@ NEXT STEPS after download:
             "type": "custom",
             "name": "upload_doc",
             "description": f"""
-Upload a file to docs for org `{self.org_slug}`. Supported types: Excel (.xlsx, .xls), CSV, PDF, PowerPoint (.pptx, .ppt), Word (.docx, .doc).
+Upload a file to docs. Supported types: Excel (.xlsx, .xls), CSV, PDF, PowerPoint (.pptx, .ppt), Word (.docx, .doc).
 
 The document is stored and processed asynchronously. After upload, use get_doc or get_doc_full_file to access content once processing completes.
 
 PARAMETERS:
-- file_path (required): Local path to the file to upload (e.g. /workspace/report.xlsx or path in workspace)
+- file_path (required): Path to the file (use /workspace/filename.ext for files created in bash session)
 - title (optional): Document title; if omitted, the filename is used
 - projectId (optional): Associate with a project ID
-- teamId (optional): Associate with a team ID
 
 RETURNS:
 - id: Document ID
@@ -699,7 +682,7 @@ RETURNS:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Local path to the file to upload (Excel, CSV, PDF, or PowerPoint)"
+                        "description": "Path to file (e.g. /workspace/filename.xlsx for files created in bash). Resolved to session workspace when under /workspace/."
                     },
                     "title": {
                         "type": "string",
@@ -708,10 +691,6 @@ RETURNS:
                     "projectId": {
                         "type": "string",
                         "description": "Optional project ID to associate with the document"
-                    },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Optional team ID to associate with the document"
                     }
                 },
                 "required": ["file_path"]
@@ -726,7 +705,6 @@ RETURNS:
         file_path: str,
         title: Optional[str] = None,
         projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -736,7 +714,6 @@ RETURNS:
             file_path: Local path to the file to upload
             title: Optional document title; defaults to filename
             projectId: Optional project ID
-            teamId: Optional team ID
 
         Returns:
             Dict with id, title, docType, processingStatus, createdAt, message; or error dict
@@ -745,6 +722,19 @@ RETURNS:
             if not file_path or not file_path.strip():
                 return {"error": "file_path is required"}
             file_path = file_path.strip()
+
+            # Resolve /workspace/ paths (container) to host session directory
+            if file_path.startswith("/workspace/") or file_path == "/workspace":
+                base = os.path.normpath(self._get_workspace_dir())
+                rel = file_path[len("/workspace"):].lstrip("/")
+                resolved = os.path.normpath(os.path.join(base, rel)) if rel else base
+                try:
+                    if os.path.commonpath([resolved, base]) != base:
+                        return {"error": "Invalid path: outside workspace"}
+                except ValueError:
+                    return {"error": "Invalid path"}
+                file_path = resolved
+
             if not os.path.isfile(file_path):
                 return {"error": f"File not found: {file_path}"}
             ext = os.path.splitext(file_path)[1].lower()
@@ -760,8 +750,6 @@ RETURNS:
                 extra_data["title"] = str(title).strip()
             if projectId is not None and str(projectId).strip():
                 extra_data["projectId"] = str(projectId).strip()
-            if teamId is not None and str(teamId).strip():
-                extra_data["teamId"] = str(teamId).strip()
 
             result = self._make_upload_request(
                 "/api/docs/upload",
@@ -883,16 +871,15 @@ Document ID: {docId}
         self,
         docId: str,
         title: Optional[str] = None,
-        content: Optional[str] = None,
-        file_path: Optional[str] = None,
-        projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        visibility: Optional[str] = None,
-        visibleToMembers: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
+            content: Optional[str] = None,
+            file_path: Optional[str] = None,
+            projectId: Optional[str] = None,
+            tags: Optional[List[str]] = None,
+            visibility: Optional[str] = None,
+            visibleToMembers: Optional[List[str]] = None,
+            metadata: Optional[Dict[str, Any]] = None,
+            **kwargs
+        ) -> Dict[str, Any]:
         """
         Update an existing document via API.
 
@@ -902,7 +889,6 @@ Document ID: {docId}
             content: Update content in HTML format (required if file_path not provided)
             file_path: Path to HTML file to read content from (alternative to content parameter)
             projectId: Update project association
-            teamId: Update team association
             tags: Update tags array
             visibility: Update visibility
             visibleToMembers: Update visible members
@@ -923,7 +909,7 @@ Document ID: {docId}
                     logger.debug(f"Read content from file: {file_path}")
                 except Exception as e:
                     return {"error": f"Failed to read file {file_path}: {str(e)}"}
-            elif not content and not any([title, projectId, teamId, tags, visibility, visibleToMembers, metadata]):
+            elif not content and not any([title, projectId, tags, visibility, visibleToMembers, metadata]):
                 return {"error": "Either content, file_path, or other update fields must be provided"}
 
             # Build update payload
@@ -939,9 +925,6 @@ Document ID: {docId}
             
             if projectId is not None:
                 updates['projectId'] = projectId
-            
-            if teamId is not None:
-                updates['teamId'] = teamId
             
             if tags is not None:
                 updates['tags'] = tags
@@ -1814,11 +1797,10 @@ Document ID: {docId}
         List documents from the docs table for org `{self.org_slug}`.
         
         This tool queries the docs table to retrieve documents with optional filtering.
-        Use this to find documents by project, team, owner, tags, or other criteria.
+        Use this to find documents by project, owner, tags, or other criteria.
         
         Parameters:
         - projectId (optional): Filter documents by project ID
-        - teamId (optional): Filter documents by team ID
         - ownerEmail (optional): Filter documents by owner email
         - tags (optional): Filter documents that contain any of these tags (array of strings)
         - visibility (optional): Filter by visibility ('all_members' or 'specific_members')
@@ -1828,7 +1810,7 @@ Document ID: {docId}
         - orderDirection (optional): 'asc' or 'desc' (default: 'desc' for newest first)
         
         Returns:
-        - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, team_id, tags, visibility, created_at, updated_at
+        - Success: List of document dictionaries with fields: id, title, content_preview (first 200 chars), owner_email, project_id, tags, visibility, created_at, updated_at
         - Note: Full content is not included - only a preview. Use get_doc to get full content if needed.
         - Error: Dictionary with error message
         
@@ -1849,10 +1831,6 @@ Document ID: {docId}
                     "projectId": {
                         "type": "string",
                         "description": "Filter documents by project ID"
-                    },
-                    "teamId": {
-                        "type": "string",
-                        "description": "Filter documents by team ID"
                     },
                     "ownerEmail": {
                         "type": "string",
@@ -1895,7 +1873,6 @@ Document ID: {docId}
     def list_docs(
         self,
         projectId: Optional[str] = None,
-        teamId: Optional[str] = None,
         ownerEmail: Optional[str] = None,
         tags: Optional[List[str]] = None,
         visibility: Optional[str] = None,
@@ -1909,12 +1886,11 @@ Document ID: {docId}
         List documents via API with optional filtering.
         
         Note: The API endpoint returns all documents with visibility filtering.
-        Client-side filtering for projectId, teamId, ownerEmail, tags, and searchTitle
+        Client-side filtering for projectId, ownerEmail, tags, and searchTitle
         is applied after fetching from the API.
         
         Args:
             projectId: Filter by project ID
-            teamId: Filter by team ID
             ownerEmail: Filter by owner email
             tags: Filter by tags (documents containing any of these tags)
             visibility: Filter by visibility
@@ -1944,7 +1920,6 @@ Document ID: {docId}
             for doc in all_docs:
                 # Normalize field names
                 doc_project_id = doc.get('projectId') or doc.get('project_id')
-                doc_team_id = doc.get('teamId') or doc.get('team_id')
                 doc_owner_email = doc.get('ownerEmail') or doc.get('owner_email', '').lower()
                 doc_tags = doc.get('tags', [])
                 doc_visibility = doc.get('visibility')
@@ -1952,8 +1927,6 @@ Document ID: {docId}
                 
                 # Apply filters
                 if projectId and doc_project_id != projectId:
-                    continue
-                if teamId and doc_team_id != teamId:
                     continue
                 if ownerEmail and doc_owner_email != ownerEmail.lower():
                     continue
@@ -1988,7 +1961,6 @@ Document ID: {docId}
                     'content_preview': content_preview,
                     'owner_email': doc_owner_email,
                     'project_id': doc_project_id,
-                    'team_id': doc_team_id,
                     'tags': doc_tags,
                     'visibility': doc_visibility,
                     'visible_to_members': doc.get('visibleToMembers') or doc.get('visible_to_members', []),
@@ -2017,7 +1989,7 @@ Document ID: {docId}
             # Apply limit
             filtered_docs = filtered_docs[:limit]
             
-            logger.debug(f"Listed {len(filtered_docs)} documents with filters: projectId={projectId}, teamId={teamId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
+            logger.debug(f"Listed {len(filtered_docs)} documents with filters: projectId={projectId}, ownerEmail={ownerEmail}, tags={tags}, searchTitle={searchTitle}")
             return filtered_docs
                 
         except Exception as e:
@@ -2329,7 +2301,20 @@ Returns quality report with issues and suggestions.""",
             # The actual workflow will be driven by agent interactions
             return """Document creation workflow initiated.
 
-WORKFLOW:
+UPLOADED FILES (Excel, CSV, PDF, PowerPoint, Word):
+- If the user wants to add a file (e.g. .xlsx, .csv, .pdf, .pptx, .docx) to docs, use upload_doc(file_path=...) instead of this workflow.
+- create_doc is for rich-text/HTML documents; upload_doc is for binary files. After upload_doc, the document is processed asynchronously; use get_doc or get_doc_full_file to access content once ready.
+
+TO CREATE file formats from scratch (before upload_doc):
+- Excel (.xlsx): Use pandas (DataFrame.to_excel) or openpyxl for detailed formatting, or xlsxwriter
+- CSV: Use pandas (DataFrame.to_csv) or Python csv module, or bash commands
+- PDF: Use reportlab to generate PDFs from scratch
+- PowerPoint (.pptx): Use python-pptx to create presentations (slides, shapes, text, images)
+- Word (.docx): Use python-docx to create Word documents
+
+When the user asked for the file, after creating it in /workspace/, call upload_doc(file_path='/workspace/filename.ext', title='...') so it appears in the user's doc list. Do not upload intermediate or temp files.
+
+RICH-TEXT DOCUMENT WORKFLOW:
 1. Generate Table of Contents (use generate_toc tool)
    - Include Document Contract (purpose, audience, scope, non-goals, evidence rule)
    - Major sections (H1) with subsections (H2, optionally H3)
@@ -2365,18 +2350,33 @@ Please proceed with generating the TOC based on these requirements."""
 
             return """Document update workflow initiated.
 
+UPLOADED FILES (docType xlsx, csv, pdf, pptx, docx):
+- update_doc is for rich_text documents only. It cannot replace or edit the binary content of an uploaded file.
+- If get_doc returns a document with docType other than rich_text (e.g. xlsx, csv, pdf, pptx, docx): do not use update_doc to change its content. To work with the file: use get_doc_full_file(docId) to download it to /workspace/, then use bash/python tools to process it. To "replace" the file, the user would need to upload a new document via upload_doc (creating a new doc).
+
+TO MODIFY uploaded files:
+1. Download: get_doc_full_file(docId) → returns file_path in /workspace/
+2. Modify using appropriate tools:
+   - Excel (.xlsx): pandas (read_excel, to_excel) or openpyxl for cell-level edits
+   - CSV: pandas (read_csv, to_csv), Python csv module, or bash (awk, sed)
+   - PDF: Extract text with pdfplumber/PyPDF2; for layout changes, may need to recreate with reportlab
+   - PowerPoint (.pptx): python-pptx to read/modify slides, shapes, text
+   - Word (.docx): python-docx to read/modify paragraphs, tables, styles
+3. Save changes to the same or new file path
+4. When the user asked for the file, after creating it in /workspace/, call upload_doc(file_path='/workspace/filename.ext', title='...') so it appears in the user's doc list. Do not upload intermediate or temp files.
+
 STEP 1: Load Document
-- Call get_doc([docId]) to fetch content
+- Call get_doc([docId]) to fetch content and check docType
 
 STEP 2: Choose Workflow Based on Response
 
-WORKFLOW A: SMALL DOCUMENT (content returned directly)
+WORKFLOW A: RICH_TEXT, SMALL (content returned directly)
 - Edit content string in memory
 - Apply all requested changes
 - Preserve HTML structure
 - Save: update_doc(docId, content=modified_html)
 
-WORKFLOW B: LARGE DOCUMENT (file path returned)
+WORKFLOW B: RICH_TEXT, LARGE (file path returned)
 - Locate content to edit:
   * EXACT TEXT: Use grep to find line numbers (see <core_tools_reference>)
   * SECTION DESCRIBED: Use search_tool_response_in_vectorstore, then grep
@@ -2384,7 +2384,7 @@ WORKFLOW B: LARGE DOCUMENT (file path returned)
 - For multiple edits, repeat for each change
 - Save: update_doc(docId, file_path="/workspace/doc.html")
 
-KEY DIFFERENCE: Small docs use content parameter, large docs use file_path parameter.
+KEY DIFFERENCE: Small docs use content parameter, large docs use file_path parameter. Uploaded files (xlsx, csv, pdf, etc.) are not editable via update_doc.
 
 Please proceed with this workflow."""
 

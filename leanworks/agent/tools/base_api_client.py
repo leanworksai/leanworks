@@ -162,7 +162,7 @@ class BaseAPIClient:
             endpoint: API path (e.g. '/api/docs/upload')
             file_path: Local path to the file to upload
             file_field_name: Form field name for the file (default 'file')
-            extra_data: Optional dict of form fields (e.g. title, projectId, teamId)
+            extra_data: Optional dict of form fields (e.g. title, projectId)
 
         Returns:
             Response JSON dict

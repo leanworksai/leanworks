@@ -9,16 +9,18 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Create virtual environment and install dependencies into it
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --prefix=/install -r requirements.txt
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and install leanworks package
+# Copy application code and install leanworks package into venv
 COPY --chown=root:root . .
-RUN pip3 install --no-cache-dir --prefix=/install . && \
-    find /install -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || true && \
-    find /install -type f -name "*.pyc" -delete && \
-    find /install -type f -name "*.pyo" -delete
+RUN /opt/venv/bin/pip install --no-cache-dir --no-deps . && \
+    find /opt/venv -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || true && \
+    find /opt/venv -type f -name "*.pyc" -delete && \
+    find /opt/venv -type f -name "*.pyo" -delete
 
 # Final stage - minimal runtime image
 FROM python:3.10-slim
@@ -26,7 +28,6 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # No system dependencies needed at runtime (removed jq, curl, git)
-# Only keep minimal runtime dependencies if needed
 RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -34,8 +35,8 @@ RUN apt-get update && \
 # Create non-root user with home directory for library caches
 RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser appuser
 
-# Copy installed packages from builder
-COPY --from=builder /install /usr/local
+# Copy virtual environment from builder (all packages + leanworks installed)
+COPY --from=builder /opt/venv /opt/venv
 
 # Copy only necessary application files (exclude tests, docs, etc.)
 COPY --chown=appuser:appuser leanworks/ /app/leanworks/
@@ -45,16 +46,16 @@ COPY --chown=appuser:appuser setup.py /app/
 COPY --chown=appuser:appuser asgi.py /app/
 
 # Clean up any remaining cache and temporary files
-RUN find /usr/local -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || true && \
-    find /usr/local -type f -name "*.pyc" -delete && \
-    find /usr/local -type f -name "*.pyo" -delete && \
+RUN find /opt/venv -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || true && \
+    find /opt/venv -type f -name "*.pyc" -delete && \
+    find /opt/venv -type f -name "*.pyo" -delete && \
     rm -rf /root/.cache /tmp/*
 
 # Switch to non-root user
 USER appuser
 
-# Set HOME environment variable explicitly
+# Set HOME and use venv Python by default
 ENV HOME="/home/appuser"
-ENV PATH="/usr/local/bin:${PATH}"
+ENV PATH="/opt/venv/bin:${PATH}"
 
 EXPOSE 8000

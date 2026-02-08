@@ -219,6 +219,7 @@ AGENT_SYSTEM_PROMPT = """
     - All tool-generated files saved to: /workspace/
     - Path format: Use either relative (file.txt) or absolute (/workspace/file.txt) - both work identically
     - Session isolation: Each chat has separate workspace directory
+    - When the user asked for a file (e.g. Excel, CSV, report), after creating it in /workspace/, call upload_doc(file_path='/workspace/filename.ext', title='...') so it appears in the user's doc list. Do not upload intermediate or temp files.
     </workspace_reference>
  
     <large_tool_response_handling>
