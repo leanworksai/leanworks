@@ -93,3 +93,37 @@ class BaseSpanSelector(ABC):
             stats["avg_span_score"] = total_span_scores / span_scores_count
         
         return stats
+
+    def _compute_rrf_scores(self, score_lists: List[List[float]], k: int) -> List[float]:
+        """
+        Compute Reciprocal Rank Fusion scores for multiple ranked lists.
+
+        Args:
+            score_lists: List of score arrays (higher is better)
+            k: RRF constant
+
+        Returns:
+            List of fused scores aligned to original indices
+        """
+        if not score_lists:
+            return []
+        lengths = {len(scores) for scores in score_lists if scores is not None}
+        if len(lengths) != 1:
+            return score_lists[0] if score_lists else []
+        n = lengths.pop()
+        if n == 0:
+            return []
+
+        ranks_list = []
+        for scores in score_lists:
+            ranked_indices = sorted(range(n), key=lambda i: scores[i], reverse=True)
+            ranks = [0] * n
+            for rank, idx in enumerate(ranked_indices, start=1):
+                ranks[idx] = rank
+            ranks_list.append(ranks)
+
+        rrf_scores = [0.0] * n
+        for ranks in ranks_list:
+            for i, rank in enumerate(ranks):
+                rrf_scores[i] += 1.0 / (k + rank)
+        return rrf_scores

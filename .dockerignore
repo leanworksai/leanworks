@@ -46,8 +46,6 @@ docs/
 README*
 
 # Exclude deployment scripts (not needed in image)
-deploy.sh
-cloudbuild.yaml
 deploy/
 
 # Exclude CI/CD files

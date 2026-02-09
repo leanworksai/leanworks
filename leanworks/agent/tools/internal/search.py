@@ -4,8 +4,9 @@ from anthropic import Anthropic
 import logging
 from typing import List, Dict, Any
 from leanworks.setting import RETRIEVE_TOP_K, RERANK_TOP_K
+from leanworks.utils.env import get_project_id, get_secret_name, resolve_credential_path
 from leanworks.rag.embedding import GoogleEmbedding
-from leanworks.rag.vectordb import PineconeHybridIndex
+from leanworks.rag.vectordb_client import create_vectordb_client
 from leanworks.rag.chat import AsyncChat
 
 
@@ -39,35 +40,34 @@ class SearchTool:
     Tool that uses the Leanworks API to search for information when other tools
     cannot provide sufficient context.
     """
-    def __init__(self, firestore_client, org_slug, secret_manager_client, read_document_ids: set | None = None, credential_path: str = "gcp_credential.json"):
+    def __init__(self, firestore_client, org_slug, secret_manager_client, read_document_ids: set | None = None, credential_path: str | None = None):
         # Read project_id from credential file
         import json
-        with open(credential_path, "r") as f:
-            credential_data = json.load(f)
-        project_id = credential_data.get("project_id")
+        resolved_path = credential_path or resolve_credential_path()
+        project_id = get_project_id(resolved_path)
+        if not project_id:
+            with open(resolved_path, "r") as f:
+                credential_data = json.load(f)
+            project_id = credential_data.get("project_id")
+        if not project_id:
+            raise ValueError(f"project_id not found in {resolved_path}")
         
         # Helper function to get secret
         def get_secret(name):
-            full_name = f"projects/{project_id}/secrets/{name}/versions/latest"
+            secret_name = get_secret_name(name)
+            full_name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
             response = secret_manager_client.access_secret_version(name=full_name)
             return response.payload.data.decode("UTF-8")
         
         model_client = Anthropic(api_key=get_secret("claude-api-key"))
         
-        # Use the module-level imports directly
-        embedding_model_client = GoogleEmbedding(get_secret("gemini-api-key"))
+        # Use the module-level imports directly with service account authentication
+        from leanworks.utils.env import resolve_credential_path
+        embedding_model_client = GoogleEmbedding(gcp_credential_path=resolve_credential_path())
         
-        # Initialize vector database client
-        vectordb_client = PineconeHybridIndex(
-            pinecone_key=get_secret("pinecone-api-key"),
-            embedding_model_client=embedding_model_client
-        )
-        
-        # Use shared indexes with namespaces instead of per-org indexes
-        # This matches the data-pipeline pattern to avoid hitting Pinecone index limits
-        vectordb_client.load_hybrid_index(
-            dense_index_name="leanworks-dense",
-            sparse_index_name="leanworks-sparse"
+        vectordb_client = create_vectordb_client(
+            embedding_model_client=embedding_model_client,
+            gcp_credential_path=resolved_path,
         )
         
         self.chat = AsyncChat(
@@ -145,18 +145,19 @@ class SearchTool:
     @property
     def search_documents_property(self):
         description = """
-        Search for relevant information using the team's knowledge base and stored tool responses.
+        Search for relevant information using documents, code files, and stored tool responses.
 
         When to use this tool:
         1. As a fallback when domain-specific tools (project_management, doc_management, etc.) return insufficient/empty results, errors, or are otherwise not suitable to answer the question
         2. When you are unsure which specific tool to use, or need to identify relevant resources to guide further actions
         3. When you need to find information from previous tool responses, need more detailed information, or have any uncertainty about the quality or completeness of your answer
-        4. When you anticipate needing to call a specific tool multiple times with different queries or scopes, use this tool first t narrow down the search space and minimize tool iterations.
+        4. When you anticipate needing to call a specific tool multiple times with different queries or scopes, use this tool first to narrow down the search space and minimize tool iterations.
         5. Always use together with execute_sql_query when searching for progress updates: progress update tables may lack sufficient context. Call both tools in the same turn (see system prompt for details).
 
-        This tool searches across two types of content:
-        1. Knowledge base documents (Confluence, Jira, GitHub, Slack, etc.)
-        2. Stored tool responses (large outputs from previous tool executions)
+        This tool searches across three content types:
+        1. Docs: Confluence, Jira, Slack, GitHub docs, screenshots, images
+        2. Code files: GitHub/GitLab code sources
+        3. Stored tool responses: Large outputs from previous tool executions
 
         The response will be a list of results ordered by relevance, most relevant first.
 
@@ -175,13 +176,13 @@ class SearchTool:
                     },
                     "search_scope": {
                         "type": "string",
-                        "enum": ["all", "knowledge_base", "tool_responses"],
-                        "description": "Scope of search: 'all' (default) searches both knowledge base and tool responses, 'knowledge_base' searches only documents, 'tool_responses' searches only stored tool outputs",
-                        "default": "all"
+                        "enum": ["tool_responses", "docs", "codes"],
+                        "description": "Scope of search: 'tool_responses' searches large tool outputs. Use this only after you receive a large tool response message and need to search the tool's output for more information; 'docs' searches general knowledge base, 'codes' searches code files only",
+                        "default": "docs"
                     },
                     "data_source": {
                         "type": "string",
-                        "description": "Optional data source filter (knowledge_base only). One of: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
+                        "description": "Optional data source filter (docs only). One of: confluence, jira, gitlab_issue, gitlab_commits, github_commits, slack, teams, notion, google_doc, google_sheet, servicenow"
                     },
                     "tool_name": {
                         "type": "string",
@@ -200,11 +201,13 @@ class SearchTool:
             }
         }
 
-    async def async_search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "all", tool_name: str = None):
+    async def async_search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "docs", tool_name: str = None):
         # Retrieve context
         context = []
         data_sources = []
         try:
+            effective_collection_scope = search_scope
+
             # Create tasks for parallel execution
             tasks = []
             
@@ -228,7 +231,7 @@ class SearchTool:
             # Prepare search tasks based on scope
             search_tasks = []
 
-            if search_scope in ["all", "knowledge_base"]:
+            if search_scope in ["docs", "codes"]:
                 # Build filters for knowledge base
                 kb_filters = {}
                 if data_source:
@@ -240,12 +243,13 @@ class SearchTool:
                 kb_task = self._search_namespace(
                     all_queries,
                     self.org_slug,  # Main namespace
-                    top_k=RETRIEVE_TOP_K,
-                    filters=kb_filters
+                    top_k=RERANK_TOP_K,
+                    filters=kb_filters,
+                    collection_scope=effective_collection_scope
                 )
-                search_tasks.append(("knowledge_base", kb_task))
+                search_tasks.append(("docs", kb_task))
 
-            if search_scope in ["all", "tool_responses"]:
+            if search_scope == "tool_responses":
                 # Build filters for tool responses
                 tr_filters = {"type": {"$eq": "tool_response"}}
                 if tool_name:
@@ -257,8 +261,9 @@ class SearchTool:
                 tr_task = self._search_namespace(
                     all_queries,
                     self.tool_responses_namespace,
-                    top_k=RETRIEVE_TOP_K,
-                    filters=tr_filters
+                    top_k=RERANK_TOP_K,
+                    filters=tr_filters,
+                    collection_scope=effective_collection_scope
                 )
                 search_tasks.append(("tool_responses", tr_task))
 
@@ -354,14 +359,15 @@ class SearchTool:
         queries: List[str],
         namespace: str,
         top_k: int,
-        filters: dict = None
+        filters: dict = None,
+        collection_scope: str = "all"
     ) -> List[Dict[str, Any]]:
         """
         Search a specific namespace with given queries.
 
         Args:
             queries: List of query strings (original + rewrites)
-            namespace: Pinecone namespace to search
+            namespace: Vector search namespace to search
             top_k: Number of results to retrieve
             filters: Optional metadata filters
 
@@ -376,7 +382,8 @@ class SearchTool:
                 queries,
                 top_k=top_k,
                 filters=filters,
-                namespace=namespace
+                namespace=namespace,
+                collection_scope=collection_scope
             )
         )
         return nodes
@@ -453,7 +460,7 @@ class SearchTool:
 
         return timestamp_filter
 
-    def search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "all", tool_name: str = None):
+    def search_documents(self, query: str, data_source: str = None, start_date: str = None, end_date: str = None, search_scope: str = "docs", tool_name: str = None):
         """
         Synchronous wrapper for the async search_documents method.
         This allows the method to be called from synchronous code.
@@ -463,7 +470,7 @@ class SearchTool:
             data_source: Optional data source name to filter
             start_date: Optional start date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
             end_date: Optional end date for filtering documents by timestamp (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)
-            search_scope: Scope of search ("all", "knowledge_base", or "tool_responses")
+            search_scope: Scope of search ("tool_responses", "docs", or "codes")
             tool_name: Optional tool name filter for tool responses
         """
         try:

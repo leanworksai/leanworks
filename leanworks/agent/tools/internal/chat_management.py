@@ -3,7 +3,7 @@ Chat Management Tool - Domain-specific tool for chat/message operations via lean
 Replaces FirestoreTool for message-related operations.
 """
 from typing import Dict, List, Any, Optional
-from .base_api_client import BaseAPIClient
+from leanworks.agent.tools.base_api_client import BaseAPIClient
 import logging
 
 logger = logging.getLogger(__name__)

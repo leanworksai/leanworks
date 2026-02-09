@@ -6,19 +6,22 @@ The application requires GCP credentials to access Secret Manager and other GCP 
 
 ### Creating the Kubernetes Secret
 
-1. Ensure you have `gcp_credential.json` in the project root directory
+1. Ensure you have the correct credential file in the project root directory:
+   - Prod: `gcp_credential.json`
+   - Dev: `gcp_credential_dev.json`
 2. Run the script to create the secret:
 
 ```bash
 cd deploy
-./create-gcp-credentials-secret.sh [namespace]
+./create-gcp-credentials-secret.sh [environment] [namespace]
 ```
 
-If no namespace is specified, it defaults to `default`.
+If no environment is specified, it defaults to `prod`. If no namespace is specified, it defaults to `default`.
 
 Example:
 ```bash
-./create-gcp-credentials-secret.sh production
+./create-gcp-credentials-secret.sh prod default
+./create-gcp-credentials-secret.sh dev default
 ```
 
 ### Manual Secret Creation
@@ -29,6 +32,11 @@ Alternatively, you can create the secret manually:
 kubectl create secret generic gcp-credentials \
     --from-file=gcp_credential.json \
     -n <namespace>
+
+# Dev secret
+kubectl create secret generic gcp-credentials-dev \
+    --from-file=gcp_credential_dev.json \
+    -n <namespace>
 ```
 
 ### Verifying the Secret
@@ -36,6 +44,8 @@ kubectl create secret generic gcp-credentials \
 ```bash
 kubectl get secret gcp-credentials -n <namespace>
 kubectl describe secret gcp-credentials -n <namespace>
+kubectl get secret gcp-credentials-dev -n <namespace>
+kubectl describe secret gcp-credentials-dev -n <namespace>
 ```
 
 ### Updating the Secret
@@ -45,9 +55,11 @@ If you need to update the credentials:
 ```bash
 # Delete the existing secret
 kubectl delete secret gcp-credentials -n <namespace>
+kubectl delete secret gcp-credentials-dev -n <namespace>
 
 # Recreate it
-./create-gcp-credentials-secret.sh <namespace>
+./create-gcp-credentials-secret.sh prod <namespace>
+./create-gcp-credentials-secret.sh dev <namespace>
 ```
 
 Or update it directly:
@@ -55,14 +67,30 @@ Or update it directly:
 kubectl create secret generic gcp-credentials \
     --from-file=gcp_credential.json \
     --dry-run=client -o yaml | kubectl apply -f - -n <namespace>
+
+kubectl create secret generic gcp-credentials-dev \
+    --from-file=gcp_credential_dev.json \
+    --dry-run=client -o yaml | kubectl apply -f - -n <namespace>
 ```
 
 ## Deployment
 
-The deployment automatically mounts the secret at `/app/gcp_credential.json` in the container. The application will:
+Run the deploy script with the target environment:
 
-1. First check for `gcp_credential.json` at `/app/gcp_credential.json`
-2. If not found, fall back to Application Default Credentials (ADC)
+```bash
+./deploy.sh dev
+./deploy.sh prod
+```
+
+The deployment automatically mounts the secret in the container:
+
+- Prod: `/app/gcp_credential.json`
+- Dev: `/app/gcp_credential_dev.json`
+
+The application will:
+
+1. Prefer the dev credential file in local/dev
+2. Fall back to Application Default Credentials (ADC)
 3. Use environment variables as a final fallback for specific secrets (DB_PASSWORD, API_KEY)
 
 ## Troubleshooting
@@ -79,6 +107,31 @@ The deployment automatically mounts the secret at `/app/gcp_credential.json` in 
 
 ### Application still can't access secrets
 - Check pod logs: `kubectl logs <pod-name> -n <namespace>`
-- Verify the credential file is mounted: `kubectl exec <pod-name> -n <namespace> -- ls -la /app/gcp_credential.json`
-- Check file permissions: `kubectl exec <pod-name> -n <namespace> -- cat /app/gcp_credential.json | head -5`
+- Verify the credential file is mounted:
+  - Prod: `kubectl exec <pod-name> -n <namespace> -- ls -la /app/gcp_credential.json`
+  - Dev: `kubectl exec <pod-name> -n <namespace> -- ls -la /app/gcp_credential_dev.json`
+- Check file permissions:
+  - Prod: `kubectl exec <pod-name> -n <namespace> -- cat /app/gcp_credential.json | head -5`
+  - Dev: `kubectl exec <pod-name> -n <namespace> -- cat /app/gcp_credential_dev.json | head -5`
 
+## Environment Differences
+
+### Local Development
+- Uses `gcp_credential_dev.json`
+- Automatically starts Cloud SQL Proxy
+- Connects to `127.0.0.1:5432` for database
+- Hub URL: `http://localhost:3001` (default)
+
+### Dev (Kubernetes)
+- Uses `gcp-credentials-dev` secret (with `dev-` prefix)
+- Uses prefixed secret names (e.g., `dev-claude-api-key`)
+- Connects via `cloud-sql-proxy-service` Kubernetes service
+- Hub URL: `http://leanworks-hub-service` (in-cluster)
+- Domain: `dev.leanworks.ai`
+
+### Prod (Kubernetes)
+- Uses `gcp-credentials` secret (no prefix)
+- Uses base secret names (e.g., `claude-api-key`, not `dev-claude-api-key`)
+- Connects via `cloud-sql-proxy-service` Kubernetes service
+- Hub URL: `http://leanworks-hub-service` (in-cluster)
+- Domain: `leanworks.ai` and `hub.leanworks.ai`

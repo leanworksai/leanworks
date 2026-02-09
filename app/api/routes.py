@@ -13,7 +13,7 @@ import uuid
 import base64
 import requests
 from quart import request, Response
-from leanworks.agent.chat import ChatAgent
+from leanworks.agent.core.chat import ChatAgent
 from anthropic import Anthropic
 from app import app, get_firestore_client, get_secret_manager_client
 from app.auth.middleware import require_api_key
@@ -24,6 +24,8 @@ from app.services.client import (
 )
 from app.services.database import query_org_one, get_domain_from_email
 from app.utils.cache import clear_cache
+from app.api.plans_ai import setup_plans_ai_endpoints
+from app.api.lean_routing import setup_lean_routing_endpoints
 from leanworks.setting import MAX_IMAGES_PER_REQUEST, MAX_IMAGE_SIZE_MB, VISION_SUPPORTED_IMAGE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -378,30 +380,43 @@ async def ask():
             traceback.print_exc()
             return {"error": f"Failed to initialize clients: {str(e)}"}, 500
 
-        # Filter tools based on integrations table in PostgreSQL if tools are provided
+        # Filter tools based on integrations table in PostgreSQL if tools are provided.
+        # Only integration_id exact match (normalize: lowercase, hyphen to underscore). No prefix or mapping.
         if tools is not None:
             try:
                 logger.info(f"Available tools from PostgreSQL integrations: {available_tools}")
-                
-                # Filter tools to only include those enabled in PostgreSQL integrations table
-                filtered_tools = []
-                for tool in tools:
-                    if tool in available_tools:
-                        filtered_tools.append(tool)
-                        logger.info(f"Tool '{tool}' is enabled in PostgreSQL integrations")
-                    else:
-                        logger.warning(f"Tool '{tool}' is not found in PostgreSQL integrations table, skipping")
-                
+
+                def normalize_tool_name(name: str) -> str:
+                    return name.lower().strip().replace("-", "_")
+
+                available_tools_normalized = {normalize_tool_name(t) for t in available_tools}
+
+                filtered_tools = [
+                    t for t in tools
+                    if normalize_tool_name(t) in available_tools_normalized
+                ]
+                for t in tools:
+                    if normalize_tool_name(t) not in available_tools_normalized:
+                        logger.warning(
+                            f"Tool '{t}' is not in PostgreSQL integrations table (integration_id), skipping"
+                        )
+
                 logger.info(f"Filtered tools: {filtered_tools}")
             except Exception as e:
                 logger.error(f"Error filtering tools against PostgreSQL integrations: {str(e)}")
                 # If there's an error filtering, use original tools
                 filtered_tools = tools
         else:
-            filtered_tools = None
+            # When no tools are explicitly requested, default to all enabled tools: internal tools
+            # (search, project_management, doc_management, etc.) plus org's connected integrations.
+            # ToolUse merges passed tools with internal_tools, so passing available_tools yields both.
+            filtered_tools = available_tools if available_tools else None
         
         # Log tools being used
-        logger.info(f"Ask API - Tools being used: {json.dumps(filtered_tools if filtered_tools else available_tools, default=str)}")
+        if filtered_tools is None:
+            logger.info("Ask API - Tools being used: Internal tools only (no org integrations connected)")
+        else:
+            logger.info(f"Ask API - Tools being used: Internal tools + org integrations: {json.dumps(filtered_tools, default=str)}")
         print(f"Filtered tools: {filtered_tools}")
         
         # Web app now sends HTML positions directly - no conversion needed
@@ -1408,4 +1423,16 @@ async def clear_cache_endpoint():
     clear_cache()
     logger.info("All caches cleared")
     return {"status": "success", "message": "All caches cleared"}, 200
+
+# ============================================================================
+# PLANS AI ENDPOINTS
+# ============================================================================
+
+setup_plans_ai_endpoints(app)
+
+# ============================================================================
+# LEAN ROUTING ENDPOINTS
+# ============================================================================
+
+setup_lean_routing_endpoints()
 

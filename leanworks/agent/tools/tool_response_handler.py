@@ -2,7 +2,7 @@ from typing import Optional, List, Dict, Any
 from abc import ABC, abstractmethod
 import logging
 
-from leanworks.agent.tool_registry import ToolRegistry
+from leanworks.agent.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -293,10 +293,9 @@ class ClientToolResponseHandler(ToolResponseHandler):
                         result_content = content_block.get("content", "")
                         if result_content and not result_content.startswith("Error"):
                             result_preview = result_content[:200] + "..." if len(result_content) > 200 else result_content
-                            print(f"✅ Tool result: {result_preview}")
+                            logger.info(f"Tool result: {result_preview}")
                         elif result_content.startswith("Error"):
-                            print(f"❌ Tool error: {result_content}")
-                        print()
+                            logger.warning(f"Tool error: {result_content}")
     
     def _show_tool_usage(self, response):
         """Display tool usage information"""
@@ -304,7 +303,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
             if getattr(block, 'type', None) == "tool_use":
                 tool_name = getattr(block, 'name', 'unknown')
                 tool_input = getattr(block, 'input', {})
-                print(f"🔧 Using tool: {tool_name}")
+                logger.info(f"Using tool: {tool_name}")
                 if tool_input:
                     key_params = []
                     for key, value in tool_input.items():
@@ -312,8 +311,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
                             key_params.append(f"{key}: {value[:50]}...")
                         else:
                             key_params.append(f"{key}: {value}")
-                    print(f"   Parameters: {', '.join(key_params)}")
-                print()
+                    logger.debug(f"Tool parameters: {', '.join(key_params)}")
 
 class TextOnlyResponseHandler(ToolResponseHandler):
     """Handles text-only responses (no tool calls)"""

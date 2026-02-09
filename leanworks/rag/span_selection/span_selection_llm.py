@@ -190,7 +190,7 @@ class LLMSpanSelector(BaseSpanSelector):
             # Extract just the text for scoring
             span_texts = [c[0] if isinstance(c, tuple) else c for c in all_span_candidates]
             span_scores = self._score_spans_with_llm(query, span_texts)
-            
+
             # Step 5: Select top spans and group by document
             selected_spans_by_doc = self._select_top_spans_by_document(
                 span_scores, all_span_candidates, doc_span_mapping
@@ -699,6 +699,7 @@ class LLMSpanSelector(BaseSpanSelector):
         
         logger.debug(f"Selected spans for {len(selected_spans_by_doc)} documents")
         return selected_spans_by_doc
+
     
     def _update_documents_with_spans(
         self, 

@@ -1,14 +1,26 @@
-FROM alpine:3.19
+# Use Python slim so agent bash sessions can run Python with a venv
+# Build context MUST be the repo root (e.g. docker build -f deploy/Dockerfile.bash-session .)
+FROM python:3.10-slim
 
-# Install all required tools in one layer
-RUN apk add --no-cache \
+# Install shell and utilities (bash, jq, grep, sed, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     jq \
     grep \
     sed \
     coreutils \
     findutils \
-    && rm -rf /var/cache/apk/*
+    gawk \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment and install workspace runtime (requirements-workspace.txt at repo root)
+COPY requirements-workspace.txt .
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements-workspace.txt
+
+# Use venv Python by default so "python" and "pip" run inside the venv
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Create workspace directory
 RUN mkdir -p /workspace && chmod 777 /workspace

@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from leanworks.rag.vectordb import UPSERT_BATCH_SIZE
+from leanworks.rag.vectordb_gcp import UPSERT_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class RAGStorageTool:
         Initialize RAG storage tool.
 
         Args:
-            vectordb_client: PineconeHybridIndex instance
+            vectordb_client: Vector DB client instance
             embedding_client: GoogleEmbedding instance
             org_slug: Organization slug for namespace
             chunk_size: Size of text chunks for vector storage
@@ -33,6 +33,7 @@ class RAGStorageTool:
         self.org_slug = org_slug
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.backend = getattr(vectordb_client, "backend", "gcp")
         self.use_large_response_indexes = use_large_response_indexes
         
         # Set namespace based on index type
@@ -97,66 +98,77 @@ class RAGStorageTool:
             chunk_meta["chunk_text"] = chunk
             chunk_metadata_list.append(chunk_meta)
 
-        # Create vectors using the vectordb_client's method
         try:
-            # _create_vectors expects (all_chunks, chunk_metadata_list)
-            dense_vectors, sparse_vectors = self.vectordb_client._create_vectors(
-                chunks, chunk_metadata_list
-            )
+            if self.backend == "gcp":
+                self.vectordb_client.upsert_chunks_with_metadata(
+                    chunks=chunks,
+                    chunk_metadata_list=chunk_metadata_list,
+                    org_slug=self.org_slug,
+                )
+                logger.info(
+                    f"Stored tool response in GCP RAG: {document_id} ({len(chunks)} chunks)"
+                )
+            else:
+                # _create_vectors expects (all_chunks, chunk_metadata_list)
+                dense_vectors, sparse_vectors = self.vectordb_client._create_vectors(
+                    chunks, chunk_metadata_list
+                )
 
-            # Get the appropriate indexes to use
-            dense_index = self.dense_index if self.use_large_response_indexes else self.vectordb_client.dense_index
-            sparse_index = self.sparse_index if self.use_large_response_indexes else self.vectordb_client.sparse_index
-            
-            # Batch and upsert vectors in parallel for better performance
-            def upsert_dense_batch(batch_vectors):
-                """Upsert a batch of dense vectors."""
-                if batch_vectors:
-                    dense_index.upsert(
-                        vectors=batch_vectors,
-                        namespace=self.namespace
-                    )
+                # Get the appropriate indexes to use
+                dense_index = self.dense_index if self.use_large_response_indexes else self.vectordb_client.dense_index
+                sparse_index = self.sparse_index if self.use_large_response_indexes else self.vectordb_client.sparse_index
 
-            def upsert_sparse_batch(batch_vectors):
-                """Upsert a batch of sparse vectors."""
-                if batch_vectors:
-                    sparse_index.upsert(
-                        vectors=batch_vectors,
-                        namespace=self.namespace
-                    )
+                # Batch and upsert vectors in parallel for better performance
+                def upsert_dense_batch(batch_vectors):
+                    """Upsert a batch of dense vectors."""
+                    if batch_vectors:
+                        dense_index.upsert(
+                            vectors=batch_vectors,
+                            namespace=self.namespace
+                        )
 
-            # Split vectors into batches
-            dense_batches = [
-                dense_vectors[i:i + UPSERT_BATCH_SIZE]
-                for i in range(0, len(dense_vectors), UPSERT_BATCH_SIZE)
-            ]
-            sparse_batches = [
-                sparse_vectors[i:i + UPSERT_BATCH_SIZE]
-                for i in range(0, len(sparse_vectors), UPSERT_BATCH_SIZE)
-            ]
+                def upsert_sparse_batch(batch_vectors):
+                    """Upsert a batch of sparse vectors."""
+                    if batch_vectors:
+                        sparse_index.upsert(
+                            vectors=batch_vectors,
+                            namespace=self.namespace
+                        )
 
-            # Upsert dense and sparse vectors in parallel
-            logger.info(f"Upserting {len(dense_vectors)} dense and {len(sparse_vectors)} sparse vectors in batches...")
+                # Split vectors into batches
+                dense_batches = [
+                    dense_vectors[i:i + UPSERT_BATCH_SIZE]
+                    for i in range(0, len(dense_vectors), UPSERT_BATCH_SIZE)
+                ]
+                sparse_batches = [
+                    sparse_vectors[i:i + UPSERT_BATCH_SIZE]
+                    for i in range(0, len(sparse_vectors), UPSERT_BATCH_SIZE)
+                ]
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = []
+                # Upsert dense and sparse vectors in parallel
+                logger.info(f"Upserting {len(dense_vectors)} dense and {len(sparse_vectors)} sparse vectors in batches...")
 
-                # Submit all batch upserts
-                for batch in dense_batches:
-                    futures.append(executor.submit(upsert_dense_batch, batch))
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = []
 
-                for batch in sparse_batches:
-                    futures.append(executor.submit(upsert_sparse_batch, batch))
+                    # Submit all batch upserts
+                    for batch in dense_batches:
+                        futures.append(executor.submit(upsert_dense_batch, batch))
 
-                # Wait for all upserts to complete
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"Error during batch upsert: {e}")
-                        raise
+                    for batch in sparse_batches:
+                        futures.append(executor.submit(upsert_sparse_batch, batch))
 
-            logger.info(f"Stored tool response in RAG: {document_id} ({len(chunks)} chunks, namespace: {self.namespace})")
+                    # Wait for all upserts to complete
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error(f"Error during batch upsert: {e}")
+                            raise
+
+                logger.info(
+                    f"Stored tool response in RAG: {document_id} ({len(chunks)} chunks, namespace: {self.namespace})"
+                )
         except Exception as e:
             logger.error(f"Failed to store tool response in RAG: {e}")
             raise
@@ -209,25 +221,33 @@ class RAGStorageTool:
             return
 
         try:
+            if self.backend == "gcp":
+                filter_expr = {
+                    "$and": [
+                        {"org_slug": {"$eq": self.org_slug}},
+                        {"type": {"$eq": "tool_response"}},
+                    ]
+                }
+                deleted_count = self.vectordb_client.delete_by_filter(filter_expr)
+                logger.info(
+                    f"Deleted tool_response data for org '{self.org_slug}' from GCP collections"
+                )
+                return
+
             # Delete entire namespace from both dense and sparse indexes
-            # This effectively removes the namespace from both indexes
             deleted_count = 0
 
             if self.vectordb_client.dense_index:
                 try:
-                    # Delete all vectors in the namespace (this deletes the namespace)
                     result = self.vectordb_client.dense_index.delete(
                         delete_all=True,
                         namespace=self.namespace
                     )
-                    # Result might be a dict or just indicate success
                     if isinstance(result, dict) and "deleted" in result:
                         deleted_count += result.get("deleted", 0)
                     logger.info(f"Deleted namespace '{self.namespace}' from leanworks-dense index")
                 except Exception as e:
-                    # Handle 404 errors (namespace not found) gracefully - this is not an error
                     error_str = str(e)
-                    # Check for Pinecone namespace not found errors (code 5 or 404)
                     is_namespace_not_found = (
                         "404" in error_str or
                         "Namespace not found" in error_str or
@@ -235,14 +255,12 @@ class RAGStorageTool:
                         "'code': 5" in error_str
                     )
                     if is_namespace_not_found:
-                        # Namespace doesn't exist, which is fine - nothing to clean up
                         logger.debug(f"Namespace '{self.namespace}' not found in leanworks-dense index, nothing to delete")
                     else:
                         logger.error(f"Failed to delete namespace '{self.namespace}' from leanworks-dense index: {e}")
 
             if self.vectordb_client.sparse_index:
                 try:
-                    # Delete all vectors in the namespace (this deletes the namespace)
                     result = self.vectordb_client.sparse_index.delete(
                         delete_all=True,
                         namespace=self.namespace
@@ -251,9 +269,7 @@ class RAGStorageTool:
                         deleted_count += result.get("deleted", 0)
                     logger.info(f"Deleted namespace '{self.namespace}' from leanworks-sparse index")
                 except Exception as e:
-                    # Handle 404 errors (namespace not found) gracefully - this is not an error
                     error_str = str(e)
-                    # Check for Pinecone namespace not found errors (code 5 or 404)
                     is_namespace_not_found = (
                         "404" in error_str or
                         "Namespace not found" in error_str or
@@ -261,7 +277,6 @@ class RAGStorageTool:
                         "'code': 5" in error_str
                     )
                     if is_namespace_not_found:
-                        # Namespace doesn't exist, which is fine - nothing to clean up
                         logger.debug(f"Namespace '{self.namespace}' not found in leanworks-sparse index, nothing to delete")
                     else:
                         logger.error(f"Failed to delete namespace '{self.namespace}' from leanworks-sparse index: {e}")

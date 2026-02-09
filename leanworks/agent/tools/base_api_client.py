@@ -7,7 +7,21 @@ import os
 import logging
 from typing import Dict, Any, Optional
 
+from leanworks.utils.env import get_hub_url
+
 logger = logging.getLogger(__name__)
+
+# MIME types for upload (must match leanworks-hub file-validation)
+_UPLOAD_MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+}
 
 
 class BaseAPIClient:
@@ -28,7 +42,7 @@ class BaseAPIClient:
         self.user_id = user_id
         
         # Environment-aware configuration
-        self.base_url = os.getenv('LEANWORKS_HUB_URL', 'http://localhost:3001')
+        self.base_url = get_hub_url()
         self.api_key = os.getenv('LEANWORKS_API_KEY')
         self.bearer_token = os.getenv('LEANWORKS_BEARER_TOKEN')
         
@@ -80,17 +94,18 @@ class BaseAPIClient:
             
         return headers
     
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Any:
+    def _make_request(self, method: str, endpoint: str, raw: bool = False, **kwargs) -> Any:
         """
         Make HTTP request with proper error handling.
         
         Args:
             method: HTTP method (GET, POST, PATCH, DELETE)
             endpoint: API endpoint path (e.g., '/api/tasks')
+            raw: If True, return raw response content instead of JSON (default: False)
             **kwargs: Additional arguments passed to requests.request()
             
         Returns:
-            Response JSON data
+            Response JSON data (or raw bytes if raw=True)
             
         Raises:
             requests.HTTPError: If request fails
@@ -101,12 +116,21 @@ class BaseAPIClient:
         request_headers = self._get_headers()
         if 'headers' in kwargs:
             request_headers.update(kwargs.pop('headers'))
+        
+        # For raw responses, don't set JSON content-type
+        if raw:
+            request_headers.pop('Content-Type', None)
+        
         kwargs['headers'] = request_headers
         
         try:
-            logger.debug(f"Making {method} request to {url}")
+            logger.debug(f"Making {method} request to {url} (raw={raw})")
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
+            
+            # Return raw bytes if requested
+            if raw:
+                return response.content
             
             # Return JSON if content exists
             if response.content:
@@ -121,4 +145,62 @@ class BaseAPIClient:
             raise
         except Exception as e:
             logger.error(f"Unexpected error for {method} {endpoint}: {str(e)}")
+            raise
+
+    def _make_upload_request(
+        self,
+        endpoint: str,
+        file_path: str,
+        file_field_name: str = "file",
+        extra_data: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """
+        POST multipart/form-data with a file and optional form fields.
+        Used for document upload (POST /api/docs/upload).
+
+        Args:
+            endpoint: API path (e.g. '/api/docs/upload')
+            file_path: Local path to the file to upload
+            file_field_name: Form field name for the file (default 'file')
+            extra_data: Optional dict of form fields (e.g. title, projectId)
+
+        Returns:
+            Response JSON dict
+
+        Raises:
+            requests.HTTPError: If request fails
+        """
+        url = f"{self.base_url}{endpoint}"
+        request_headers = self._get_headers()
+        request_headers.pop("Content-Type", None)  # Let requests set multipart boundary
+
+        ext = os.path.splitext(file_path)[1].lower()
+        mime_type = _UPLOAD_MIME_BY_EXT.get(ext, "application/octet-stream")
+        filename = os.path.basename(file_path)
+
+        extra_data = extra_data or {}
+        data = {k: (v if v is not None else "") for k, v in extra_data.items()}
+
+        try:
+            with open(file_path, "rb") as f:
+                files = [(file_field_name, (filename, f, mime_type))]
+                logger.debug(f"Making POST upload request to {url} (file={filename})")
+                response = requests.post(
+                    url,
+                    headers=request_headers,
+                    data=data,
+                    files=files,
+                )
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return None
+        except requests.HTTPError as e:
+            logger.error(f"HTTP error for POST {endpoint}: {e.response.status_code} - {e.response.text}")
+            raise
+        except requests.RequestException as e:
+            logger.error(f"Request error for POST {endpoint}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error for POST {endpoint}: {str(e)}")
             raise

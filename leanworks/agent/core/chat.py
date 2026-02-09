@@ -1,17 +1,19 @@
 from leanworks.agent.tools.toolkit import ToolUse
-from leanworks.agent.helpers import AgentHelpers
+from leanworks.agent.utils.helpers import AgentHelpers
 from datetime import datetime, timezone
-from leanworks.agent.conversation import ConversationManager
-from leanworks.agent.memory import MemoryManager
-from leanworks.agent.tool_registry import ToolRegistry
-from leanworks.agent.tool_response_handler import ToolResponseHandlerFactory
-from leanworks.agent.working_context import WorkingContext
+from leanworks.agent.core.conversation import ConversationManager
+from leanworks.agent.core.memory import MemoryManager
+from leanworks.agent.tools.tool_registry import ToolRegistry
+from leanworks.agent.tools.tool_response_handler import ToolResponseHandlerFactory
+from leanworks.agent.core.working_context import WorkingContext
 from leanworks.setting import AGENT_SYSTEM_PROMPT, SEARCH_KNOWLEDGE_QUERY, EVALUATION_PROMPT, CRITIQUE_MESSAGE, GENERATION_MODEL
+from leanworks.utils.env import resolve_credential_path
 from google.cloud import firestore, secretmanager
 from typing import Dict, Any, List
 import traceback
 import logging
 import pytz
+import time
 logger = logging.getLogger(__name__)
 
 class ChatAgent:
@@ -32,7 +34,7 @@ class ChatAgent:
                  clear_conversation=True,
                  tools=None,
                  additional_context=None,
-                 credential_path: str = "gcp_credential.json",
+                 credential_path: str | None = None,
                  ):
         """
         Initialize the ChatAgent with necessary clients and settings.
@@ -46,12 +48,14 @@ class ChatAgent:
             session_id (str): The session ID for conversation tracking
             clear_conversation (bool): Whether to clear conversation history on init
             tools (list): List of additional tools to enable. These will be added to the default tools ['search', 'postgres', 'duckdb']. ToolUse handles the processing and filtering.
-            credential_path (str): Path to GCP credential JSON file (default: "gcp_credential.json")
+            credential_path (str): Path to GCP credential JSON file (default: environment-aware)
         """
         self.org_slug = org_slug
         if not self.org_slug:
             raise ValueError("org_slug is required for ChatAgent initialization")
         
+        if credential_path is None:
+            credential_path = resolve_credential_path()
         # Read project_id from credential file
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         
@@ -77,7 +81,18 @@ class ChatAgent:
         self.working_context = WorkingContext()
 
         # Initialize tool use with org_slug and tools (passes session context for tools that can persist large results)
-        self.tool_use = ToolUse(org_slug=self.org_slug, firestore_client=firestore_client, secret_manager_client=secret_manager_client, model_client=model_client, read_document_ids=self.read_document_ids, tools=tools, user_id=self.user_id, session_id=self.session_id, credential_path=credential_path, working_context=self.working_context)
+        self.tool_use = ToolUse(
+            org_slug=self.org_slug,
+            firestore_client=firestore_client,
+            secret_manager_client=secret_manager_client,
+            model_client=model_client,
+            read_document_ids=self.read_document_ids,
+            tools=tools,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            credential_path=credential_path,
+            working_context=self.working_context
+        )
 
         # Initialize UserManagementTool for user info retrieval
         self.user_management_tool = self.tool_use.user_management_tool
@@ -190,7 +205,7 @@ class ChatAgent:
             "system": self.system_prompt,
             "messages": self.conversation.conversation,
             "tools": all_tools,
-            "max_tokens": 8192,  # Increased from 1024 to support longer responses
+            "max_tokens": 16384,  # Increased from 8192 for document workflows
             "temperature": 0.1,
             "timeout": 60
         }
@@ -697,6 +712,8 @@ class ChatAgent:
         unanswered_count = 0
         response_text = ""
         max_unanswered_num = 2
+        tool_iteration_count = 0
+        MAX_TOOL_ITERATIONS = 25  # Hard cap on tool call iterations to prevent runaway loops
         
         # Reset retry flag for new message processing
         self._retry_attempted = False
@@ -764,6 +781,12 @@ class ChatAgent:
                     )
                     
                     if has_tool_use:
+                        tool_iteration_count += 1
+                        if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                            logger.warning(f"Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                            response_text = "I've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
+                            self.conversation.add_assistant_message(response_text)
+                            break
                         # If there are tool calls, continue the conversation loop to execute them
                         logger.debug("Response hit max_tokens but has tool calls - continuing conversation")
                         # Use unified handler to process response (will execute tools and continue)
@@ -793,6 +816,19 @@ class ChatAgent:
                         self.conversation.add_assistant_message(response_text)
                         break
                 
+                # Check for tool calls and enforce iteration limit
+                has_any_tool_calls = any(
+                    getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
+                    for block in response.content
+                )
+                if has_any_tool_calls:
+                    tool_iteration_count += 1
+                    if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                        logger.warning(f"Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                        response_text = "I've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
+                        self.conversation.add_assistant_message(response_text)
+                        break
+                
                 # Use unified handler to process response
                 handler = self.tool_response_handler_factory.get_handler(response)
                 
@@ -816,10 +852,8 @@ class ChatAgent:
                         
                         # Stream the response if streaming is enabled
                         if streaming:
-                            print("🤖 Assistant response:")
-                            print("-" * 50)
+                            logger.info("Assistant response:")
                             AgentHelpers.stream_text(response_text, delay=0.01)
-                            print("-" * 50)
                         
                         assistant_message_obj = {
                             "role": "assistant",
@@ -843,10 +877,8 @@ class ChatAgent:
                         
                         # Stream the response if streaming is enabled
                         if streaming:
-                            print("🤖 Assistant response (evaluated):")
-                            print("-" * 50)
+                            logger.info("Assistant response (evaluated):")
                             AgentHelpers.stream_text(response_text, delay=0.01)
-                            print("-" * 50)
                         
                         # Create assistant message object
                         assistant_message_obj = {
@@ -907,10 +939,8 @@ class ChatAgent:
                                 
                                 # Stream the response if streaming is enabled
                                 if streaming:
-                                    print("🤖 Assistant response (retry successful):")
-                                    print("-" * 50)
+                                    logger.info("Assistant response (retry successful):")
                                     AgentHelpers.stream_text(response_text, delay=0.01)
-                                    print("-" * 50)
                                 
                                 # Remove the inadequate response and critique from conversation
                                 self.conversation.conversation = self.conversation.conversation[:-2]
@@ -1032,10 +1062,7 @@ class ChatAgent:
         
         # Show final summary if streaming is enabled
         if streaming and unique_sources:
-            print("\n📚 Data sources used:")
-            for i, source in enumerate(unique_sources, 1):
-                print(f"   {i}. {source}")
-            print()
+            logger.info(f"Data sources used: {', '.join(unique_sources)}")
         
         # Log memory stats if using memory manager
         if self.memory_manager:
@@ -1063,6 +1090,7 @@ class ChatAgent:
         Yields:
             dict: Event objects with 'type' and event-specific data
                 - tool_start: {"type": "tool_start", "tool_name": str, "display_name": str, "description": str}
+                - bash_command: {"type": "bash_command", "command": str}  (after tool_start for bash)
                 - tool_end: {"type": "tool_end", "tool_name": str, "display_name": str, "summary": str}
                 - text_delta: {"type": "text_delta", "text": str}
                 - error: {"type": "error", "error": str}
@@ -1315,6 +1343,8 @@ class ChatAgent:
             loop = asyncio.get_event_loop()
             unanswered_count = 0
             max_unanswered_num = 2
+            tool_iteration_count = 0
+            MAX_TOOL_ITERATIONS = 25  # Hard cap on tool call iterations to prevent runaway loops
             
             while unanswered_count < max_unanswered_num:
                 try:
@@ -1330,8 +1360,11 @@ class ChatAgent:
                     
                     logger.debug(f"Streaming: Making API call with {len(current_params.get('tools', []))} tools")
                     
-                    # Make API call (non-streaming first to get tool calls)
-                    response = self.model_client.messages.create(**current_params)
+                    # Make API call in executor to avoid blocking the event loop
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda p=current_params: self.model_client.messages.create(**p)
+                    )
                     stop_reason = getattr(response, 'stop_reason', None)
                     
                     logger.info(f"Streaming: Response stop_reason: {stop_reason}")
@@ -1348,15 +1381,25 @@ class ChatAgent:
                         for block in response.content
                     )
                     
-                    if stop_reason == "tool_use" and has_tool_calls:
-                        # Extract and stream tool execution
+                    # Check for tool calls FIRST (regardless of stop_reason)
+                    if has_tool_calls:
+                        tool_iteration_count += 1
+                        if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                            logger.warning(f"Streaming: Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                            yield {
+                                "type": "text_delta",
+                                "text": "\n\nI've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
+                            }
+                            break
+                        # Execute tools regardless of stop_reason (tool_use, max_tokens, etc.)
+                        logger.info(f"Streaming: Executing tools (stop_reason={stop_reason})")
+                        
                         tool_calls = [
                             block for block in response.content 
                             if getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
                         ]
                         
-                        logger.info(f"Streaming: Executing {len(tool_calls)} tools")
-                        
+                        # Yield tool_start events
                         for tool_block in tool_calls:
                             tool_name = getattr(tool_block, 'name', 'unknown_tool')
                             
@@ -1375,7 +1418,15 @@ class ChatAgent:
                                 "display_name": tool_display_name,
                                 "description": tool_description
                             }
-                            
+                            # Yield bash_command event so UI can show the command being run
+                            if tool_name == "bash":
+                                tool_input = getattr(tool_block, 'input', {}) or {}
+                                command = tool_input.get("command", "")
+                                if command:
+                                    yield {
+                                        "type": "bash_command",
+                                        "command": command
+                                    }
                             logger.debug(f"Streaming: Tool {tool_name} started")
                         
                         # Execute tools using handler in executor
@@ -1389,9 +1440,70 @@ class ChatAgent:
                                 'memory_manager': self.memory_manager
                             }
                             return handler.handle(response, context)
-                        
-                        await loop.run_in_executor(None, execute_tools)
-                        
+
+                        # Execute tools in executor and wrap for asyncio coordination
+                        tool_future = loop.run_in_executor(None, execute_tools)
+                        tool_task = asyncio.wrap_future(tool_future)
+
+                        # Heartbeat loop to keep connection alive
+                        heartbeat_interval = 3.0  # seconds
+                        while not tool_future.done():
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(tool_task),
+                                    timeout=heartbeat_interval
+                                )
+                                break  # Task completed
+                            except asyncio.TimeoutError:
+                                # Task still running, emit heartbeat
+                                yield {
+                                    "type": "heartbeat",
+                                    "timestamp": time.time()
+                                }
+
+                        # Get result
+                        tool_results = await tool_task
+
+                        # After tools execute, check for document progress metadata
+                        for tool_block in tool_calls:
+                            tool_name = getattr(tool_block, 'name', 'unknown_tool')
+
+                            # Check if this is prepare_section_context (doc drafting workflow)
+                            if tool_name == "prepare_section_context":
+                                # Find corresponding tool result to extract progress
+                                for tool_result in tool_results:
+                                    try:
+                                        # Tool results have content that may be JSON with _progress
+                                        content = tool_result.get("content", "")
+                                        if isinstance(content, str) and content.strip().startswith("{"):
+                                            import json
+                                            result_data = json.loads(content)
+
+                                            if "_progress" in result_data:
+                                                progress = result_data["_progress"]
+                                                yield {
+                                                    "type": "doc_progress",
+                                                    "stage": "preparing",
+                                                    "current": progress["current"],
+                                                    "total": progress["total"],
+                                                    "heading": progress["heading"],
+                                                    "message": f"Preparing section {progress['current']} of {progress['total']}: {progress['heading']}"
+                                                }
+                                                break
+                                    except (json.JSONDecodeError, KeyError):
+                                        pass
+
+                            # Detect bash file append (section writing)
+                            elif tool_name == "bash":
+                                tool_input = getattr(tool_block, 'input', {})
+                                command = tool_input.get("command", "")
+                                if ">>" in command and ("/workspace/" in command or "working_doc" in command):
+                                    yield {
+                                        "type": "doc_progress",
+                                        "stage": "writing",
+                                        "message": "Writing section to document..."
+                                    }
+
                         # Yield tool_end events
                         for tool_block in tool_calls:
                             tool_name = getattr(tool_block, 'name', 'unknown_tool')
@@ -1412,11 +1524,18 @@ class ChatAgent:
                             
                             logger.debug(f"Streaming: Tool {tool_name} completed")
                         
-                        # Continue loop for next API call
-                        continue
+                        # After tool execution, check if we should continue or end
+                        if stop_reason in ["tool_use", "max_tokens"]:
+                            # Continue loop for more tool execution or to get continuation
+                            logger.info(f"Streaming: Continuing after tool execution (stop_reason={stop_reason})")
+                            continue
+                        else:
+                            # Other stop reasons after tool execution - end gracefully
+                            logger.info(f"Streaming: Ending after tool execution (stop_reason={stop_reason})")
+                            break
                     
-                    elif stop_reason == "end_turn" or not has_tool_calls:
-                        # Extract final text response
+                    elif stop_reason == "end_turn":
+                        # Text-only response - normal completion
                         text_content = next(
                             (block.text for block in response.content if block.type == "text"),
                             ""
@@ -1460,8 +1579,66 @@ class ChatAgent:
                         
                         break
                     
+                    elif stop_reason == "max_tokens":
+                        # max_tokens without tool calls - partial text response
+                        logger.warning("Streaming: max_tokens without tool calls - partial response")
+                        text_content = next(
+                            (block.text for block in response.content if block.type == "text"),
+                            ""
+                        )
+                        
+                        if text_content:
+                            # Add truncation indicator
+                            truncation_msg = "\n\n[Response truncated due to token limit. Please ask me to continue if you need more information.]"
+                            response_text = text_content + truncation_msg
+                            
+                            # Save to conversation
+                            self.conversation.add_assistant_message(response_text)
+                            
+                            # Stream the partial text
+                            words = text_content.split()
+                            current_chunk = ""
+                            
+                            for word in words:
+                                current_chunk += word + " "
+                                if len(current_chunk) > 20:
+                                    yield {
+                                        "type": "text_delta",
+                                        "text": current_chunk
+                                    }
+                                    current_chunk = ""
+                                    await asyncio.sleep(0.001)
+                            
+                            if current_chunk.strip():
+                                yield {
+                                    "type": "text_delta",
+                                    "text": current_chunk
+                                }
+                            
+                            # Stream truncation notice
+                            yield {
+                                "type": "text_delta",
+                                "text": truncation_msg
+                            }
+                            
+                            # Update memory manager
+                            if self.memory_manager:
+                                assistant_message_obj = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": response_text}]
+                                }
+                                self.memory_manager.update_assistant_response(assistant_message_obj)
+                        
+                        # End gracefully (conversation state is saved, user can continue)
+                        break
+                    
+                    elif stop_reason == "refusal":
+                        logger.warning("Streaming: Claude refused to respond")
+                        yield {"type": "error", "error": "Request was refused by the model"}
+                        break
+                    
                     else:
-                        # Unexpected stop reason
+                        # Truly unexpected stop reasons (rare)
                         logger.warning(f"Streaming: Unexpected stop_reason: {stop_reason}")
                         yield {
                             "type": "error",
@@ -1537,6 +1714,8 @@ class ChatAgent:
             "create_doc": "Creating a document",
             "update_doc": "Updating a document",
             "search_docs": "Searching documents",
+            "prepare_section_context": "Preparing document section",
+            "draft_document_iteratively": "Starting document workflow",
         }
         return descriptions.get(tool_name, f"Executing {tool_name}")
     
@@ -1588,7 +1767,6 @@ class ChatAgent:
             # System/internal tools
             "extract_text_at_html_positions",  # Internal document processing
             "query_working_context",            # Internal context management
-            "bash",                              # System command execution
             "str_replace_based_edit_tool",      # Text editor (system tool)
             "get_table_schema",                 # Database schema introspection
         }
@@ -1639,6 +1817,9 @@ class ChatAgent:
             # Cloud Storage
             "get_image_url": "Get Image",
             "list_chat_images": "List Images",
+
+            # System tools
+            "bash": "Bash Command",
             
             # Jira/Atlassian
             "search_issues": "Search Issues",

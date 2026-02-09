@@ -9,7 +9,7 @@ This tool consolidates:
 - SQL query operations (direct database access)
 """
 from typing import Dict, List, Any, Optional, Union
-from .base_api_client import BaseAPIClient
+from leanworks.agent.tools.base_api_client import BaseAPIClient
 import logging
 
 logger = logging.getLogger(__name__)

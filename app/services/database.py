@@ -11,10 +11,18 @@ import subprocess
 import socket
 import atexit
 from typing import Optional, Dict, Any, Tuple
-from psycopg2 import pool, connect
+import psycopg2
+from psycopg2 import pool, connect, OperationalError
 from psycopg2.extras import RealDictCursor
 from google.cloud import secretmanager
 from google.oauth2 import service_account
+from leanworks.utils.env import (
+    get_cloud_sql_connection_name,
+    get_cloud_sql_socket_path,
+    get_secret_name,
+    resolve_credential_path,
+    get_google_application_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +60,8 @@ def _ensure_cloud_sql_proxy_running() -> bool:
     
     # Only run in local environment
     is_kubernetes = os.environ.get("KUBERNETES_SERVICE_HOST") is not None
-    socket_path = "/cloudsql/leanworks-474204:us-west1:leanworks-prod/.s.PGSQL.5432"
-    is_gcp = os.path.exists(os.path.dirname(socket_path))
+    socket_dir = get_cloud_sql_socket_path(_project_id)
+    is_gcp = os.path.exists(socket_dir)
     
     if is_kubernetes or is_gcp:
         # Not local, don't start proxy
@@ -79,13 +87,10 @@ def _ensure_cloud_sql_proxy_running() -> bool:
     logger.info("🚀 Starting Cloud SQL proxy locally...")
     
     # Get connection string from environment or use default
-    connection_name = os.environ.get(
-        "CLOUD_SQL_CONNECTION_NAME",
-        "leanworks-474204:us-west1:leanworks-prod"
-    )
+    connection_name = os.environ.get("CLOUD_SQL_CONNECTION_NAME") or get_cloud_sql_connection_name(_project_id)
     
     # Get credentials file path
-    credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "gcp_credential.json")
+    credentials_file = get_google_application_credentials()
     if not os.path.exists(credentials_file):
         logger.error(f"❌ Credentials file not found: {credentials_file}")
         logger.error("   Cannot start Cloud SQL proxy without credentials")
@@ -193,15 +198,16 @@ def initialize_database():
         logger.info("Initializing database connection infrastructure...")
         
         # Check if credential file exists - use it if available, otherwise use ADC
-        credential_file_exists = os.path.exists("gcp_credential.json")
+        credential_path = resolve_credential_path()
+        credential_file_exists = os.path.exists(credential_path)
         
         if credential_file_exists:
             # Use credential file if it exists (works in both local and Cloud Run)
-            logger.info("Using service account file: gcp_credential.json")
-            _credentials = service_account.Credentials.from_service_account_file("gcp_credential.json")
+            logger.info(f"Using service account file: {credential_path}")
+            _credentials = service_account.Credentials.from_service_account_file(credential_path)
             
             # Load project_id from credentials
-            with open("gcp_credential.json", "r") as f:
+            with open(credential_path, "r") as f:
                 credential_data = json.load(f)
             _project_id = credential_data["project_id"]
             
@@ -214,7 +220,7 @@ def initialize_database():
                 _ensure_cloud_sql_proxy_running()
         else:
             # Fallback to Application Default Credentials (ADC) if file doesn't exist
-            logger.info("gcp_credential.json not found, using Application Default Credentials")
+            logger.info(f"{credential_path} not found, using Application Default Credentials")
             from google.auth import default
             _credentials, _project_id = default()
             # Initialize Secret Manager client with ADC
@@ -239,7 +245,8 @@ def get_postgres_password() -> str:
         return os.environ.get("DB_PASSWORD", "")
     
     try:
-        secret_name = f"projects/{_project_id}/secrets/postgresdb-password/versions/latest"
+        secret_id = get_secret_name("postgresdb-password")
+        secret_name = f"projects/{_project_id}/secrets/{secret_id}/versions/latest"
         response = _secret_manager_client.access_secret_version(name=secret_name)
         _cached_password = response.payload.data.decode("UTF-8").strip()
         logger.info("✅ PostgreSQL password fetched from Secret Manager")
@@ -294,9 +301,9 @@ def _determine_db_host() -> Tuple[str, int]:
         return db_host, db_port
     
     # Check if Unix socket directory exists (for GCP App Engine or other GCP services)
-    socket_path = "/cloudsql/leanworks-474204:us-west1:leanworks-prod/.s.PGSQL.5432"
-    if os.path.exists(os.path.dirname(socket_path)):
-        db_host = "/cloudsql/leanworks-474204:us-west1:leanworks-prod"
+    socket_dir = get_cloud_sql_socket_path(_project_id)
+    if os.path.exists(socket_dir):
+        db_host = socket_dir
         logger.info("🔧 Detected GCP environment, using Unix socket connection")
         return db_host, 5432  # Port not used for Unix sockets
     
@@ -423,6 +430,11 @@ def get_org_pool(org_slug: str) -> pool.ThreadedConnectionPool:
             'database': db_name,
             'user': db_user,
             'password': password,
+            # TCP keepalive to detect and discard dead connections
+            'keepalives': 1,
+            'keepalives_idle': 30,       # seconds before first keepalive probe
+            'keepalives_interval': 10,   # seconds between probes
+            'keepalives_count': 5,       # failed probes before declaring dead
         }
         if db_host.startswith('/'):
             pool_params['host'] = db_host
@@ -446,6 +458,8 @@ def get_org_pool(org_slug: str) -> pool.ThreadedConnectionPool:
 def query_org(org_slug: str, query: str, params: Optional[tuple] = None) -> list:
     """Execute a query on an organization's database and return results.
     
+    Includes connection validation and automatic retry on stale connections.
+    
     Args:
         org_slug: Organization slug (e.g., 'leanworks')
         query: SQL query to execute
@@ -456,22 +470,45 @@ def query_org(org_slug: str, query: str, params: Optional[tuple] = None) -> list
     """
     conn = None
     org_pool = None
-    try:
-        org_pool = get_org_pool(org_slug)
-        conn = org_pool.getconn()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        cursor.close()
-        return [dict(row) for row in results]
-    except Exception as e:
-        logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
-        logger.error(f"Query: {query}")
-        logger.error(f"Params: {params}")
-        raise
-    finally:
-        if conn and org_pool:
-            org_pool.putconn(conn)
+    for attempt in range(2):  # Retry once on stale connection
+        try:
+            org_pool = get_org_pool(org_slug)
+            conn = org_pool.getconn()
+            # Validate connection is alive before executing query
+            try:
+                conn.cursor().execute("SELECT 1")
+            except Exception:
+                # Connection is stale — discard and get a fresh one
+                logger.warning(f"Stale connection detected for {org_slug}, discarding and getting new one")
+                org_pool.putconn(conn, close=True)
+                conn = org_pool.getconn()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            cursor.close()
+            return [dict(row) for row in results]
+        except OperationalError as e:
+            if attempt == 0:
+                logger.warning(f"Stale connection for org {org_slug}, retrying: {e}")
+                if conn and org_pool:
+                    try:
+                        org_pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
+                    conn = None
+                continue
+            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
+            raise
+        except Exception as e:
+            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
+            raise
+        finally:
+            if conn and org_pool:
+                org_pool.putconn(conn)
 
 
 def query_org_one(org_slug: str, query: str, params: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
@@ -687,4 +724,3 @@ try:
     initialize_database()
 except Exception as e:
     logger.warning(f"Database initialization failed: {str(e)}")
-

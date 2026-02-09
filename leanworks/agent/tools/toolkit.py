@@ -1,18 +1,23 @@
-from leanworks.agent.tools.doc_management import DocManagementTool
-from leanworks.agent.tools.search import SearchTool
-from leanworks.agent.tools.outlook import OutlookTool
-from leanworks.agent.tools.cloud_storage import CloudStorageTool
-from leanworks.agent.tools.atlassian import AtlassianTool
-from leanworks.agent.tools.github import GitHubTool
-from leanworks.agent.tools.notion import NotionTool
-from leanworks.agent.tools.clickup import ClickUpTool
-from leanworks.agent.tools.linear import LinearTool
+from leanworks.agent.tools.internal.doc_management import DocManagementTool
+from leanworks.agent.tools.internal.search import SearchTool
+from leanworks.agent.tools.azure.outlook import OutlookTool
+from leanworks.agent.tools.project_management.atlassian import AtlassianTool
+from leanworks.agent.tools.project_management.github import GitHubTool
+from leanworks.agent.tools.project_management.notion import NotionTool
+from leanworks.agent.tools.project_management.clickup import ClickUpTool
+from leanworks.agent.tools.project_management.linear import LinearTool
+from leanworks.agent.tools.gcp.google_drive import GoogleDriveTool
+from leanworks.agent.tools.azure.onedrive import OneDriveTool
+from leanworks.agent.tools.communication.slack import SlackTool
+from leanworks.agent.tools.hr.workday import WorkdayTool
 # New domain-specific management tools (API-based)
-from leanworks.agent.tools.project_management import ProjectManagementTool
-from leanworks.agent.tools.user_management import UserManagementTool
-from leanworks.agent.tools.chat_management import ChatManagementTool
-from leanworks.agent.tools.working_context_tool import WorkingContextTool
-from leanworks.agent.helpers import AgentHelpers
+from leanworks.agent.tools.project_management.project_management import ProjectManagementTool
+from leanworks.agent.tools.internal.user_management import UserManagementTool
+from leanworks.agent.tools.internal.chat_management import ChatManagementTool
+from leanworks.agent.tools.internal.working_context_tool import WorkingContextTool
+from leanworks.agent.tools.internal.agent_trigger import AgentTriggerTool
+from leanworks.agent.utils.helpers import AgentHelpers
+from leanworks.utils.env import get_secret_name, resolve_credential_path
 from google.cloud import storage
 import logging
 import json
@@ -32,7 +37,7 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 class ToolUse:
-    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: str = "gcp_credential.json", working_context=None):
+    def __init__(self, org_slug=None, firestore_client=None, secret_manager_client=None, model_client=None, read_document_ids=None, tools=None, root_dir=None, user_id=None, session_id=None, credential_path: Optional[str] = None, working_context=None):
         """
         Initialize ToolUse with various client connections using lazy loading.
 
@@ -44,7 +49,7 @@ class ToolUse:
             read_document_ids: Set of document IDs already read for deduplication
             tools: List of tools to enable. Internal tools ['search', 'duckdb', 'task_management', 'project_management', 'event_management', 'user_management', 'chat_management', 'doc_management'] are always available.
                     External tools (e.g., 'outlook') should be explicitly provided in this list.
-            credential_path: Path to GCP credential JSON file (default: "gcp_credential.json")
+            credential_path: Path to GCP credential JSON file (default: environment-aware)
             working_context: WorkingContext instance for tracking cited documents and resources
         """
         # Store initialization parameters for lazy loading
@@ -60,6 +65,8 @@ class ToolUse:
         self.firestore_client = firestore_client
         self.secret_manager_client = secret_manager_client
         self.model_client = model_client
+        if credential_path is None:
+            credential_path = resolve_credential_path()
         self.credential_path = credential_path
         self.project_id = AgentHelpers.get_project_id_from_credentials(credential_path)
         self.read_document_ids = read_document_ids if read_document_ids is not None else set()
@@ -76,7 +83,8 @@ class ToolUse:
             'event_management',
             'user_management',
             'chat_management',
-            'doc_management'
+            'doc_management',
+            'agent_trigger',
         ]
         
         # Set default tools if not provided
@@ -100,6 +108,16 @@ class ToolUse:
         # Initialize bash backend based on environment
         self._initialize_bash_backend()
         
+        # Eagerly create bash session (Docker container / K8s pod) so that
+        # the /workspace directory is available for all tools from the start
+        if self._bash_backend:
+            try:
+                self._bash_session = self._create_bash_session()
+                logger.info(f"Bash session pre-initialized: {self._bash_session.backend_id}")
+            except Exception as e:
+                logger.warning(f"Failed to pre-initialize bash session: {e}. Will retry on first use.")
+                self._bash_session = None
+        
         # RAG storage tool cache (lazy initialization)
         self._rag_storage = None
         
@@ -119,41 +137,63 @@ class ToolUse:
     def _initialize_bash_backend(self):
         """Initialize appropriate bash backend based on environment."""
         is_kubernetes = os.environ.get("KUBERNETES_SERVICE_HOST") is not None
-        
-        try:
-            if is_kubernetes:
-                # GKE production: use Session Manager backend
-                try:
-                    from .bash_backend_session_manager import SessionManagerBackend
-                    manager_url = os.environ.get(
-                        "BASH_SESSION_MANAGER_URL",
-                        "http://bash-session-manager-service:8080"
-                    )
-                    self._bash_backend = SessionManagerBackend(manager_url=manager_url)
-                    logger.info(f"Using Session Manager backend for bash sessions at {manager_url}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize Session Manager backend: {e}")
-                    logger.info("Falling back to Kubernetes backend")
-                    try:
-                        from .bash_backend_kubernetes import KubernetesBashBackend
-                        image_name = "us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"
-                        self._bash_backend = KubernetesBashBackend(image_name=image_name)
-                        logger.info("Using Kubernetes backend for bash sessions")
-                    except Exception as e2:
-                        logger.error(f"Failed to initialize Kubernetes backend: {e2}")
-                        raise
-            else:
-                # Local development: use Docker backend
-                self._bash_backend = self._create_docker_backend()
-        except Exception as e:
-            logger.error(f"Failed to initialize bash backend: {e}")
+
+        backends_to_try = []
+
+        if is_kubernetes:
+            # Dev/prod: always prefer the Session Manager backend for consistent flow
+            try:
+                from .execution.bash_backend_session_manager import SessionManagerBackend
+                manager_url = os.environ.get(
+                    "BASH_SESSION_MANAGER_URL",
+                    "http://bash-session-manager-service:8080"
+                )
+                backends_to_try.append((
+                    lambda: SessionManagerBackend(manager_url=manager_url),
+                    f"Session Manager backend at {manager_url}"
+                ))
+            except ImportError:
+                logger.warning("Session Manager backend not available")
+
+            # Optional fallback if session manager is unavailable
+            try:
+                from .execution.bash_backend_kubernetes import KubernetesBashBackend
+                backends_to_try.append((
+                    lambda: KubernetesBashBackend(image_name="us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/leanworks-bash-session:latest"),
+                    "Kubernetes backend"
+                ))
+            except ImportError:
+                logger.warning("Kubernetes backend not available")
+        else:
+            # Local development: build docker image and use Docker backend
+            try:
+                self._ensure_custom_image()
+            except Exception as e:
+                logger.warning(f"Failed to prebuild Docker image: {e}. Will retry on first session.")
+            backends_to_try.append((
+                self._create_docker_backend,
+                "Docker backend"
+            ))
+
+        # Try each backend until one works
+        for backend_factory, backend_name in backends_to_try:
+            try:
+                self._bash_backend = backend_factory()
+                logger.info(f"Successfully initialized {backend_name} for bash sessions")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to initialize {backend_name}: {e}")
+                continue
+        else:
+            # No backend worked
+            logger.error("Failed to initialize any bash backend")
             self._bash_backend = None
-        
+
         self._bash_session = None
     
     def _create_docker_backend(self):
         """Create Docker backend with image building support."""
-        from .bash_backend_docker import DockerBashBackend
+        from .execution.bash_backend_docker import DockerBashBackend
         backend = DockerBashBackend(
             image_name="leanworks-bash-session:latest",
             ensure_image_fn=self._ensure_custom_image
@@ -183,7 +223,8 @@ class ToolUse:
                         model_client=self.model_client,
                         config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None,
                         memory_manager=getattr(self, 'memory_manager', None),  # Pass memory manager for working context
-                        working_context=self.working_context  # Pass working context directly
+                        working_context=self.working_context,  # Pass working context directly
+                        tool_use_ref=self  # Reference to ToolUse for workspace access
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')
@@ -253,7 +294,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -379,28 +421,78 @@ class ToolUse:
             else:
                 self._tool_cache['chat_management_tool'] = None
         return self._tool_cache['chat_management_tool']
-    
+
     @property
-    def cloud_storage_tool(self):
-        """Lazy-load Cloud Storage tool on first access."""
-        if 'cloud_storage_tool' not in self._tool_cache:
-            if 'cloud_storage' in self.requested_tools and self.org_slug:
+    def agent_trigger_tool(self):
+        """Lazy-load Agent Trigger tool on first access."""
+        if 'agent_trigger_tool' not in self._tool_cache:
+            if 'agent_trigger' in self.requested_tools and self.org_slug:
                 try:
-                    # Initialize Storage client
-                    storage_client = storage.Client.from_service_account_json(self.credential_path)
-                    
-                    self._tool_cache['cloud_storage_tool'] = CloudStorageTool(
-                        storage_client,
-                        self.org_slug,
+                    self._tool_cache['agent_trigger_tool'] = AgentTriggerTool(
+                        org_slug=self.org_slug
+                    )
+                    if 'agent_trigger' not in self.enabled_tools:
+                        self.enabled_tools.append('agent_trigger')
+                    logger.debug("AgentTriggerTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize AgentTriggerTool: {str(e)}")
+                    self._tool_cache['agent_trigger_tool'] = None
+            elif 'agent_trigger' in self.requested_tools:
+                logger.warning("AgentTriggerTool not initialized: missing org_slug")
+                self._tool_cache['agent_trigger_tool'] = None
+            else:
+                self._tool_cache['agent_trigger_tool'] = None
+        return self._tool_cache['agent_trigger_tool']
+
+    @property
+    def bigquery_tool(self):
+        """Lazy-load BigQuery tool on first access."""
+        if 'bigquery_tool' not in self._tool_cache:
+            if 'bigquery' in self.requested_tools:
+                try:
+                    # Initialize BigQuery client
+                    from google.cloud import bigquery
+                    from leanworks.agent.tools.gcp.bigquery import BigQueryTool
+
+                    bigquery_client = bigquery.Client.from_service_account_json(self.credential_path)
+
+                    self._tool_cache['bigquery_tool'] = BigQueryTool(
+                        bigquery_client=bigquery_client,
                         credential_path=self.credential_path
                     )
-                    if 'cloud_storage' not in self.enabled_tools:
-                        self.enabled_tools.append('cloud_storage')
+                    if 'bigquery' not in self.enabled_tools:
+                        self.enabled_tools.append('bigquery')
+                    logger.debug("BigQueryTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
+                    self._tool_cache['bigquery_tool'] = None
+            else:
+                self._tool_cache['bigquery_tool'] = None
+        return self._tool_cache['bigquery_tool']
+
+    @property
+    def cloud_storage_tool(self):
+        """Lazy-load Cloud Storage tool on first access. Uses hub integration_id: google_cloud_storage."""
+        if 'cloud_storage_tool' not in self._tool_cache:
+            if 'google_cloud_storage' in self.requested_tools and self.org_slug:
+                try:
+                    # Initialize Storage client
+                    from leanworks.agent.tools.gcp.cloud_storage import CloudStorageTool
+
+                    storage_client = storage.Client.from_service_account_json(self.credential_path)
+
+                    self._tool_cache['cloud_storage_tool'] = CloudStorageTool(
+                        storage_client=storage_client,
+                        org_slug=self.org_slug,
+                        credential_path=self.credential_path
+                    )
+                    if 'google_cloud_storage' not in self.enabled_tools:
+                        self.enabled_tools.append('google_cloud_storage')
                     logger.debug("CloudStorageTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize CloudStorageTool: {str(e)}")
                     self._tool_cache['cloud_storage_tool'] = None
-            elif 'cloud_storage' in self.requested_tools:
+            elif 'google_cloud_storage' in self.requested_tools:
                 logger.warning("CloudStorageTool not initialized: missing org_slug")
                 self._tool_cache['cloud_storage_tool'] = None
             else:
@@ -415,7 +507,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -454,7 +547,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -498,7 +592,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -535,7 +630,8 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
                     
@@ -572,19 +668,20 @@ class ToolUse:
                 try:
                     # Helper function to get secret
                     def get_secret(name):
-                        full_name = f"projects/{self.project_id}/secrets/{name}/versions/latest"
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
                         response = self.secret_manager_client.access_secret_version(name=full_name)
                         return response.payload.data.decode("UTF-8")
-                    
+
                     # Construct secret name from org_slug
                     # Convert underscores to hyphens for secret name
                     org_slug_for_secret = self.org_slug.replace('_', '-')
                     secret_name = f"integrations-{org_slug_for_secret}-linear"
-                    
+
                     # Retrieve and parse JSON secret
                     secret_json = get_secret(secret_name)
                     linear_credentials = json.loads(secret_json)
-                    
+
                     self._tool_cache['linear_tool'] = LinearTool(
                         api_key=linear_credentials.get('apiKey')
                     )
@@ -600,42 +697,219 @@ class ToolUse:
             else:
                 self._tool_cache['linear_tool'] = None
         return self._tool_cache['linear_tool']
-    
+
+    @property
+    def google_drive_tool(self):
+        """Lazy-load Google Drive tool on first access."""
+        if 'google_drive_tool' not in self._tool_cache:
+            if 'google_drive' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-google-drive"
+
+                    # Retrieve and parse service account JSON secret
+                    secret_json = get_secret(secret_name)
+                    service_account_info = json.loads(secret_json)
+
+                    self._tool_cache['google_drive_tool'] = GoogleDriveTool(
+                        service_account_info=service_account_info
+                    )
+                    if 'google_drive' not in self.enabled_tools:
+                        self.enabled_tools.append('google_drive')
+                    logger.debug("GoogleDriveTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize GoogleDriveTool: {str(e)}")
+                    self._tool_cache['google_drive_tool'] = None
+            elif 'google_drive' in self.requested_tools:
+                logger.warning("GoogleDriveTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['google_drive_tool'] = None
+            else:
+                self._tool_cache['google_drive_tool'] = None
+        return self._tool_cache['google_drive_tool']
+
+    @property
+    def onedrive_tool(self):
+        """Lazy-load OneDrive tool on first access."""
+        if 'onedrive_tool' not in self._tool_cache:
+            if 'onedrive' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-onedrive"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    onedrive_credentials = json.loads(secret_json)
+
+                    self._tool_cache['onedrive_tool'] = OneDriveTool(
+                        client_id=onedrive_credentials.get('clientId'),
+                        client_secret=onedrive_credentials.get('clientSecret'),
+                        tenant_id=onedrive_credentials.get('tenantId')
+                    )
+                    if 'onedrive' not in self.enabled_tools:
+                        self.enabled_tools.append('onedrive')
+                    logger.debug("OneDriveTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize OneDriveTool: {str(e)}")
+                    self._tool_cache['onedrive_tool'] = None
+            elif 'onedrive' in self.requested_tools:
+                logger.warning("OneDriveTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['onedrive_tool'] = None
+            else:
+                self._tool_cache['onedrive_tool'] = None
+        return self._tool_cache['onedrive_tool']
+
+    @property
+    def slack_tool(self):
+        """Lazy-load Slack tool on first access."""
+        if 'slack_tool' not in self._tool_cache:
+            if 'slack' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-slack"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    slack_credentials = json.loads(secret_json)
+
+                    self._tool_cache['slack_tool'] = SlackTool(
+                        bot_token=slack_credentials.get('botToken')
+                    )
+                    if 'slack' not in self.enabled_tools:
+                        self.enabled_tools.append('slack')
+                    logger.debug("SlackTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize SlackTool: {str(e)}")
+                    self._tool_cache['slack_tool'] = None
+            elif 'slack' in self.requested_tools:
+                logger.warning("SlackTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['slack_tool'] = None
+            else:
+                self._tool_cache['slack_tool'] = None
+        return self._tool_cache['slack_tool']
+
+    @property
+    def workday_tool(self):
+        """Lazy-load Workday tool on first access."""
+        if 'workday_tool' not in self._tool_cache:
+            if 'workday' in self.requested_tools and self.secret_manager_client and self.project_id and self.org_slug:
+                try:
+                    # Helper function to get secret
+                    def get_secret(name):
+                        secret_name = get_secret_name(name)
+                        full_name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
+                        response = self.secret_manager_client.access_secret_version(name=full_name)
+                        return response.payload.data.decode("UTF-8")
+
+                    # Construct secret name from org_slug
+                    # Convert underscores to hyphens for secret name
+                    org_slug_for_secret = self.org_slug.replace('_', '-')
+                    secret_name = f"integrations-{org_slug_for_secret}-workday"
+
+                    # Retrieve and parse JSON secret
+                    secret_json = get_secret(secret_name)
+                    workday_credentials = json.loads(secret_json)
+
+                    self._tool_cache['workday_tool'] = WorkdayTool(
+                        client_id=workday_credentials.get('clientId'),
+                        client_secret=workday_credentials.get('clientSecret'),
+                        tenant_id=workday_credentials.get('tenantId'),
+                        base_url=workday_credentials.get('baseUrl')
+                    )
+                    if 'workday' not in self.enabled_tools:
+                        self.enabled_tools.append('workday')
+                    logger.debug("WorkdayTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize WorkdayTool: {str(e)}")
+                    self._tool_cache['workday_tool'] = None
+            elif 'workday' in self.requested_tools:
+                logger.warning("WorkdayTool not initialized: missing secret_client, project_id, or org_slug")
+                self._tool_cache['workday_tool'] = None
+            else:
+                self._tool_cache['workday_tool'] = None
+        return self._tool_cache['workday_tool']
+
     def _ensure_custom_image(self):
-        """Ensure custom bash session image exists, build if needed."""
-        import subprocess
-        
+        """Ensure custom bash session image exists, build if needed.
+        Rebuilds when the Dockerfile is newer than the existing image so updates
+        (e.g. adding Python) are picked up instead of reusing an old tag.
+        """
+        from datetime import datetime
+
         image_name = "leanworks-bash-session:latest"
-        
-        # Check if image exists
+        dockerfile_path = os.path.join(
+            os.path.dirname(__file__), '../../../deploy/Dockerfile.bash-session'
+        )
+
+        if not os.path.exists(dockerfile_path):
+            logger.warning(f"Dockerfile not found at {dockerfile_path}, falling back to alpine")
+            return "alpine:latest"
+
+        dockerfile_mtime = os.path.getmtime(dockerfile_path)
+        need_build = True
+
+        # If image exists, reuse it only if it's not older than the Dockerfile
         try:
             check_cmd = ['docker', 'images', '-q', image_name]
             result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
-            
             if result.stdout.strip():
-                logger.debug(f"Custom image {image_name} already exists")
-                return image_name
+                inspect_cmd = ['docker', 'inspect', '--format', '{{.Created}}', image_name]
+                inspect_result = subprocess.run(
+                    inspect_cmd, capture_output=True, text=True, timeout=5
+                )
+                if inspect_result.returncode == 0 and inspect_result.stdout.strip():
+                    try:
+                        created_str = inspect_result.stdout.strip().replace('Z', '+00:00')
+                        image_created = datetime.fromisoformat(created_str).timestamp()
+                        if image_created >= dockerfile_mtime:
+                            need_build = False
+                            logger.debug(f"Custom image {image_name} already exists and is up to date")
+                            return image_name
+                        logger.info(
+                            f"Dockerfile is newer than image {image_name}, rebuilding..."
+                        )
+                    except (ValueError, OSError):
+                        pass
         except Exception as e:
             logger.debug(f"Error checking for image: {e}")
-        
-        # Build image from Dockerfile
+
+        # Build image from Dockerfile (context must be repo root so COPY requirements-workspace.txt finds it)
         try:
             logger.info(f"Building custom image {image_name}...")
-            dockerfile_path = os.path.join(os.path.dirname(__file__), '../../../deploy/Dockerfile.bash-session')
-            
-            if not os.path.exists(dockerfile_path):
-                logger.warning(f"Dockerfile not found at {dockerfile_path}, falling back to alpine")
-                return "alpine:latest"
-            
-            # Get the directory containing the Dockerfile for build context
-            build_context = os.path.dirname(dockerfile_path)
-            build_cmd = ['docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context]
-            result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=60)
-            
+            build_context = os.path.abspath(os.path.join(os.path.dirname(dockerfile_path), '..'))
+            build_cmd = [
+                'docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context
+            ]
+            result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 logger.warning(f"Failed to build custom image: {result.stderr}")
                 return "alpine:latest"
-            
             logger.info(f"Successfully built custom image {image_name}")
             return image_name
         except Exception as e:
@@ -720,7 +994,8 @@ class ToolUse:
         """
         try:
             # Validate command for dangerous patterns
-            dangerous_patterns = ['rm -rf /', 'format', ':(){:|:&};:']
+            # Do not add 'format' — it blocks legitimate Python/openpyxl scripts
+            dangerous_patterns = ['rm -rf /', ':(){:|:&};:']
             for pattern in dangerous_patterns:
                 if pattern in command:
                     return {
@@ -925,8 +1200,11 @@ class ToolUse:
             return result["output"]
         else:
             error_msg = result['error'] if result['error'] else "No error message"
-            output_msg = result['output'] if result['output'] else "No output"
-            return f"Error (return code {result['return_code']}): {error_msg}\nOutput: {output_msg}"
+            output_msg = result['output'] if result['output'] else ""
+            error_detail = f"Exit code {result['return_code']}: {error_msg}"
+            if output_msg:
+                error_detail += f"\nOutput before error: {output_msg}"
+            return {"error": error_detail}
 
     def jq(self, query: str = None, file_path: str = None) -> str:
         """Execute jq queries on JSON files in the Docker container."""
@@ -1258,6 +1536,7 @@ EOF"""
                     self.doc_management_tool.create_doc_property,
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
+                    self.doc_management_tool.upload_doc_property,
                     self.doc_management_tool.list_docs_property,
                     # HTML-based doc management tools (removed - use create_doc/update_doc directly)
                     # Workflow tools (now part of DocManagementTool)
@@ -1303,6 +1582,15 @@ EOF"""
                     self.chat_management_tool.query_messages_property,
                 ])
                 logger.info("ChatManagementTool tools added to tools list (lazy)")
+
+            # Add Agent Trigger tools if available (for Lean AI TPM)
+            if self.agent_trigger_tool:
+                self._tools_cache.extend([
+                    self.agent_trigger_tool.list_registered_agents_property,
+                    self.agent_trigger_tool.read_agent_skill_property,
+                    self.agent_trigger_tool.trigger_ai_agent_property,
+                ])
+                logger.info("AgentTriggerTool tools added to tools list (lazy)")
                 
             # Add Outlook tools if available
             if self.outlook_tool:
@@ -1312,11 +1600,28 @@ EOF"""
                 ])
                 logger.info("Outlook tools added to tools list (lazy)")
 
+            # Add BigQuery tools if available
+            if self.bigquery_tool:
+                self._tools_cache.extend([
+                    self.bigquery_tool.gcp_bigquery_list_datasets_property,
+                    self.bigquery_tool.gcp_bigquery_list_tables_property,
+                    self.bigquery_tool.gcp_bigquery_get_table_schema_property,
+                    self.bigquery_tool.gcp_bigquery_query_property
+                ])
+                logger.info("BigQuery tools added to tools list (lazy)")
+
             # Add Cloud Storage tools if available
             if self.cloud_storage_tool:
                 self._tools_cache.extend([
-                    self.cloud_storage_tool.get_image_url_property,
-                    self.cloud_storage_tool.list_chat_images_property
+                    # General file operations
+                    self.cloud_storage_tool.gcp_storage_list_files_property,
+                    self.cloud_storage_tool.gcp_storage_get_signed_url_property,
+                    self.cloud_storage_tool.gcp_storage_upload_file_property,
+                    self.cloud_storage_tool.gcp_storage_download_file_property,
+                    self.cloud_storage_tool.gcp_storage_get_file_metadata_property,
+                    # Chat image operations (backward compatibility)
+                    self.cloud_storage_tool.gcp_cloud_storage_get_image_url_property,
+                    self.cloud_storage_tool.gcp_cloud_storage_list_chat_images_property
                 ])
                 logger.info("Cloud Storage tools added to tools list (lazy)")
 
@@ -1395,6 +1700,50 @@ EOF"""
                 ])
                 logger.info("Linear tools added to tools list (lazy)")
 
+            # Add Google Drive tools if available
+            if self.google_drive_tool:
+                self._tools_cache.extend([
+                    self.google_drive_tool.list_files_property,
+                    self.google_drive_tool.search_files_property,
+                    self.google_drive_tool.get_file_property,
+                    self.google_drive_tool.download_file_property,
+                    self.google_drive_tool.upload_file_property,
+                    self.google_drive_tool.create_folder_property
+                ])
+                logger.info("Google Drive tools added to tools list (lazy)")
+
+            # Add OneDrive tools if available
+            if self.onedrive_tool:
+                self._tools_cache.extend([
+                    self.onedrive_tool.list_files_property,
+                    self.onedrive_tool.search_files_property,
+                    self.onedrive_tool.get_file_property,
+                    self.onedrive_tool.download_file_property,
+                    self.onedrive_tool.upload_file_property,
+                    self.onedrive_tool.create_folder_property
+                ])
+                logger.info("OneDrive tools added to tools list (lazy)")
+
+            # Add Slack tools if available
+            if self.slack_tool:
+                self._tools_cache.extend([
+                    self.slack_tool.list_channels_property,
+                    self.slack_tool.get_channel_messages_property,
+                    self.slack_tool.post_message_property,
+                    self.slack_tool.get_user_info_property,
+                    self.slack_tool.create_channel_property
+                ])
+                logger.info("Slack tools added to tools list (lazy)")
+
+            # Add Workday tools if available
+            if self.workday_tool:
+                self._tools_cache.extend([
+                    self.workday_tool.get_employee_property,
+                    self.workday_tool.list_employees_property,
+                    self.workday_tool.search_employees_property
+                ])
+                logger.info("Workday tools added to tools list (lazy)")
+
             # Add client tools (bash and text_editor)
             # These are always available as they don't require external dependencies
             self._tools_cache.extend([
@@ -1420,6 +1769,7 @@ EOF"""
                     "create_doc": self.doc_management_tool.create_doc,
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
+                    "upload_doc": self.doc_management_tool.upload_doc,
                     "list_docs": self.doc_management_tool.list_docs,
                     # HTML-based doc management functions (removed - use create_doc/update_doc directly)
                     # Workflow functions (now part of DocManagementTool)
@@ -1465,6 +1815,15 @@ EOF"""
                     "query_messages": self.chat_management_tool.query_messages,
                 })
                 logger.info("ChatManagementTool functions added to function_map (lazy)")
+
+            # Add Agent Trigger functions if available
+            if self.agent_trigger_tool:
+                self._function_map_cache.update({
+                    "list_registered_agents": self.agent_trigger_tool.list_registered_agents,
+                    "read_agent_skill": self.agent_trigger_tool.read_agent_skill,
+                    "trigger_ai_agent": self.agent_trigger_tool.trigger_ai_agent,
+                })
+                logger.info("AgentTriggerTool functions added to function_map (lazy)")
                 
             # Add Outlook functions if available
             if self.outlook_tool:
@@ -1474,11 +1833,30 @@ EOF"""
                 })
                 logger.info("Outlook functions added to function_map (lazy)")
 
+            # Add BigQuery functions if available
+            if self.bigquery_tool:
+                self._function_map_cache.update({
+                    "gcp_bigquery_list_datasets": self.bigquery_tool.gcp_bigquery_list_datasets,
+                    "gcp_bigquery_list_tables": self.bigquery_tool.gcp_bigquery_list_tables,
+                    "gcp_bigquery_get_table_schema": self.bigquery_tool.gcp_bigquery_get_table_schema,
+                    "gcp_bigquery_query": self.bigquery_tool.gcp_bigquery_query
+                })
+                logger.info("BigQuery functions added to function_map (lazy)")
+
             # Add Cloud Storage functions if available
             if self.cloud_storage_tool:
                 self._function_map_cache.update({
-                    "get_image_url": self.cloud_storage_tool.get_image_url,
-                    "list_chat_images": self.cloud_storage_tool.list_chat_images
+                    # General file operations
+                    "gcp_storage_list_files": self.cloud_storage_tool.gcp_storage_list_files,
+                    "gcp_storage_get_signed_url": self.cloud_storage_tool.gcp_storage_get_signed_url,
+                    "gcp_storage_upload_file": self.cloud_storage_tool.gcp_storage_upload_file,
+                    "gcp_storage_download_file": self.cloud_storage_tool.gcp_storage_download_file,
+                    "gcp_storage_get_file_metadata": self.cloud_storage_tool.gcp_storage_get_file_metadata,
+                    # Chat image functions (backward compatibility)
+                    "get_image_url": self.cloud_storage_tool.gcp_cloud_storage_get_image_url,
+                    "list_chat_images": self.cloud_storage_tool.gcp_cloud_storage_list_chat_images,
+                    "gcp_cloud_storage_get_image_url": self.cloud_storage_tool.gcp_cloud_storage_get_image_url,
+                    "gcp_cloud_storage_list_chat_images": self.cloud_storage_tool.gcp_cloud_storage_list_chat_images
                 })
                 logger.info("Cloud Storage functions added to function_map (lazy)")
 
@@ -1557,6 +1935,50 @@ EOF"""
                 })
                 logger.info("Linear functions added to function_map (lazy)")
 
+            # Add Google Drive functions if available
+            if self.google_drive_tool:
+                self._function_map_cache.update({
+                    "google_drive_list_files": self.google_drive_tool.list_files,
+                    "google_drive_search_files": self.google_drive_tool.search_files,
+                    "google_drive_get_file": self.google_drive_tool.get_file,
+                    "google_drive_download_file": self.google_drive_tool.download_file,
+                    "google_drive_upload_file": self.google_drive_tool.upload_file,
+                    "google_drive_create_folder": self.google_drive_tool.create_folder
+                })
+                logger.info("Google Drive functions added to function_map (lazy)")
+
+            # Add OneDrive functions if available
+            if self.onedrive_tool:
+                self._function_map_cache.update({
+                    "onedrive_list_files": self.onedrive_tool.list_files,
+                    "onedrive_search_files": self.onedrive_tool.search_files,
+                    "onedrive_get_file": self.onedrive_tool.get_file,
+                    "onedrive_download_file": self.onedrive_tool.download_file,
+                    "onedrive_upload_file": self.onedrive_tool.upload_file,
+                    "onedrive_create_folder": self.onedrive_tool.create_folder
+                })
+                logger.info("OneDrive functions added to function_map (lazy)")
+
+            # Add Slack functions if available
+            if self.slack_tool:
+                self._function_map_cache.update({
+                    "slack_list_channels": self.slack_tool.list_channels,
+                    "slack_get_channel_messages": self.slack_tool.get_channel_messages,
+                    "slack_post_message": self.slack_tool.post_message,
+                    "slack_get_user_info": self.slack_tool.get_user_info,
+                    "slack_create_channel": self.slack_tool.create_channel
+                })
+                logger.info("Slack functions added to function_map (lazy)")
+
+            # Add Workday functions if available
+            if self.workday_tool:
+                self._function_map_cache.update({
+                    "workday_get_employee": self.workday_tool.get_employee,
+                    "workday_list_employees": self.workday_tool.list_employees,
+                    "workday_search_employees": self.workday_tool.search_employees
+                })
+                logger.info("Workday functions added to function_map (lazy)")
+
             # Add client tool function mappings (always available)
             # Note: bash and text_editor are client tools
             # text_editor tool uses name "str_replace_based_edit_tool" in the API for version 20250728
@@ -1591,7 +2013,7 @@ EOF"""
             # Check if search tool is available (which has vector DB client)
             if 'search' in self.requested_tools and self.search_tool:
                 try:
-                    from leanworks.agent.tools.rag_storage import RAGStorageTool
+                    from leanworks.agent.tools.internal.rag_storage import RAGStorageTool
                     from leanworks.setting import LARGE_RESPONSE_CONFIG
                     
                     # Reuse search tool's vector DB and embedding clients
@@ -1636,14 +2058,13 @@ EOF"""
         Creates new indexes specifically for large unstructured responses.
         
         Returns:
-            PineconeHybridIndex instance for large responses, or None if not available
+            Vector DB client for large responses, or None if not available
         """
         if self._large_response_vectordb_client is None:
             try:
-                from leanworks.rag.vectordb import PineconeHybridIndex
                 from leanworks.rag.embedding import GoogleEmbedding
+                from leanworks.rag.vectordb_client import create_vectordb_client, use_gcp_vector_search
                 from leanworks.setting import LARGE_RESPONSE_CONFIG
-                import os
                 
                 # Get configuration for large response indexes
                 config = LARGE_RESPONSE_CONFIG
@@ -1653,29 +2074,21 @@ EOF"""
                     logger.debug("Large response indexes are disabled in configuration")
                     self._large_response_vectordb_client = False
                     return None
-                
-                # Get Pinecone API key from secret manager (same as search tool)
-                try:
-                    from app.services.client import get_cached_api_key
-                    pinecone_key = get_cached_api_key('pinecone-api-key')
-                except ImportError:
-                    # Fallback to environment variable if app.services.client is not available
-                    pinecone_key = os.environ.get('PINECONE_API_KEY')
-                
-                if not pinecone_key:
-                    logger.warning("pinecone-api-key not found in secret manager or environment variables")
+
+                if use_gcp_vector_search():
+                    logger.info("Large response indexes are not used with GCP Vector Search; falling back to default RAG storage.")
                     self._large_response_vectordb_client = False
                     return None
                 
-                # Initialize embedding client
-                embedding_client = GoogleEmbedding(self.project_id)
+                # Initialize embedding client with service account authentication
+                embedding_client = GoogleEmbedding(gcp_credential_path=self.credential_path)
                 
                 # Create vectordb client for large responses
-                vectordb_client = PineconeHybridIndex(
-                    pinecone_key=pinecone_key,
+                vectordb_client = create_vectordb_client(
                     embedding_model_client=embedding_client,
+                    gcp_credential_path=self.credential_path,
                     chunk_size=config.get("rag_chunk_size", 512),
-                    chunk_overlap=config.get("rag_chunk_overlap", 128)
+                    chunk_overlap=config.get("rag_chunk_overlap", 128),
                 )
                 
                 # Load or create large response indexes
@@ -1685,12 +2098,13 @@ EOF"""
                 sparse_dimension = large_response_config.get("sparse_dimension", 30000)
                 
                 logger.info(f"Loading or creating large response indexes: {dense_name}, {sparse_name}")
-                vectordb_client.load_or_create_hybrid_index(
-                    dense_index_name=dense_name,
-                    sparse_index_name=sparse_name,
-                    dense_dimension=dense_dimension,
-                    sparse_dimension=sparse_dimension
-                )
+                if hasattr(vectordb_client, "load_or_create_hybrid_index"):
+                    vectordb_client.load_or_create_hybrid_index(
+                        dense_index_name=dense_name,
+                        sparse_index_name=sparse_name,
+                        dense_dimension=dense_dimension,
+                        sparse_dimension=sparse_dimension,
+                    )
                 
                 self._large_response_vectordb_client = vectordb_client
                 logger.info("Large response vectordb client initialized successfully")

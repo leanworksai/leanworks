@@ -20,25 +20,16 @@ RUN apt-get update && apt-get install -y \
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install common Python data analysis packages
-RUN pip install --no-cache-dir \
-    pandas \
-    numpy \
-    openpyxl \
-    pyyaml \
-    requests
-
 # Create non-root user for running the application
 RUN useradd -m -u 1000 sessionmgr
 
-# Copy ONLY session manager code - keep it isolated
+# Copy shared workspace runtime requirements (single source: requirements-workspace.txt at repo root)
+COPY requirements-workspace.txt .
+# Copy session manager code and its requirements (includes -r requirements-workspace.txt)
 COPY leanworks/agent/session_manager/ .
 
-# Install minimal dependencies - only what session manager needs
-RUN pip install --no-cache-dir \
-    fastapi==0.104.1 \
-    uvicorn==0.24.0 \
-    pydantic==2.5.0
+# Install dependencies: workspace runtime + session manager API
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create session storage directory with proper permissions
 RUN mkdir -p /var/sessions && chown -R sessionmgr:sessionmgr /var/sessions

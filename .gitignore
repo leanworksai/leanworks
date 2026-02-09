@@ -1,4 +1,4 @@
-gcp_credential.json
+gcp_credential*
 .venv
 test.ipynb
 .env

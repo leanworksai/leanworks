@@ -1,7 +1,6 @@
-from pinecone import Pinecone
 from typing import List, Dict, Tuple, Any
 from leanworks.rag.filters import FilterExtractor
-from leanworks.agent.memory import MemoryManager
+from leanworks.agent.core.memory import MemoryManager
 from leanworks.rag.reranker.reranker_factory import RerankerFactory
 from leanworks.rag.span_selection import SpanSelector
 from leanworks.rag.data_source_formatter import DataSourceFormatter
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class Chat(FilterExtractor, MemoryManager, QueryRewriter):
     """
-    Chat class for retrieving context from Pinecone and generating responses using OpenAI.
+    Chat class for retrieving context from vector search and generating responses.
     Provides synchronous functionality for RAG operations.
     """
     def __init__(
@@ -33,7 +32,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         Initialize Chat with vector database client and memory management.
         
         Args:
-            vectordb_client: Initialized PineconeHybridIndex client for hybrid search
+            vectordb_client: Initialized vector DB client for hybrid search
             firestore_client: Firestore client for memory persistence
             org_slug: Organization name for Firestore path
             model_client: Initialized OpenAI client for LLM generation
@@ -45,7 +44,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         self.vectordb_client = vectordb_client
         
         self.model_client = model_client
-        # Store org_slug for namespace usage in Pinecone queries
+        # Store org_slug for namespace usage in vector search queries
         self.org_slug = org_slug
         # Initialize memory manager if user_id and session_id are provided
         self.memory_enabled = user_id is not None and session_id is not None
@@ -95,7 +94,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         # Initialize data source formatter
         self.data_source_formatter = DataSourceFormatter()
-            
+
         logger.info("RAG system initialized successfully")
 
     def _extract_timestamp_from_context(self, context_text: str) -> str:
@@ -153,7 +152,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         
         return None
 
-    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA, namespace: str = None) -> SimpleNamespace:
+    def retrieve_nodes(self, query: str | List[str], top_k: int, filters: dict = None, alpha: float = ALPHA, namespace: str = None, collection_scope: str = "all") -> SimpleNamespace:
         """
         Retrieve relevant context using hybrid search for one or multiple queries.
 
@@ -185,22 +184,25 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             search_namespace = namespace if namespace is not None else (self.org_slug if self.org_slug else "")
             
             for q in queries:
-                # Use hybrid search from PineconeHybridIndex
+                # Use hybrid search from vector DB client
                 hybrid_results = self.vectordb_client.hybrid_search(
                     query=q,
                     top_k=top_k,
                     alpha=alpha,
                     namespace=search_namespace,
-                    filter=filters
+                    filter=filters,
+                    collection_scope=collection_scope
                 )
                 
-                # Convert hybrid search results to match Pinecone response format
-                for result in hybrid_results:
-                    # Create match object with same structure as Pinecone response
+                # Convert hybrid search results to match response format
+                for rank, result in enumerate(hybrid_results):
+                    combined_score = result.get("combined_score")
+                    if not isinstance(combined_score, (int, float)):
+                        combined_score = 1.0 / (rank + 1)
                     match = SimpleNamespace(
-                        id=result['id'],
-                        score=result['combined_score'],  # Use combined hybrid score
-                        metadata=result['metadata']
+                        id=result["id"],
+                        score=combined_score,
+                        metadata=result["metadata"],
                     )
                     all_matches.append(match)
                 
@@ -226,7 +228,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             
         except Exception as e:
             logger.error(f"Error performing hybrid search: {str(e)}")
-            # Return an empty result structure with similar interface as Pinecone response
+            # Return an empty result structure with similar interface as vector search response
             empty_response = SimpleNamespace(matches=[])
             return empty_response
     
@@ -241,10 +243,10 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
             **kwargs
             ) -> Tuple[List[dict], List[str]]:
         """
-        Process retrieved nodes from Pinecone and extract context information.
-        
+        Process retrieved nodes from vector search and extract context information.
+
         Args:
-            nodes: The query results from Pinecone
+            nodes: The query results from vector search
             query: The user query
             use_reranker: Whether to apply reranking (default None, which falls back to instance setting)
             use_span_selection: Whether to apply span selection
@@ -563,7 +565,7 @@ class AsyncChat(Chat):
         Asynchronous version of postprocess_nodes that uses async reranking for better performance.
         
         Args:
-            nodes: The query results from Pinecone
+            nodes: The query results from vector search
             query: The user query
             use_reranker: Whether to apply reranking
             use_span_selection: Whether to apply span selection

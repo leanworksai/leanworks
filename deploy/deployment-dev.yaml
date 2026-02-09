@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ask-api
+  template:
+    metadata:
+      labels:
+        app: ask-api
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+    spec:
+      serviceAccountName: ask-api-sa
+      containers:
+      - name: ask-api
+        image: us-west1-docker.pkg.dev/leanworks-dev/leanworks-docker-images/ask-api:20260202-203350
+        command: ["hypercorn"]
+        args: ["asgi:application", "-b", "0.0.0.0:8000", "--workers", "1"]
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        env:
+        - name: VERIFY_API_KEY
+          value: "true"
+        - name: ENVIRONMENT
+          value: "dev"
+        - name: LEANWORKS_HUB_URL
+          value: "http://leanworks-hub-service"
+        - name: DB_HOST
+          value: "cloud-sql-proxy-service"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_REGION
+          value: "us-west1"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/app/gcp_credential_dev.json"
+        volumeMounts:
+        - name: gcp-credentials-dev
+          mountPath: /app/gcp_credential_dev.json
+          subPath: gcp_credential_dev.json
+          readOnly: true
+      volumes:
+      - name: gcp-credentials-dev
+        secret:
+          secretName: gcp-credentials-dev

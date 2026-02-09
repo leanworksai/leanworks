@@ -11,4 +11,5 @@ spec:
   domains:
     - leanworks.ai
     - hub.leanworks.ai
+    - dev.leanworks.ai
 

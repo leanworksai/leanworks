@@ -21,8 +21,6 @@ spec:
         cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
     spec:
       serviceAccountName: bash-session-manager-sa
-      imagePullSecrets:
-      - name: gcr-json-key
       containers:
       - name: session-manager
         image: us-west1-docker.pkg.dev/leanworks-474204/leanworks-docker-images/bash-session-manager:latest
