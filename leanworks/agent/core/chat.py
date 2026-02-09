@@ -712,6 +712,8 @@ class ChatAgent:
         unanswered_count = 0
         response_text = ""
         max_unanswered_num = 2
+        tool_iteration_count = 0
+        MAX_TOOL_ITERATIONS = 25  # Hard cap on tool call iterations to prevent runaway loops
         
         # Reset retry flag for new message processing
         self._retry_attempted = False
@@ -779,6 +781,12 @@ class ChatAgent:
                     )
                     
                     if has_tool_use:
+                        tool_iteration_count += 1
+                        if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                            logger.warning(f"Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                            response_text = "I've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
+                            self.conversation.add_assistant_message(response_text)
+                            break
                         # If there are tool calls, continue the conversation loop to execute them
                         logger.debug("Response hit max_tokens but has tool calls - continuing conversation")
                         # Use unified handler to process response (will execute tools and continue)
@@ -805,6 +813,19 @@ class ChatAgent:
                     text_content = next((block.text for block in response.content if block.type == "text"), "")
                     if text_content:
                         response_text = text_content + "\n\n[Response truncated due to context window limit]"
+                        self.conversation.add_assistant_message(response_text)
+                        break
+                
+                # Check for tool calls and enforce iteration limit
+                has_any_tool_calls = any(
+                    getattr(block, 'type', None) in ["tool_use", "server_tool_use"]
+                    for block in response.content
+                )
+                if has_any_tool_calls:
+                    tool_iteration_count += 1
+                    if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                        logger.warning(f"Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                        response_text = "I've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
                         self.conversation.add_assistant_message(response_text)
                         break
                 
@@ -1069,6 +1090,7 @@ class ChatAgent:
         Yields:
             dict: Event objects with 'type' and event-specific data
                 - tool_start: {"type": "tool_start", "tool_name": str, "display_name": str, "description": str}
+                - bash_command: {"type": "bash_command", "command": str}  (after tool_start for bash)
                 - tool_end: {"type": "tool_end", "tool_name": str, "display_name": str, "summary": str}
                 - text_delta: {"type": "text_delta", "text": str}
                 - error: {"type": "error", "error": str}
@@ -1321,6 +1343,8 @@ class ChatAgent:
             loop = asyncio.get_event_loop()
             unanswered_count = 0
             max_unanswered_num = 2
+            tool_iteration_count = 0
+            MAX_TOOL_ITERATIONS = 25  # Hard cap on tool call iterations to prevent runaway loops
             
             while unanswered_count < max_unanswered_num:
                 try:
@@ -1336,8 +1360,11 @@ class ChatAgent:
                     
                     logger.debug(f"Streaming: Making API call with {len(current_params.get('tools', []))} tools")
                     
-                    # Make API call (non-streaming first to get tool calls)
-                    response = self.model_client.messages.create(**current_params)
+                    # Make API call in executor to avoid blocking the event loop
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda p=current_params: self.model_client.messages.create(**p)
+                    )
                     stop_reason = getattr(response, 'stop_reason', None)
                     
                     logger.info(f"Streaming: Response stop_reason: {stop_reason}")
@@ -1356,6 +1383,14 @@ class ChatAgent:
                     
                     # Check for tool calls FIRST (regardless of stop_reason)
                     if has_tool_calls:
+                        tool_iteration_count += 1
+                        if tool_iteration_count > MAX_TOOL_ITERATIONS:
+                            logger.warning(f"Streaming: Hit max tool iterations ({MAX_TOOL_ITERATIONS}), forcing end")
+                            yield {
+                                "type": "text_delta",
+                                "text": "\n\nI've reached the maximum number of tool calls for this request. Please refine your request or break it into smaller steps."
+                            }
+                            break
                         # Execute tools regardless of stop_reason (tool_use, max_tokens, etc.)
                         logger.info(f"Streaming: Executing tools (stop_reason={stop_reason})")
                         
@@ -1383,7 +1418,15 @@ class ChatAgent:
                                 "display_name": tool_display_name,
                                 "description": tool_description
                             }
-                            
+                            # Yield bash_command event so UI can show the command being run
+                            if tool_name == "bash":
+                                tool_input = getattr(tool_block, 'input', {}) or {}
+                                command = tool_input.get("command", "")
+                                if command:
+                                    yield {
+                                        "type": "bash_command",
+                                        "command": command
+                                    }
                             logger.debug(f"Streaming: Tool {tool_name} started")
                         
                         # Execute tools using handler in executor
@@ -1724,7 +1767,6 @@ class ChatAgent:
             # System/internal tools
             "extract_text_at_html_positions",  # Internal document processing
             "query_working_context",            # Internal context management
-            "bash",                              # System command execution
             "str_replace_based_edit_tool",      # Text editor (system tool)
             "get_table_schema",                 # Database schema introspection
         }
@@ -1775,6 +1817,9 @@ class ChatAgent:
             # Cloud Storage
             "get_image_url": "Get Image",
             "list_chat_images": "List Images",
+
+            # System tools
+            "bash": "Bash Command",
             
             # Jira/Atlassian
             "search_issues": "Search Issues",

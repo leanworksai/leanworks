@@ -3,7 +3,7 @@ from leanworks.agent.tools.tool_registry import ToolRegistry
 from leanworks.agent.tools.tool_response_handler import ToolResponseHandlerFactory
 
 # Re-export from subdirectories for backward compatibility
-from leanworks.agent.tools.gcp import BigQueryTool, CloudStorageTool, FirestoreTool, GCPTool, GoogleDriveTool
+from leanworks.agent.tools.gcp import BigQueryTool, CloudStorageTool, FirestoreTool, GoogleDriveTool
 from leanworks.agent.tools.project_management import (
     AtlassianTool, ClickUpTool, LinearTool, GitHubTool, NotionTool, ProjectManagementTool
 )
@@ -23,7 +23,6 @@ __all__ = [
     'BigQueryTool',
     'CloudStorageTool',
     'FirestoreTool',
-    'GCPTool',  # Backward compatibility
     'GoogleDriveTool',
     # Project management
     'AtlassianTool',

@@ -39,7 +39,8 @@ class DocManagementTool(BaseAPIClient):
         model_client: Optional[anthropic.Anthropic] = None,
         config: Optional[Dict[str, Any]] = None,
         memory_manager=None,  # NEW: For working context registration
-        working_context=None  # NEW: For accessing cited documents
+        working_context=None,  # NEW: For accessing cited documents
+        tool_use_ref=None  # Reference to ToolUse instance for workspace access
     ):
         """
         Initialize DocManagementTool with API access.
@@ -54,6 +55,7 @@ class DocManagementTool(BaseAPIClient):
             model_client: Optional Anthropic client for token counting API
             config: Optional workflow configuration (uses defaults from DOC_WORKFLOW_CONFIG if not provided)
             working_context: Optional WorkingContext instance for accessing cited documents
+            tool_use_ref: Optional reference to ToolUse instance for workspace directory access
         """
         # Get org_slug from wrapper (use client_name as fallback)
         org_slug = getattr(postgres_client_wrapper, 'org_slug', None)
@@ -86,6 +88,9 @@ class DocManagementTool(BaseAPIClient):
         self.memory_manager = memory_manager
         # Use provided working_context, or fall back to memory_manager's working_context
         self.working_context = working_context or (memory_manager.working_context if memory_manager else None)
+        
+        # Reference to ToolUse instance for workspace access (used by get_doc file downloads)
+        self._tool_use_ref = tool_use_ref
 
     # ============================================================================
     # Working Context Query Tool
@@ -364,46 +369,37 @@ class DocManagementTool(BaseAPIClient):
         description = f"""
         Get one or more documents by their IDs from the docs table for org `{self.org_slug}`.
 
-        This tool retrieves full document content and all properties for the specified document IDs.
-        Use this to read document content when you need the full text, not just a preview.
+        This is the single tool for loading any document. Behavior depends on document type:
 
         IMPORTANT: This tool can only be called after get_create_doc_instruction, get_understand_doc_instruction, or get_update_doc_instruction tools.
 
-        **UPLOADED FILE PREVIEW BEHAVIOR:**
-        For uploaded files, the returned data contains limited preview information:
+        **RICH TEXT DOCUMENTS** (docType='rich_text'):
+        - Returns full HTML content directly in the `content` field.
+        - For large documents, content may be saved to a file with a path returned instead.
 
-        1. **Excel/CSV files** (docType='xlsx' or 'csv'):
-           - fileMetadata.previewData: TRUNCATED preview (first 100 rows × 20 columns only)
-           - content: Plain text extraction for search indexing
-           - storagePath: Path to the full file in GCS
-
-        2. **PowerPoint files** (docType='pptx'):
-           - content: Plain text extraction only (no formatting, layout, or images)
-           - fileMetadata.layoutJson: Structured slide data (but limited for complex presentations)
-           - storagePath: Path to original PPTX file in GCS
-           - fileMetadata.pdfStoragePath: Path to converted PDF (if conversion succeeded)
-
-        If you need the FULL file for detailed processing:
-        1. Check if docType is 'xlsx', 'csv', or 'pptx' AND storagePath exists
-        2. Call get_doc_full_file(docId=...) to download and save the full file to /workspace/
-        3. Process the file using appropriate tools:
-           - Excel/CSV: xlsx2csv, pandas, openpyxl
-           - PowerPoint: python-pptx for slide manipulation, or use the converted PDF
+        **UPLOADED FILES** (docType='xlsx', 'csv', 'pdf', 'pptx', 'docx'):
+        - The full binary file is **automatically downloaded** to /workspace/.
+        - Response includes `file_path` (local path to the downloaded file), `original_name`, `file_size`, and `mime_type`.
+        - The `content` field is removed (it contained unusable plain-text extraction).
+        - Use bash/python tools to process the downloaded file:
+          - **Excel (.xlsx, .xls)**: `pandas.read_excel(file_path)` or openpyxl
+          - **CSV (.csv)**: `pandas.read_csv(file_path)` or Python csv module
+          - **PDF (.pdf)**: pdfplumber, PyPDF2, or pdftotext
+          - **PowerPoint (.pptx)**: python-pptx for slide manipulation
+          - **Word (.docx)**: python-docx for text extraction
 
         Parameters:
         - docIds (required): Array of document IDs to retrieve. Can be a single document ID or multiple IDs.
 
         Returns:
-        - Success (small response): List of document dictionaries with all fields including: id, title, content (HTML format), owner_email, project_id, tags, visibility, visible_to_members, created_at, updated_at, metadata, docType, storagePath, fileMetadata (may contain previewData), processingStatus
-        - Success (large response): File path and summary. Access content using tools from <core_tools_reference> in system prompt. Semantic search available after RAG indexing completes.
-        - Error: Dictionary with error message
-
-        Note: Content is always returned as HTML format (converted from TipTap JSON stored in database) for rich_text documents. For uploaded files (xlsx, csv, pdf, docx, pptx), content field contains extracted text for search indexing. Large responses are automatically handled by the system.
+        - For rich_text: List of document dicts with `content` (HTML), id, title, owner_email, project_id, tags, etc.
+        - For uploaded files: List of document dicts with `file_path`, `original_name`, `file_size`, `mime_type`, plus metadata fields.
+        - Error: Dictionary with error message.
 
         Example Use Cases:
-        - Read a specific document's full content for editing
-        - Get multiple documents at once
-        - Retrieve document details and content for analysis
+        - Read a rich text document's full content for editing
+        - Load an Excel file for data analysis (file auto-downloaded, use pandas to read)
+        - Get multiple documents at once (mixed types supported)
         """
         return {
             "type": "custom",
@@ -461,6 +457,88 @@ For large documents (file path returned), use this tool.
             }
         }
 
+    def _get_workspace_paths(self):
+        """
+        Get the host-side workspace directory and the container-visible path.
+        
+        Returns:
+            tuple: (host_dir, container_dir) or (None, None) if unavailable
+        """
+        # Try to get workspace from ToolUse reference (Docker/K8s session)
+        if self._tool_use_ref:
+            session = getattr(self._tool_use_ref, '_bash_session', None)
+            if session:
+                return session.session_temp_dir, session.workspace_path
+        
+        # Fallback: use /workspace if it exists (running inside container)
+        if os.path.exists('/workspace'):
+            return '/workspace', '/workspace'
+        
+        # Last resort: use a temp directory
+        import tempfile
+        fallback_dir = os.path.join(tempfile.gettempdir(), 'leanworks_workspace')
+        os.makedirs(fallback_dir, exist_ok=True)
+        logger.warning(f"No workspace session available, using fallback: {fallback_dir}")
+        return fallback_dir, fallback_dir
+
+    def _download_file_to_workspace(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Download an uploaded document's full file to the workspace directory.
+        
+        Args:
+            doc: Document metadata dict (must have 'id' and 'storagePath')
+            
+        Returns:
+            Dict with file_path, original_name, size, mime_type on success,
+            or dict with 'error' key on failure
+        """
+        doc_id = doc.get('id')
+        storage_path = doc.get('storagePath')
+        
+        if not storage_path:
+            return {"error": f"No storage path found for document {doc_id}"}
+        
+        # Get original filename from fileMetadata
+        file_metadata = doc.get('fileMetadata', {}) or {}
+        original_name = file_metadata.get('originalName', f"document_{doc_id}")
+        mime_type = doc.get('mimeType', 'application/octet-stream')
+        
+        try:
+            # Download file content from leanworks-hub API
+            response = self._make_request(
+                'GET',
+                f'/api/docs/{doc_id}/content',
+                raw=True  # Request raw response, not JSON
+            )
+            
+            if isinstance(response, dict) and 'error' in response:
+                return response
+            
+            # Get workspace directory
+            host_dir, container_dir = self._get_workspace_paths()
+            
+            # Sanitize filename to avoid path traversal
+            safe_filename = os.path.basename(original_name)
+            host_path = os.path.join(host_dir, safe_filename)
+            container_path = os.path.join(container_dir, safe_filename)
+            
+            # Write file content
+            with open(host_path, 'wb') as f:
+                f.write(response)
+            
+            file_size = len(response)
+            logger.info(f"Downloaded file for doc {doc_id} to {container_path} ({file_size} bytes)")
+            
+            return {
+                "file_path": container_path,
+                "original_name": original_name,
+                "size": file_size,
+                "mime_type": mime_type,
+            }
+        except Exception as e:
+            logger.error(f"Error downloading file for doc {doc_id}: {str(e)}")
+            return {"error": f"Failed to download file: {str(e)}"}
+
     def get_doc(
         self,
         docIds: List[str],
@@ -469,10 +547,14 @@ For large documents (file path returned), use this tool.
     ) -> List[Dict[str, Any]]:
         """
         Get one or more documents by their IDs via API.
+        
+        For rich_text documents: returns full HTML content directly.
+        For uploaded files (xlsx, csv, pdf, pptx, docx): automatically downloads the full
+        binary file to /workspace/ and returns metadata with the file path.
 
         Args:
             docIds: List of document IDs to retrieve
-            format: Content format ('html' or 'json', default: 'html')
+            format: Content format ('html' or 'json', default: 'html') — only applies to rich_text docs
 
         Returns:
             List of document dictionaries with full content, or error dictionary
@@ -498,14 +580,6 @@ For large documents (file path returned), use this tool.
                     doc = self._make_request('GET', f'/api/docs/{doc_id}', params={'format': format})
                     
                     if doc:
-                        # Handle content format based on requested format
-                        if 'content' in doc and doc['content']:
-                            content = doc['content']
-                            if format == 'html':
-                                # Convert TipTap JSON to HTML
-                                doc['content'] = self._convert_content_to_html(content)
-                            # If format == 'json', keep raw content as-is
-                        
                         # Normalize field names (API returns camelCase, but we want consistency)
                         if 'ownerEmail' in doc:
                             doc['owner_email'] = doc.pop('ownerEmail')
@@ -517,6 +591,48 @@ For large documents (file path returned), use this tool.
                             doc['created_at'] = doc.pop('createdAt')
                         if 'updatedAt' in doc:
                             doc['updated_at'] = doc.pop('updatedAt')
+                        
+                        doc_type = doc.get('docType', 'rich_text')
+                        
+                        if doc_type == 'rich_text':
+                            # Rich text: convert TipTap JSON to HTML (existing behavior)
+                            if 'content' in doc and doc['content']:
+                                content = doc['content']
+                                if format == 'html':
+                                    doc['content'] = self._convert_content_to_html(content)
+                                # If format == 'json', keep raw content as-is
+                        else:
+                            # Uploaded file (xlsx, csv, pdf, pptx, docx):
+                            # Automatically download the full binary file to /workspace/
+                            file_result = self._download_file_to_workspace(doc)
+                            
+                            if 'error' in file_result:
+                                # Download failed — keep the doc metadata but note the error
+                                doc['file_download_error'] = file_result['error']
+                                logger.warning(f"Failed to download file for doc {doc_id}: {file_result['error']}")
+                            else:
+                                # Rebuild doc with only essential fields, dropping bulky
+                                # content, fileMetadata.previewData, storagePath, etc.
+                                # This keeps the response small so file_path is directly
+                                # visible to the agent without large response indirection.
+                                doc = {
+                                    'id': doc.get('id'),
+                                    'title': doc.get('title'),
+                                    'docType': doc_type,
+                                    'file_path': file_result['file_path'],
+                                    'original_name': file_result['original_name'],
+                                    'file_size': file_result['size'],
+                                    'mime_type': file_result.get('mime_type', 'application/octet-stream'),
+                                    'owner_email': doc.get('owner_email'),
+                                    'project_id': doc.get('project_id'),
+                                    'created_at': doc.get('created_at'),
+                                    'updated_at': doc.get('updated_at'),
+                                    'file_info': (
+                                        f"Full file downloaded to {file_result['file_path']} "
+                                        f"({file_result['size']} bytes). "
+                                        f"Use bash/python tools to process it."
+                                    ),
+                                }
                         
                         found_ids.add(doc['id'])
                         docs.append(doc)
@@ -537,121 +653,8 @@ For large documents (file path returned), use this tool.
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
     
-    @property
-    def get_doc_full_file_property(self):
-        """Property definition for get_doc_full_file tool."""
-        return {
-            "type": "custom",
-            "name": "get_doc_full_file",
-            "description": f"""
-Download the full file content for an uploaded document (Excel, CSV, PDF, etc.).
-
-WHEN TO USE: When get_doc returns a document with limited preview data and you need the full file:
-- Excel/CSV (docType='xlsx' or 'csv'): Full spreadsheet beyond 100×20 preview
-- PowerPoint (docType='pptx'): Original presentation with formatting, layout, images, or to convert to other formats
-
-WHAT IT DOES:
-- Downloads the complete file from GCS via the leanworks-hub API
-- Saves it to /workspace/ with the original filename
-- Returns the local file path for processing with bash/python tools
-
-PARAMETERS:
-- docId (required): The document ID to download
-
-RETURNS:
-- file_path: Local path to downloaded file (e.g., /workspace/report.xlsx)
-- original_name: Original filename
-- size: File size in bytes
-- mime_type: MIME type of the file
-
-NEXT STEPS after download:
-- For Excel/CSV: Use xlsx2csv, pandas (python), or openpyxl for full data processing
-- For PowerPoint: Use python-pptx for slide manipulation, or process the converted PDF
-- For PDF/DOCX: Use appropriate processing tools (pdftotext, python-docx, etc.)
-""",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "docId": {
-                        "type": "string",
-                        "description": "Document ID to download full file for"
-                    }
-                },
-                "required": ["docId"]
-            }
-        }
-
-    def get_doc_full_file(self, docId: str, **kwargs) -> Dict[str, Any]:
-        """
-        Download the full file content for an uploaded document.
-        
-        Args:
-            docId: Document ID to download
-            
-        Returns:
-            Dictionary with file_path, original_name, size, mime_type
-        """
-        try:
-            import tempfile
-            import os
-            
-            # First get document metadata to get original filename
-            doc = self._make_request('GET', f'/api/docs/{docId}')
-            if not doc:
-                return {"error": f"Document {docId} not found"}
-            
-            doc_type = doc.get('docType', 'rich_text')
-            if doc_type == 'rich_text':
-                return {"error": "This document is a rich_text document, not an uploaded file. Use get_doc to retrieve its content."}
-            
-            storage_path = doc.get('storagePath')
-            if not storage_path:
-                return {"error": "No storage path found for this document"}
-            
-            # Get original filename from fileMetadata
-            file_metadata = doc.get('fileMetadata', {})
-            original_name = file_metadata.get('originalName', f"document_{docId}")
-            mime_type = doc.get('mimeType', 'application/octet-stream')
-            
-            # Download file content from leanworks-hub API
-            # This endpoint returns raw file content from GCS
-            response = self._make_request(
-                'GET', 
-                f'/api/docs/{docId}/content',
-                raw=True  # Request raw response, not JSON
-            )
-            
-            if isinstance(response, dict) and 'error' in response:
-                return response
-            
-            # Save to /workspace/ directory
-            workspace_dir = '/workspace'
-            if not os.path.exists(workspace_dir):
-                os.makedirs(workspace_dir, exist_ok=True)
-            
-            # Sanitize filename to avoid path traversal
-            safe_filename = os.path.basename(original_name)
-            file_path = os.path.join(workspace_dir, safe_filename)
-            
-            # Write file content
-            with open(file_path, 'wb') as f:
-                f.write(response)
-            
-            file_size = len(response)
-            
-            logger.info(f"Downloaded full file for doc {docId} to {file_path} ({file_size} bytes)")
-            
-            return {
-                "file_path": file_path,
-                "original_name": original_name,
-                "size": file_size,
-                "mime_type": mime_type,
-                "message": f"Full file downloaded to {file_path}. You can now process it with bash/python tools."
-            }
-            
-        except Exception as e:
-            logger.error(f"Error downloading full file for doc {docId}: {str(e)}")
-            return {"error": f"Failed to download full file: {str(e)}"}
+    # get_doc_full_file has been removed — file downloads are now handled
+    # automatically by get_doc for non-rich_text documents.
 
     @property
     def upload_doc_property(self):
@@ -662,7 +665,7 @@ NEXT STEPS after download:
             "description": f"""
 Upload a file to docs. Supported types: Excel (.xlsx, .xls), CSV, PDF, PowerPoint (.pptx, .ppt), Word (.docx, .doc).
 
-The document is stored and processed asynchronously. After upload, use get_doc or get_doc_full_file to access content once processing completes.
+The document is stored and processed asynchronously. After upload, use get_doc to access content once processing completes.
 
 PARAMETERS:
 - file_path (required): Path to the file (use /workspace/filename.ext for files created in bash session)
@@ -2303,7 +2306,7 @@ Returns quality report with issues and suggestions.""",
 
 UPLOADED FILES (Excel, CSV, PDF, PowerPoint, Word):
 - If the user wants to add a file (e.g. .xlsx, .csv, .pdf, .pptx, .docx) to docs, use upload_doc(file_path=...) instead of this workflow.
-- create_doc is for rich-text/HTML documents; upload_doc is for binary files. After upload_doc, the document is processed asynchronously; use get_doc or get_doc_full_file to access content once ready.
+- create_doc is for rich-text/HTML documents; upload_doc is for binary files. After upload_doc, the document is processed asynchronously; use get_doc to access content once ready.
 
 TO CREATE file formats from scratch (before upload_doc):
 - Excel (.xlsx): Use pandas (DataFrame.to_excel) or openpyxl for detailed formatting, or xlsxwriter
@@ -2352,10 +2355,10 @@ Please proceed with generating the TOC based on these requirements."""
 
 UPLOADED FILES (docType xlsx, csv, pdf, pptx, docx):
 - update_doc is for rich_text documents only. It cannot replace or edit the binary content of an uploaded file.
-- If get_doc returns a document with docType other than rich_text (e.g. xlsx, csv, pdf, pptx, docx): do not use update_doc to change its content. To work with the file: use get_doc_full_file(docId) to download it to /workspace/, then use bash/python tools to process it. To "replace" the file, the user would need to upload a new document via upload_doc (creating a new doc).
+- If get_doc returns a document with docType other than rich_text (e.g. xlsx, csv, pdf, pptx, docx): do not use update_doc to change its content. get_doc automatically downloads the full file to /workspace/. Use bash/python tools to process it. To "replace" the file, the user would need to upload a new document via upload_doc (creating a new doc).
 
 TO MODIFY uploaded files:
-1. Download: get_doc_full_file(docId) → returns file_path in /workspace/
+1. Use get_doc(docIds=[docId]) — for uploaded files, the full file is automatically downloaded to /workspace/
 2. Modify using appropriate tools:
    - Excel (.xlsx): pandas (read_excel, to_excel) or openpyxl for cell-level edits
    - CSV: pandas (read_csv, to_csv), Python csv module, or bash (awk, sed)

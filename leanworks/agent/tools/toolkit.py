@@ -1,7 +1,6 @@
 from leanworks.agent.tools.internal.doc_management import DocManagementTool
 from leanworks.agent.tools.internal.search import SearchTool
 from leanworks.agent.tools.azure.outlook import OutlookTool
-from leanworks.agent.tools.gcp.gcp import GCPTool
 from leanworks.agent.tools.project_management.atlassian import AtlassianTool
 from leanworks.agent.tools.project_management.github import GitHubTool
 from leanworks.agent.tools.project_management.notion import NotionTool
@@ -16,6 +15,7 @@ from leanworks.agent.tools.project_management.project_management import ProjectM
 from leanworks.agent.tools.internal.user_management import UserManagementTool
 from leanworks.agent.tools.internal.chat_management import ChatManagementTool
 from leanworks.agent.tools.internal.working_context_tool import WorkingContextTool
+from leanworks.agent.tools.internal.agent_trigger import AgentTriggerTool
 from leanworks.agent.utils.helpers import AgentHelpers
 from leanworks.utils.env import get_secret_name, resolve_credential_path
 from google.cloud import storage
@@ -83,7 +83,8 @@ class ToolUse:
             'event_management',
             'user_management',
             'chat_management',
-            'doc_management'
+            'doc_management',
+            'agent_trigger',
         ]
         
         # Set default tools if not provided
@@ -106,6 +107,16 @@ class ToolUse:
         
         # Initialize bash backend based on environment
         self._initialize_bash_backend()
+        
+        # Eagerly create bash session (Docker container / K8s pod) so that
+        # the /workspace directory is available for all tools from the start
+        if self._bash_backend:
+            try:
+                self._bash_session = self._create_bash_session()
+                logger.info(f"Bash session pre-initialized: {self._bash_session.backend_id}")
+            except Exception as e:
+                logger.warning(f"Failed to pre-initialize bash session: {e}. Will retry on first use.")
+                self._bash_session = None
         
         # RAG storage tool cache (lazy initialization)
         self._rag_storage = None
@@ -212,7 +223,8 @@ class ToolUse:
                         model_client=self.model_client,
                         config=DOC_WORKFLOW_CONFIG if 'doc_management' in self.requested_tools else None,
                         memory_manager=getattr(self, 'memory_manager', None),  # Pass memory manager for working context
-                        working_context=self.working_context  # Pass working context directly
+                        working_context=self.working_context,  # Pass working context directly
+                        tool_use_ref=self  # Reference to ToolUse for workspace access
                     )
                     if 'doc_management' not in self.enabled_tools:
                         self.enabled_tools.append('doc_management')
@@ -411,10 +423,32 @@ class ToolUse:
         return self._tool_cache['chat_management_tool']
 
     @property
+    def agent_trigger_tool(self):
+        """Lazy-load Agent Trigger tool on first access."""
+        if 'agent_trigger_tool' not in self._tool_cache:
+            if 'agent_trigger' in self.requested_tools and self.org_slug:
+                try:
+                    self._tool_cache['agent_trigger_tool'] = AgentTriggerTool(
+                        org_slug=self.org_slug
+                    )
+                    if 'agent_trigger' not in self.enabled_tools:
+                        self.enabled_tools.append('agent_trigger')
+                    logger.debug("AgentTriggerTool initialized successfully (lazy)")
+                except Exception as e:
+                    logger.error(f"Failed to initialize AgentTriggerTool: {str(e)}")
+                    self._tool_cache['agent_trigger_tool'] = None
+            elif 'agent_trigger' in self.requested_tools:
+                logger.warning("AgentTriggerTool not initialized: missing org_slug")
+                self._tool_cache['agent_trigger_tool'] = None
+            else:
+                self._tool_cache['agent_trigger_tool'] = None
+        return self._tool_cache['agent_trigger_tool']
+
+    @property
     def bigquery_tool(self):
         """Lazy-load BigQuery tool on first access."""
         if 'bigquery_tool' not in self._tool_cache:
-            if ('bigquery' in self.requested_tools or 'gcp' in self.requested_tools):
+            if 'bigquery' in self.requested_tools:
                 try:
                     # Initialize BigQuery client
                     from google.cloud import bigquery
@@ -428,8 +462,6 @@ class ToolUse:
                     )
                     if 'bigquery' not in self.enabled_tools:
                         self.enabled_tools.append('bigquery')
-                    if 'gcp' not in self.enabled_tools:
-                        self.enabled_tools.append('gcp')
                     logger.debug("BigQueryTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize BigQueryTool: {str(e)}")
@@ -440,9 +472,9 @@ class ToolUse:
 
     @property
     def cloud_storage_tool(self):
-        """Lazy-load Cloud Storage tool on first access."""
+        """Lazy-load Cloud Storage tool on first access. Uses hub integration_id: google_cloud_storage."""
         if 'cloud_storage_tool' not in self._tool_cache:
-            if ('cloud_storage' in self.requested_tools or 'gcp' in self.requested_tools) and self.org_slug:
+            if 'google_cloud_storage' in self.requested_tools and self.org_slug:
                 try:
                     # Initialize Storage client
                     from leanworks.agent.tools.gcp.cloud_storage import CloudStorageTool
@@ -454,15 +486,13 @@ class ToolUse:
                         org_slug=self.org_slug,
                         credential_path=self.credential_path
                     )
-                    if 'cloud_storage' not in self.enabled_tools:
-                        self.enabled_tools.append('cloud_storage')
-                    if 'gcp' not in self.enabled_tools:
-                        self.enabled_tools.append('gcp')
+                    if 'google_cloud_storage' not in self.enabled_tools:
+                        self.enabled_tools.append('google_cloud_storage')
                     logger.debug("CloudStorageTool initialized successfully (lazy)")
                 except Exception as e:
                     logger.error(f"Failed to initialize CloudStorageTool: {str(e)}")
                     self._tool_cache['cloud_storage_tool'] = None
-            elif 'cloud_storage' in self.requested_tools or 'gcp' in self.requested_tools:
+            elif 'google_cloud_storage' in self.requested_tools:
                 logger.warning("CloudStorageTool not initialized: missing org_slug")
                 self._tool_cache['cloud_storage_tool'] = None
             else:
@@ -869,10 +899,10 @@ class ToolUse:
         except Exception as e:
             logger.debug(f"Error checking for image: {e}")
 
-        # Build image from Dockerfile
+        # Build image from Dockerfile (context must be repo root so COPY requirements-workspace.txt finds it)
         try:
             logger.info(f"Building custom image {image_name}...")
-            build_context = os.path.dirname(dockerfile_path)
+            build_context = os.path.abspath(os.path.join(os.path.dirname(dockerfile_path), '..'))
             build_cmd = [
                 'docker', 'build', '-f', dockerfile_path, '-t', image_name, build_context
             ]
@@ -1170,8 +1200,11 @@ class ToolUse:
             return result["output"]
         else:
             error_msg = result['error'] if result['error'] else "No error message"
-            output_msg = result['output'] if result['output'] else "No output"
-            return f"Error (return code {result['return_code']}): {error_msg}\nOutput: {output_msg}"
+            output_msg = result['output'] if result['output'] else ""
+            error_detail = f"Exit code {result['return_code']}: {error_msg}"
+            if output_msg:
+                error_detail += f"\nOutput before error: {output_msg}"
+            return {"error": error_detail}
 
     def jq(self, query: str = None, file_path: str = None) -> str:
         """Execute jq queries on JSON files in the Docker container."""
@@ -1503,7 +1536,6 @@ EOF"""
                     self.doc_management_tool.create_doc_property,
                     self.doc_management_tool.update_doc_property,
                     self.doc_management_tool.get_doc_property,
-                    self.doc_management_tool.get_doc_full_file_property,
                     self.doc_management_tool.upload_doc_property,
                     self.doc_management_tool.list_docs_property,
                     # HTML-based doc management tools (removed - use create_doc/update_doc directly)
@@ -1550,6 +1582,15 @@ EOF"""
                     self.chat_management_tool.query_messages_property,
                 ])
                 logger.info("ChatManagementTool tools added to tools list (lazy)")
+
+            # Add Agent Trigger tools if available (for Lean AI TPM)
+            if self.agent_trigger_tool:
+                self._tools_cache.extend([
+                    self.agent_trigger_tool.list_registered_agents_property,
+                    self.agent_trigger_tool.read_agent_skill_property,
+                    self.agent_trigger_tool.trigger_ai_agent_property,
+                ])
+                logger.info("AgentTriggerTool tools added to tools list (lazy)")
                 
             # Add Outlook tools if available
             if self.outlook_tool:
@@ -1728,7 +1769,6 @@ EOF"""
                     "create_doc": self.doc_management_tool.create_doc,
                     "update_doc": self.doc_management_tool.update_doc,
                     "get_doc": self.doc_management_tool.get_doc,
-                    "get_doc_full_file": self.doc_management_tool.get_doc_full_file,
                     "upload_doc": self.doc_management_tool.upload_doc,
                     "list_docs": self.doc_management_tool.list_docs,
                     # HTML-based doc management functions (removed - use create_doc/update_doc directly)
@@ -1775,6 +1815,15 @@ EOF"""
                     "query_messages": self.chat_management_tool.query_messages,
                 })
                 logger.info("ChatManagementTool functions added to function_map (lazy)")
+
+            # Add Agent Trigger functions if available
+            if self.agent_trigger_tool:
+                self._function_map_cache.update({
+                    "list_registered_agents": self.agent_trigger_tool.list_registered_agents,
+                    "read_agent_skill": self.agent_trigger_tool.read_agent_skill,
+                    "trigger_ai_agent": self.agent_trigger_tool.trigger_ai_agent,
+                })
+                logger.info("AgentTriggerTool functions added to function_map (lazy)")
                 
             # Add Outlook functions if available
             if self.outlook_tool:

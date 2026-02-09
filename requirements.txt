@@ -1,7 +1,7 @@
 # Pinned versions to avoid pip backtracking during Cloud Build (resolver was slow on >= ranges)
 kubernetes==31.0.0
 google-cloud-storage==2.14.0
-google-cloud-bigquery==3.0.0
+google-cloud-bigquery>=3.3.6
 google-cloud-vectorsearch==0.3.0
 google-cloud-secret-manager==2.22.0
 google-auth==2.37.0

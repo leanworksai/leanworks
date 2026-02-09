@@ -4,10 +4,12 @@ Handles AI-powered resource planning and insights generation for plans
 """
 
 import json
+import re
 import asyncio
 import logging
 import time
 import traceback
+from datetime import datetime
 from quart import request, Response
 from leanworks.agent.core.chat import ChatAgent
 from anthropic import Anthropic
@@ -18,15 +20,82 @@ from app.services.database import query_org_one
 
 logger = logging.getLogger(__name__)
 
+def _get_planning_tools(available_tools):
+    """Return tool list for resource planning. Uses all enabled tools for the org."""
+    return list(available_tools) if available_tools else []
 
-async def stream_ai_response(user_id, org_slug, session_id, query, firestore_client, 
-                             secret_manager_client, model_client):
+
+_REQUIRED_STRATEGY_KEYS = {"strategy", "rationale", "total_cost", "estimated_duration_days", "team_size", "risk_level", "resource_allocations", "expected_outcomes", "trade_offs"}
+
+
+def _parse_resource_plan_response(response_content: str):
+    """
+    Extract and validate a list of strategy objects from the AI response.
+    Returns list of strategies or None if parsing/validation fails.
+    """
+    if not response_content or not response_content.strip():
+        return None
+    text = response_content.strip()
+    # Strip markdown code block if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    strategies = None
+    # Find JSON array: match [...] with nested braces
+    start = text.find("[")
+    if start == -1:
+        try:
+            strategies = json.loads(text)
+            if isinstance(strategies, list):
+                pass
+            else:
+                strategies = None
+        except json.JSONDecodeError:
+            return None
+    else:
+        depth = 0
+        end = -1
+        for i, c in enumerate(text[start:], start=start):
+            if c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            try:
+                strategies = json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+    if not isinstance(strategies, list) or len(strategies) == 0:
+        return None
+    validated = []
+    for s in strategies:
+        if not isinstance(s, dict):
+            continue
+        if not _REQUIRED_STRATEGY_KEYS.issubset(s.keys()):
+            continue
+        if s.get("strategy") not in ("cost-optimized", "time-optimized", "quality-optimized"):
+            continue
+        if not isinstance(s.get("resource_allocations"), list):
+            continue
+        validated.append(s)
+    return validated if validated else None
+
+
+async def stream_ai_response(user_id, org_slug, session_id, query, firestore_client,
+                             secret_manager_client, model_client, planning_tools=None):
     """
     Async generator for SSE streaming of AI responses.
     Yields formatted SSE events.
     """
     try:
-        # Initialize ChatAgent
+        tools = planning_tools if planning_tools is not None else []
         agent = ChatAgent(
             firestore_client=firestore_client,
             secret_manager_client=secret_manager_client,
@@ -35,7 +104,7 @@ async def stream_ai_response(user_id, org_slug, session_id, query, firestore_cli
             org_slug=org_slug,
             session_id=session_id,
             clear_conversation=True,
-            tools=None  # No external tools for AI planning
+            tools=tools,
         )
         
         # Stream events from agent
@@ -90,6 +159,23 @@ def setup_plans_ai_endpoints(app):
             if not org_slug:
                 return {"error": "org_slug is required"}, 400
             
+            # Validate dates
+            start_date_str = data.get("start_date")
+            end_date_str = data.get("end_date")
+            if start_date_str and end_date_str:
+                try:
+                    start_dt = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
+                    end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                    if end_dt <= start_dt:
+                        return {"error": "end_date must be after start_date"}, 400
+                except (ValueError, TypeError):
+                    return {"error": "Invalid date format for start_date or end_date. Use YYYY-MM-DD or ISO format."}, 400
+            
+            # Validate budget
+            total_budget = data.get("total_budget", 0)
+            if total_budget is not None and (not isinstance(total_budget, (int, float)) or total_budget < 0):
+                return {"error": "total_budget must be a non-negative number"}, 400
+            
             logger.info(f"Generating resource plan for user_id: {user_id}, org_slug: {org_slug}")
             
             # Initialize clients
@@ -101,7 +187,10 @@ def setup_plans_ai_endpoints(app):
                 traceback.print_exc()
                 return {"error": f"Failed to initialize clients: {str(e)}"}, 500
             
-            # Build prompt for resource planning
+            planning_tools = _get_planning_tools(available_tools)
+            logger.info(f"Resource planning tools enabled: {planning_tools}")
+            
+            # Build prompt for resource planning (two-phase: gather data, then generate)
             plan_data = {
                 "name": data.get("plan_name", "Plan"),
                 "objectives": data.get("plan_objectives", []),
@@ -112,32 +201,48 @@ def setup_plans_ai_endpoints(app):
                 "team_members": data.get("team_members", []),
             }
             
-            prompt = f"""You are an expert project planner and resource allocation specialist.
+            prompt = f"""You are an expert resource planning specialist. Your task is to generate 3 alternative resource allocation strategies for the following plan.
 
-Analyze the following plan and generate 3 alternative resource allocation strategies:
+IMPORTANT: Before generating strategies, you MUST gather current organizational data using the tools available to you.
 
-Plan Details:
+Plan Context:
 - Name: {plan_data['name']}
 - Start Date: {plan_data['start_date']}
 - End Date: {plan_data['end_date']}
 - Total Budget: ${plan_data['total_budget']:,.2f}
 - Objectives: {json.dumps(plan_data['objectives'], indent=2)}
 - Budget Categories: {json.dumps(plan_data['budget_categories'], indent=2)}
-- Available Team Members: {json.dumps(plan_data['team_members'], indent=2)}
+- Team Members from request (may be partial; prefer data from tools): {json.dumps(plan_data['team_members'], indent=2)}
 
-Generate 3 optimization strategies:
+STEP 1: GATHER REAL DATA (Required)
+Use your tools to gather:
+
+a) Team Member Information:
+   - Call get_table_schema(table="users") to understand the schema, then query the users table (e.g. email, name, role, hourly_rate, department). Focus on users relevant to the plan objectives.
+
+b) Current Workload:
+   - Query the tasks table to see current assignments per user. Example: SELECT assignee_id, COUNT(*) as active_tasks, SUM(estimated_hours) as hours FROM tasks WHERE status IN ('todo', 'in-progress') GROUP BY assignee_id
+
+c) Calendar Availability:
+   - For key team members, use query_events to check availability during the plan period (startDate/endDate). Look for conflicts, PTO, or major commitments.
+
+d) Optional: Query completed projects or historical data for better duration/cost estimates.
+
+STEP 2: GENERATE STRATEGIES
+Using the real data you gathered (and the plan context above), generate exactly 3 optimization strategies:
+
 1. Cost-Optimized: Minimize total cost while meeting objectives
 2. Time-Optimized: Minimize timeline while staying within budget
 3. Quality-Optimized: Maximize quality with best resources
 
-For each strategy, return a JSON object with:
+For each strategy, return a JSON object with this exact structure:
 {{
-  "strategy": "cost-optimized|time-optimized|quality-optimized",
+  "strategy": "cost-optimized" | "time-optimized" | "quality-optimized",
   "rationale": "Why this strategy works for this plan",
   "total_cost": number,
-  "estimated_duration_weeks": number,
+  "estimated_duration_days": number,
   "team_size": number,
-  "risk_level": "low|medium|high",
+  "risk_level": "low" | "medium" | "high",
   "resource_allocations": [
     {{
       "user_email": "user@example.com",
@@ -152,13 +257,16 @@ For each strategy, return a JSON object with:
   "trade_offs": ["trade-off1", "trade-off2"]
 }}
 
-Return a JSON array with exactly 3 strategy objects. Return ONLY valid JSON."""
+Return a JSON array with exactly 3 strategy objects. Use only valid JSON; no markdown or extra text."""
 
             if stream_enabled:
                 logger.info("Streaming mode enabled for resource plan generation")
                 return Response(
-                    stream_ai_response(user_id, org_slug, session_id or f"resource-plan-{int(time.time())}", 
-                                     prompt, firestore_client, secret_manager_client, model_client),
+                    stream_ai_response(
+                        user_id, org_slug, session_id or f"resource-plan-{int(time.time())}",
+                        prompt, firestore_client, secret_manager_client, model_client,
+                        planning_tools=planning_tools,
+                    ),
                     mimetype='text/event-stream',
                     headers={
                         'Cache-Control': 'no-cache',
@@ -175,7 +283,7 @@ Return a JSON array with exactly 3 strategy objects. Return ONLY valid JSON."""
                 org_slug=org_slug,
                 session_id=session_id or f"resource-plan-{int(time.time())}",
                 clear_conversation=True,
-                tools=None
+                tools=planning_tools,
             )
             
             processing_start_time = time.time()
@@ -186,31 +294,26 @@ Return a JSON array with exactly 3 strategy objects. Return ONLY valid JSON."""
             
             response_content = response.get("content", "")
             
-            # Parse JSON from response
-            strategies = []
-            try:
-                # Try to extract JSON array from response
-                import re
-                json_match = re.search(r'\[\s*\{.*?\}\s*\]', response_content, re.DOTALL)
-                if json_match:
-                    strategies = json.loads(json_match.group(0))
-                else:
-                    # Try to parse entire response
-                    strategies = json.loads(response_content)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Could not parse JSON from response: {str(e)}")
-                # Return the raw response
+            # Parse and validate JSON from response
+            strategies = _parse_resource_plan_response(response_content)
+            if strategies is None:
+                logger.warning(
+                    f"Resource planning for {org_slug}: JSON parse failed or validation failed "
+                    f"(response length={len(response_content)})"
+                )
                 return {
                     "strategies": [{
                         "strategy": "error",
-                        "raw_response": response_content[:1000]
+                        "rationale": "AI response could not be parsed as valid strategies.",
+                        "raw_response": response_content[:1000],
                     }]
                 }, 200
             
             total_time = time.time() - request_start_time
-            logger.info(f"Total resource plan generation time: {total_time:.3f}s")
-            logger.info(f"Successfully generated {len(strategies)} resource plan strategies")
-            
+            logger.info(
+                f"Resource planning for {org_slug}: generated {len(strategies)} strategies "
+                f"in {total_time:.3f}s (AI processing: {processing_time:.3f}s)"
+            )
             return {"strategies": strategies}, 200
             
         except Exception as e:

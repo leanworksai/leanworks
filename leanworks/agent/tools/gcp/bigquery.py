@@ -296,8 +296,15 @@ class BigQueryTool:
         Returns:
         A dictionary containing:
         - results: List of row dictionaries
-        - total_rows: Total number of rows returned
+        - rows_returned: Number of rows actually returned
+        - total_rows_available: Total rows the query matched (may be larger than rows_returned)
+        - truncated: Whether results were truncated due to max_results limit
+        - max_results_limit: The effective max_results cap that was applied
         - query_metadata: Query execution metadata (bytes processed, etc.)
+
+        IMPORTANT: If truncated is true, not all matching rows were returned. Consider using
+        SQL aggregation (GROUP BY, COUNT, SUM, etc.) or filtering (WHERE) to reduce the result
+        set, rather than trying to fetch all rows.
         """
         return {
             "type": "custom",
@@ -367,8 +374,11 @@ class BigQueryTool:
 
             # Wait for query to complete
             results = query_job.result()
+            
+            # Capture total rows available before iterating
+            total_rows_available = results.total_rows
 
-            # Convert to list of dictionaries
+            # Convert to list of dictionaries (capped by max_results)
             rows = []
             for row in results:
                 rows.append(dict(row))
@@ -383,13 +393,17 @@ class BigQueryTool:
                 "cache_hit": query_job.cache_hit
             }
 
+            is_truncated = total_rows_available is not None and len(rows) < total_rows_available
             result = {
                 "results": rows,
-                "total_rows": len(rows),
+                "rows_returned": len(rows),
+                "total_rows_available": total_rows_available,
+                "truncated": is_truncated,
+                "max_results_limit": max_results,
                 "query_metadata": query_metadata
             }
 
-            logger.info(f"Executed BigQuery query, returned {len(rows)} rows, processed {query_job.total_bytes_processed} bytes")
+            logger.info(f"Executed BigQuery query, returned {len(rows)}/{total_rows_available} rows (truncated={is_truncated}), processed {query_job.total_bytes_processed} bytes")
             return result
 
         except Exception as e:

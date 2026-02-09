@@ -11,7 +11,8 @@ import subprocess
 import socket
 import atexit
 from typing import Optional, Dict, Any, Tuple
-from psycopg2 import pool, connect
+import psycopg2
+from psycopg2 import pool, connect, OperationalError
 from psycopg2.extras import RealDictCursor
 from google.cloud import secretmanager
 from google.oauth2 import service_account
@@ -429,6 +430,11 @@ def get_org_pool(org_slug: str) -> pool.ThreadedConnectionPool:
             'database': db_name,
             'user': db_user,
             'password': password,
+            # TCP keepalive to detect and discard dead connections
+            'keepalives': 1,
+            'keepalives_idle': 30,       # seconds before first keepalive probe
+            'keepalives_interval': 10,   # seconds between probes
+            'keepalives_count': 5,       # failed probes before declaring dead
         }
         if db_host.startswith('/'):
             pool_params['host'] = db_host
@@ -452,6 +458,8 @@ def get_org_pool(org_slug: str) -> pool.ThreadedConnectionPool:
 def query_org(org_slug: str, query: str, params: Optional[tuple] = None) -> list:
     """Execute a query on an organization's database and return results.
     
+    Includes connection validation and automatic retry on stale connections.
+    
     Args:
         org_slug: Organization slug (e.g., 'leanworks')
         query: SQL query to execute
@@ -462,22 +470,45 @@ def query_org(org_slug: str, query: str, params: Optional[tuple] = None) -> list
     """
     conn = None
     org_pool = None
-    try:
-        org_pool = get_org_pool(org_slug)
-        conn = org_pool.getconn()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        cursor.close()
-        return [dict(row) for row in results]
-    except Exception as e:
-        logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
-        logger.error(f"Query: {query}")
-        logger.error(f"Params: {params}")
-        raise
-    finally:
-        if conn and org_pool:
-            org_pool.putconn(conn)
+    for attempt in range(2):  # Retry once on stale connection
+        try:
+            org_pool = get_org_pool(org_slug)
+            conn = org_pool.getconn()
+            # Validate connection is alive before executing query
+            try:
+                conn.cursor().execute("SELECT 1")
+            except Exception:
+                # Connection is stale — discard and get a fresh one
+                logger.warning(f"Stale connection detected for {org_slug}, discarding and getting new one")
+                org_pool.putconn(conn, close=True)
+                conn = org_pool.getconn()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            cursor.close()
+            return [dict(row) for row in results]
+        except OperationalError as e:
+            if attempt == 0:
+                logger.warning(f"Stale connection for org {org_slug}, retrying: {e}")
+                if conn and org_pool:
+                    try:
+                        org_pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
+                    conn = None
+                continue
+            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
+            raise
+        except Exception as e:
+            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
+            raise
+        finally:
+            if conn and org_pool:
+                org_pool.putconn(conn)
 
 
 def query_org_one(org_slug: str, query: str, params: Optional[tuple] = None) -> Optional[Dict[str, Any]]:

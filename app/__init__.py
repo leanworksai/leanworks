@@ -201,7 +201,7 @@ app = Quart(__name__)
 
 # Configure CORS to allow requests from leanworks-hub
 # Allow all origins in development, specific origins in production
-allowed_origins = os.environ.get("CORS_ORIGINS", "https://leanworks.ai,https://hub.leanworks.ai,http://localhost:8080,http://localhost:5173").split(",")
+allowed_origins = os.environ.get("CORS_ORIGINS", "https://leanworks.ai,https://hub.leanworks.ai,http://localhost:8080,http://localhost:8081,http://localhost:5173").split(",")
 cors(app, 
      allow_origin=allowed_origins, 
      allow_headers=["Content-Type", "Authorization", "X-API-Key"], 

@@ -24,6 +24,10 @@ class ConversationManager:
         self.large_response_vectordb_client = large_response_vectordb_client
         self.conversation_path = f"chat_store/{self.user_id}/{self.session_id}"
         self.conversation = []
+        
+        # Track stored response files to prevent cascading re-storage
+        # (when bash reads a stored file and produces large output, we skip re-storing it)
+        self._stored_response_files = set()
 
         # Initialize background indexing manager for RAG
         from leanworks.agent.tools.internal.rag_storage import BackgroundIndexingManager
@@ -344,6 +348,12 @@ class ConversationManager:
                         "is_error": True
                     })
         
+        for tr in tool_results:
+            content = tr.get("content", "")
+            content_str = content if isinstance(content, str) else str(content)
+            preview = self._truncate_preview(content_str, max_length=500)
+            is_error = tr.get("is_error", False)
+            logger.info(f"Tool result preview (is_error={is_error}): {preview}")
         return tool_results
 
     def parse_and_format_tool_results_with_sources(self, response, function_map, data_sources, rag_storage=None):
@@ -419,6 +429,20 @@ class ConversationManager:
                         logger.info(f"Response classification for {tool_name}: file_ext={file_extension}, is_large={is_large}, auto_store_enabled={LARGE_RESPONSE_CONFIG.get('auto_store_enabled', True)}")
 
                         if is_large and LARGE_RESPONSE_CONFIG.get("auto_store_enabled", True):
+                            # Skip re-storage if bash is reading an already-stored response file
+                            if tool_name == 'bash' and self._stored_response_files:
+                                command = tool_input.get('command', '')
+                                if any(stored_path in command for stored_path in self._stored_response_files):
+                                    logger.info(f"Skipping re-storage for bash reading existing response file")
+                                    # Truncate the output instead of saving another file
+                                    truncated = self._truncate_preview(str(result), max_length=8000)
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_use_id,
+                                        "content": truncated
+                                    })
+                                    continue
+                            
                             logger.info(f"Large response detected for {tool_name}, routing to storage handler with file_ext={file_extension}")
                             # Extract doc IDs for doc tools (preprocessing moved to storage handler)
                             doc_ids = []
@@ -565,6 +589,12 @@ class ConversationManager:
                         "is_error": True
                     })
         
+        for tr in tool_results:
+            content = tr.get("content", "")
+            content_str = content if isinstance(content, str) else str(content)
+            preview = self._truncate_preview(content_str, max_length=500)
+            is_error = tr.get("is_error", False)
+            logger.info(f"Tool result preview (is_error={is_error}): {preview}")
         return tool_results
 
     def _ensure_docker_container_initialized(self) -> bool:
@@ -670,23 +700,25 @@ class ConversationManager:
             
             # Build instructions with bash commands appropriate for file type
             if file_extension == 'json':
-                bash_commands = f"""BASH COMMANDS TO QUERY THE JSON FILE:
+                bash_commands = f""" SAMPLE COMMANDS TO QUERY THE JSON FILE:
 - Extract field: jq '.field_name' {container_path}
-- Filter array: jq '.[] | select(.age > 30)' {container_path}
-- Search text: grep 'keyword' {container_path}
-- Case-insensitive: grep -i 'pattern' {container_path}
+- Filter array: jq '.[] | select(.status == "done")' {container_path}
+- Search text: grep -i 'keyword' {container_path}
 - View lines: sed -n '10,20p' {container_path}
-- Combine: grep 'pattern' {container_path} | head -n 20"""
+- Analyze with pandas: python3 -c "import json,pandas as pd; df=pd.DataFrame(json.load(open('{container_path}'))); print(df.describe())"
+- Group/aggregate: python3 -c "import json,pandas as pd; df=pd.DataFrame(json.load(open('{container_path}'))); print(df.groupby('COLUMN').size())"
+- Sort/top-N: python3 -c "import json,pandas as pd; df=pd.DataFrame(json.load(open('{container_path}'))); print(df.sort_values('COLUMN', ascending=False).head(10).to_string())\""""
             else:
                 # txt or html
-                bash_commands = f"""BASH COMMANDS TO QUERY THE FILE:
-- Search by pattern: grep 'keyword' {container_path}
-- Case-insensitive search: grep -i 'pattern' {container_path}
+                bash_commands = f""" SAMPLE COMMANDS TO QUERY THE FILE:
+- Search by pattern: grep -i 'keyword' {container_path}
+- Regex extract: grep -oE 'regex_pattern' {container_path}
 - View specific lines: sed -n '10,20p' {container_path}
-- View first N lines: head -n 50 {container_path}
-- View last N lines: tail -n 50 {container_path}
+- View first/last N lines: head -n 50 {container_path} or tail -n 50 {container_path}
 - Count occurrences: grep -c 'pattern' {container_path}
-- Combine operations: grep 'pattern' {container_path} | head -n 20"""
+- Combine operations: grep 'pattern' {container_path} | head -n 20
+- Python regex: python3 -c "import re; [print(m) for m in re.findall(r'pattern', open('{container_path}').read())[:20]]"
+- Python analysis: python3 -c "lines=open('{container_path}').readlines(); print(f'Total lines: {{len(lines)}}'); [print(l.strip()) for l in lines[:20]]\""""
             
             formatted_result = f"""Large response saved to: {container_path}
 
@@ -694,11 +726,14 @@ Summary: {summary}
 
 {bash_commands}
 
-IMPORTANT: After using bash commands to retrieve specific data, provide the results to the user.
-Do NOT just tell the user the file path - always query and return the actual data."""
+IMPORTANT: If the user asked for data or analysis, query the file and return readable results.
+If the user asked to save, export, or generate a file, the file path is the final answer."""
             
             # Track data source
             data_sources.append(f"{file_extension.upper()} file: {container_path}")
+            
+            # Register file to prevent cascading re-storage when bash reads it
+            self._stored_response_files.add(container_path)
             
             logger.info(f"Stored large response as .{file_extension} file: {container_path} ({len(text_content)} chars)")
             
