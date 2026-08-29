@@ -6,14 +6,15 @@ A comprehensive AI agent framework combining intelligent task automation with Re
 
 From GitHub:
 ```bash
-pip install git+https://github.com/yourusername/leanworks.git
+pip install git+https://github.com/leanworksai/leanworks.git
 ```
 
 For development:
 ```bash
-git clone https://github.com/yourusername/leanworks.git
+git clone https://github.com/leanworksai/leanworks.git
 cd leanworks
-pip install -e .
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install -e . --no-deps
 ```
 
 ## Architecture Overview
@@ -24,8 +25,8 @@ LeanWorks is built on a modular, layered architecture with three main components
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    API Layer (Quart/Flask)                   │
-│              /chat, /upload, /search endpoints               │
+│                      API Layer (Quart)                       │
+│             POST /api/ask (JSON or SSE stream)              │
 └────────┬────────────────────────────────────────────────────┘
          │
     ┌────▼─────────────────────────────────────────────────┐
@@ -39,8 +40,8 @@ LeanWorks is built on a modular, layered architecture with three main components
     └────┬──────────────────┬──────────────────┬───────────┘
          │                  │                  │
     ┌────▼──────┐  ┌────────▼──────┐  ┌───────▼───────────┐
-    │   RAG     │  │  Agent Tools  │  │  Cloud Services   │
-    │  Module   │  │   & Integr.   │  │  & Infrastructure │
+    │ SearchTool│  │  Agent Tools  │  │  Cloud Services   │
+    │ GCP Vector│  │   & Integr.   │  │  & Infrastructure │
     └───────────┘  └───────────────┘  └───────────────────┘
 ```
 
@@ -54,7 +55,7 @@ The intelligent orchestration layer that manages conversations and tool executio
 - Main conversation interface with Claude
 - Manages multi-turn conversations with context awareness
 - Handles tool invocation, verification, and response processing
-- Integrates with Firestore for conversation persistence
+- Loads Firestore-backed message and memory state
 - Supports streaming and async operations
 
 **Tool Registry & Orchestration** (`tool_registry.py`, `toolkit.py`)
@@ -70,8 +71,8 @@ The intelligent orchestration layer that manages conversations and tool executio
 - Supports multiple response types (structured data, files, streaming)
 
 **Conversation & Memory Management** (`conversation.py`, `memory.py`)
-- **ConversationManager**: Tracks multi-turn conversations in Firestore
-- **MemoryManager**: Persistent memory of interactions and context
+- **ConversationManager**: Tracks the active multi-turn tool/message conversation and loads prior messages
+- **MemoryManager**: Persists rolling summaries, recent turns, profiles, and working context in Firestore
 - Retrieves conversation history for context window
 - Manages session-based conversation isolation
 
@@ -89,86 +90,105 @@ The intelligent orchestration layer that manages conversations and tool executio
 | **User Management** | Query organization users | Management |
 | **Chat Management** | Query chat messages & threads | Management |
 | **Document Management** | Manage documents & attachments | Management |
-| **Search Tool** | Semantic search via Firestore | Search |
+| **Search Tool** | Agent-invoked hybrid retrieval via GCP Vector Search | Search |
 | **GitHub Integration** | Query repos, issues, PRs | External |
 | **Linear Integration** | Query/manage Linear issues | External |
 | **Notion Integration** | Query Notion databases | External |
-| **Atlassian Integration** | Jira & Confluence access | External |
+| **Atlassian Integration** | Jira issue and user access | External |
 | **ClickUp Integration** | ClickUp workspace queries | External |
-| **Outlook Integration** | Calendar & email events | External |
+| **Outlook Integration** | Calendar meetings and availability | External |
 | **Cloud Storage** | GCS file operations | Infrastructure |
 | **Bash Backend** | Execute shell commands | Execution |
-| **Firestore** | Direct database queries | Database |
-| **RAG Storage** | Knowledge base retrieval | Search |
+| **Firestore** | Conversation and memory persistence | Infrastructure |
+| **RAG Storage** | Low-level helper for unstructured tool-response vectors | Search |
 
 ### 2. **RAG Module** (`leanworks/rag/`)
 
-Retrieval Augmented Generation system for semantic search and knowledge extraction.
+Retrieval Augmented Generation components for hybrid search, reranking, span selection, and optional standalone answer generation.
+
+In the main application path, RAG is exposed to `ChatAgent` as the `search_documents` tool. The main Claude model decides when to call it, receives the formatted passages as a tool result, and then writes the answer. Source links are collected separately for the API response's `data_sources` sidecar; they are not embedded in the tool-result text sent to Claude. Conversation memory is managed separately by `ChatAgent` and injected into its main prompt.
+
+`leanworks.rag.chat.Chat` and `AsyncChat` also provide standalone `get_response`/`async_get_response` methods. They are useful for direct RAG calls, but they are not the implementation behind `/api/ask`, and they do not provide the API's SSE tool-event stream.
 
 #### Architecture:
 
 ```
-User Query
+User query
     ↓
-Query Rewriter (Multi-query expansion)
+ChatAgent optionally calls search_documents
     ↓
-Pinecone Hybrid Search (BM25 + Dense embeddings)
+Original query + 3 LLM rewrites
     ↓
-Reranker (BGE or LLM-based)
+GCP Vector Search: dense vector search + native text search
     ↓
-Span Selection (Extract relevant sentences)
+Weighted reciprocal-rank fusion, org filters, merge/dedup
     ↓
-Memory Integration (Add conversation context)
+LLM or BGE reranker (default: LLM)
     ↓
-Response Generation (Claude)
+Sliding-window span selection with BM25 prefilter
+    ↓
+Formatted passages returned as a tool result; source links collected separately
+    ↓
+Main ChatAgent model generates the final answer
 ```
 
 #### Key Components:
 
-**Chat** (`chat.py`)
-- Main RAG chat interface
-- Combines Pinecone retrieval with generation
-- Manages conversation context and memory
-- Handles streaming responses
+**Production Search Tool** (`leanworks/agent/tools/internal/search.py`)
+- Registers as `search_documents` in the agent toolkit
+- Searches one scope at a time: `docs`, `codes`, or `tool_responses`
+- Applies explicit data-source, tool-name, and date filters supplied as tool arguments
+- Returns formatted passages to the model and exposes source metadata separately to the agent response handler; it does not generate the final answer
 
-**Vector Database** (`vectordb.py`)
-- Pinecone hybrid search client
-- Supports BM25 + semantic vector search
-- Namespace-based organization isolation
-- Efficient batch operations
+**Standalone RAG Chat** (`chat.py`)
+- Provides `Chat.get_response()` and `AsyncChat.async_get_response()`
+- Can perform retrieval, postprocessing, prompt construction, and direct model generation
+- Is separate from the `ChatAgent`/`search_documents` production path
+
+**Vector Database** (`vectordb_client.py`, `vectordb_gcp.py`)
+- Uses the `google-cloud-vectorsearch` client; GCP is the only configured backend
+- Combines dense search with GCP native text search using weighted reciprocal-rank fusion
+- Applies `org_slug` filtering for tenant isolation
+- Routes normal documents, code, and tool responses to separate collections
+- Supports 512-token chunks with 128-token overlap for local upsert helpers
 
 **Query Processing**:
-- **Query Rewriter**: Generates diverse query rewrites for better recall
-- **Filter Extractor**: Extracts search filters from natural language
+- **Query Rewriter**: Generates three diverse query rewrites by default
+- **Filter Extractor**: Utility for natural-language time extraction; the production `SearchTool` currently uses explicit filter arguments instead
 - **Data Source Formatter**: Formats retrieved documents for context
 
 **Reranking** (`reranker/`)
 - **LLM Reranker**: Uses Claude to score relevance
-- **BGE Reranker**: Fast ONNX-optimized reranker
+- **BGE Reranker**: Optional ONNX-based reranker; its `onnxruntime`, `transformers`, and `optimum` dependencies are not included in the shipped requirements
 - **Factory Pattern**: Easy switching between rerankers
 
 **Span Selection** (`span_selection/`)
-- Extracts relevant sentences/spans from documents
-- Hybrid scoring (BM25 + embeddings)
-- Context window management for optimal token usage
+- Uses overlapping sliding-window candidates by default (approximately 96 tokens, stride 48)
+- BM25-prefilters candidates before LLM or BGE scoring
+- Keeps up to four spans per document and 18 spans globally with the current `Chat` configuration
 
-**Configuration** (`settings.py` in root)
-- `RETRIEVE_TOP_K`: Initial retrieval count (20)
-- `RERANK_TOP_K`: Final reranked results (8)
+**Configuration** (`leanworks/setting.py`)
+- `RETRIEVE_TOP_K`: Standalone `Chat` retrieval default (20)
+- `RERANK_TOP_K`: Production `SearchTool` retrieval and reranking cap (8)
 - `RECENCY_WEIGHT`: Balance between relevance and recency
-- `USE_HYBRID_SPAN_SELECTION`: BM25 + semantic hybrid mode
-- Embedding rate limiting and batch optimization
+- `RERANKER_TYPE` and `SPAN_SELECTION_TYPE`: Select LLM or BGE implementations; the default `llm` path works with the shipped dependencies
+- These RAG/model values are Python constants, not environment-variable overrides
 
 ### 3. **API & Services Layer** (`app/`)
 
-Flask/Quart-based REST API with cloud infrastructure integration.
+Quart-based REST API with cloud infrastructure integration.
 
 #### API Endpoints:
 
-- **`/api/ask`** - Main chat interface (supports streaming via `stream=true` parameter)
-- **`/api/ask-stream`** - Server-Sent Events streaming responses with tool execution tracking
-- **`/search`** - Semantic search over knowledge base
-- **`/upload`** - File upload to Claude Files API + Pinecone indexing
+- **`POST /api/ask`** - Main ChatAgent interface; returns JSON or Server-Sent Events when `stream=true`
+- **`GET /api/verify`** - API-key verification
+- **`POST /api/generate-task`**, **`POST /api/doc-summary`**, and **`POST /api/messages/generate-response`** - Specialized agent endpoints
+- **`POST /api/plans/generate-resource-plan`** and **`POST /api/plans/generate-insights`** - Plan analysis endpoints
+- **`POST /api/lean-route`** - Event-driven agent routing
+- **`POST /api/cache/clear`** - Clear application caches
+- **`GET /`** - Liveness/readiness response
+- Knowledge search is an agent tool named `search_documents`; this service does not expose a direct `/search` route
+- Document upload is an agent tool named `upload_doc`, which delegates to leanworks-hub's `POST /api/docs/upload`; this service does not expose a direct `/upload` route
 - **Authentication** - API key validation middleware
 
 #### Services:
@@ -185,9 +205,10 @@ Flask/Quart-based REST API with cloud infrastructure integration.
 - Secure credential handling
 
 **Anthropic Files** (`app/services/anthropic_files.py`)
-- Claude Files API integration
+- Client wrapper for Claude Files API integration
 - File lifecycle management
 - Storage quota tracking
+- Separate from the leanworks-hub document-ingestion path
 
 **Client Management** (`app/services/client.py`)
 - Lazy initialization of expensive clients
@@ -197,14 +218,13 @@ Flask/Quart-based REST API with cloud infrastructure integration.
 **Authentication** (`app/auth/middleware.py`)
 - API key verification
 - Multi-tenant request validation
-- Rate limiting support
 
 ## Core Workflows
 
 ### Chat Workflow
 
 ```
-1. User sends message to /chat endpoint
+1. User sends a message to POST /api/ask
    ↓
 2. API initializes ChatAgent with user context
    ↓
@@ -223,89 +243,111 @@ Flask/Quart-based REST API with cloud infrastructure integration.
    ↓
 8. Claude generates final response
    ↓
-9. Response saved to Firestore conversation history
+9. Memory state is updated; the frontend remains the source of truth for persisted chat messages
    ↓
 10. Response streamed/returned to client
 ```
 
-### RAG Workflow
+### Agentic RAG Workflow
 
 ```
-1. User submits query to /search or RAG chat
+1. User submits a query to POST /api/ask
    ↓
-2. Query Rewriter generates 3-5 diverse query variations
+2. ChatAgent decides whether search_documents is needed
    ↓
-3. For each variation:
-   - Pinecone hybrid search (BM25 + embeddings)
-   - Retrieve top 20 candidates
-   - Merge and deduplicate results
+3. SearchTool generates 3 rewrites and keeps the original query
    ↓
-4. Reranker scores all candidates with relevance model
+4. Search the selected collection scope for each query:
+   - docs: leanworks-multimodal
+   - codes: leanworks-codes
+   - tool_responses: leanworks-tool-responses
+   - combine dense and native text search with weighted RRF
+   - enforce org_slug and explicit metadata filters
    ↓
-5. Top-8 documents pass to Span Selection
+5. Merge by chunk ID, deduplicate, sort, and cap at 8 candidates
    ↓
-6. Extract 3-4 relevant sentences per document with context
+6. LLM reranker scores relevance and recency when reranking is needed
    ↓
-7. Merge with conversation memory for additional context
+7. Span selection creates overlapping windows, BM25-prefilters them,
+   and retains the best passages
    ↓
-8. Format final context prompt
+8. Return formatted passages as a tool result and collect source links separately
    ↓
-9. Claude generates response with full context
+9. ChatAgent sends the tool result, conversation, and separately managed
+   memory context to the main Claude model
    ↓
-10. Response with citations returned to user
+10. Return the final answer with a separate data_sources list
 ```
 
-### File Upload & Indexing
+The standalone `Chat.get_response()` path follows the same retrieval and postprocessing primitives, but starts with `RETRIEVE_TOP_K = 20`, builds its own context prompt, and calls the generation model directly.
+
+### Document Upload and Knowledge-Base Ingestion
 
 ```
-1. User uploads file via /upload endpoint
+1. ChatAgent invokes upload_doc with a workspace file path
    ↓
-2. Validate file size/type (MAX_FILE_SIZE_MB = 500MB)
+2. DocManagementTool validates the supported extension and resolves the file path
    ↓
-3. Upload to Claude Files API
+3. POST the file as multipart/form-data to leanworks-hub /api/docs/upload
    ↓
-4. Create file metadata record in Firestore
+4. Return document ID, type, initial processing status, and creation metadata
    ↓
-5. Extract content and chunk for Vector Search
-   ↓
-6. Generate embeddings (rate-limited to 150/min)
-   ↓
-7. Store vectors in Vertex AI Vector Search with org filters
-   ↓
-8. Return file ID to user
+5. leanworks-hub continues document processing asynchronously
 ```
+
+The extraction and general knowledge-base indexing pipeline is owned by leanworks-hub and is outside this repository. This repository contains the GCP Vector Search query client and low-level upsert helpers. The in-process `RAGStorageTool` is specifically for unstructured tool responses; the current large-response path saves responses to workspace files and does not invoke that indexing helper by default.
 
 ## Configuration & Deployment
 
 ### Environment Variables
 
 ```bash
-# LLM Configuration
-GENERATION_MODEL=claude-haiku-4-5-20251001
-RERANK_MODEL=claude-3-haiku-20240307
-
 # Vector Database (Vertex AI Vector Search)
-USE_GCP_VECTOR_SEARCH=true
+GCP_PROJECT_ID=xxx
 GCP_VECTOR_SEARCH_LOCATION=us-central1
-GCP_VECTOR_SEARCH_COLLECTION_TEXT=leanworks-text
+GCP_VECTOR_SEARCH_COLLECTION_TEXT=leanworks-multimodal
+GCP_VECTOR_SEARCH_COLLECTION_CODES=leanworks-codes
+GCP_VECTOR_SEARCH_COLLECTION_TOOL_RESPONSES=leanworks-tool-responses
+GCP_VECTOR_SEARCH_BATCH_SIZE=100
+GCP_VECTOR_SEARCH_REQUEST_TIMEOUT=60
 
 # Cloud Services
-GCP_PROJECT_ID=xxx
+# Production override; local/dev always use leanworks-dev.
 FIRESTORE_DATABASE_NAME=xxx
 GOOGLE_APPLICATION_CREDENTIALS=path/to/gcp_credential.json
 # Local/dev will prefer gcp_credential_dev.json when present
 
 # API Configuration
+# Optional outbound leanworks-hub overrides.
 LEANWORKS_HUB_URL=https://hub.leanworks.ai
-# For dev: https://dev.leanworks.ai
-# For local without hub running: set LEANWORKS_HUB_URL to dev hub or run leanworks-hub locally.
 LEANWORKS_API_KEY=xxx
-
-# RAG Parameters
-RETRIEVE_TOP_K=20
-RERANK_TOP_K=8
-RECENCY_WEIGHT=0.6
 ```
+
+Without a `LEANWORKS_HUB_URL` override, `get_hub_url()` uses
+`http://localhost:3001` locally, `https://dev.leanworks.ai` in dev,
+`https://hub.leanworks.ai` in production, and
+`http://leanworks-hub-service` inside Kubernetes. `LEANWORKS_API_KEY` and
+`LEANWORKS_BEARER_TOKEN` authenticate outbound hub calls. Protected incoming
+routes such as `/api/ask` are validated separately by `app/auth/middleware.py`,
+using a Firebase Bearer token or an `X-API-Key` matched against Secret Manager.
+
+GCP Vector Search is always selected by `create_vectordb_client()`; there is no `USE_GCP_VECTOR_SEARCH` feature flag or Pinecone fallback.
+
+The following defaults are Python constants in `leanworks/setting.py`, not environment variables:
+
+```python
+GENERATION_MODEL = "claude-haiku-4-5-20251001"
+RERANK_MODEL = "claude-3-haiku-20240307"
+RETRIEVE_TOP_K = 20       # standalone Chat default
+RERANK_TOP_K = 8          # SearchTool retrieval/reranking cap
+ALPHA = 0.7               # dense-search RRF weight
+RECENCY_WEIGHT = 0.6
+EMBEDDING_REQUESTS_PER_MINUTE = 150
+EMBEDDING_MODEL = "text-embedding-004"  # Google GenAI API-key fallback only
+```
+
+With service-account credentials, `GoogleEmbedding` currently loads Vertex AI's
+`text-embedding-005` instead of the fallback constant above.
 
 ### Deployment
 
@@ -313,14 +355,14 @@ RECENCY_WEIGHT=0.6
 - Production image with all dependencies
 - Multi-stage build for optimization
 
-**Kubernetes** (`deploy/deployment.yaml`)
-- Scalable pod configuration
-- Service exposure via ingress
+**Kubernetes** (`deploy/`)
+- Pod configuration in `deployment.yaml`
+- Service routing in `service.yaml` and external routing in `consolidated_ingress.yaml`
 - Cloud storage integration
 
 **GCP Cloud Build** (`deploy/cloudbuild.yaml`)
-- Automated build and deploy pipeline
-- Testing and validation stages
+- Builds and publishes the Bash session and ask-api container images
+- Does not currently run tests or deploy Kubernetes resources
 
 ## Key Features
 
@@ -329,10 +371,10 @@ RECENCY_WEIGHT=0.6
 - **Async Architecture**: Non-blocking operations for scalability
 - **Multi-Tenant**: Namespace and organization-based data isolation
 - **Conversation Memory**: Persistent session management with Firestore
-- **File Management**: Claude Files API integration with lifecycle tracking
+- **File Management**: Hub-backed document upload plus Claude file-reference support
 - **Server-Sent Events Streaming**: Real-time tool execution and response streaming
 - **Cloud Native**: GCP-ready with Kubernetes support
-- **Rate Limiting**: Embedding and API rate limiting built-in
+- **Embedding Rate Limiting**: Client-side pacing and retry handling for embedding requests
 - **Error Resilience**: Comprehensive error handling and recovery
 
 ## Quick Start
@@ -359,16 +401,19 @@ tool_use = ToolUse(
     tools=['task_management', 'project_management', 'search']
 )
 
-# Use task management tool
-task_tool = tool_use.task_management_tool
-tasks = task_tool.query_tasks(status='completed', limit=10)
-new_task = task_tool.create_task(title='New Task', priority='high')
+# Use the unified project-management API client
+project_tool = tool_use.project_management_tool
+tasks = project_tool.execute_sql_query(
+    "SELECT id, title, status FROM tasks WHERE status = $1 LIMIT 10",
+    params=['completed'],
+)
+new_task = project_tool.create_task(title='New Task', priority='high')
 ```
 
 ### Using ChatAgent
 
 ```python
-from leanworks.agent.chat import ChatAgent
+from leanworks.agent.core.chat import ChatAgent
 
 # Initialize agent
 agent = ChatAgent(
@@ -378,18 +423,18 @@ agent = ChatAgent(
     user_id='user@example.com',
     org_slug='myorg.ai',
     session_id='conv-123',
+    clear_conversation=False,
     tools=['search', 'task_management', 'project_management']
 )
 
-# Chat with agent
-response = await agent.chat(
-    user_message="What tasks are due this week?",
-    additional_context="Today is Monday"
-)
+# Chat with the agent. Claude can call search_documents when retrieval is useful.
+response = agent.process_message("What tasks are due this week?")
 print(response)
 ```
 
-### Using RAG Chat
+### Using Standalone RAG Chat
+
+The main `/api/ask` path above uses `search_documents` as an agent tool. For a direct RAG call that performs retrieval and generation without the broader tool loop, use `Chat.get_response()`:
 
 ```python
 from leanworks.rag.chat import Chat
@@ -407,17 +452,19 @@ rag_chat = Chat(
     firestore_client=firestore_client,
     org_slug='myorg.ai',
     model_client=model_client,
-    user_id='user@example.com',
-    session_id='session-123'
 )
 
-# Query knowledge base
-context = rag_chat.retrieve_context("How do we handle user authentication?")
-response = rag_chat.generate_response(
-    user_query="How do we handle user authentication?",
-    context=context
+# Query the knowledge base and generate a direct answer
+response = rag_chat.get_response(
+    "How do we handle user authentication?",
+    top_k=20,
+    rerank_top_k=8,
 )
+print(response["content"])
+print(response["data_sources"])
 ```
+
+Omitting `user_id` and `session_id` disables the standalone class's legacy memory integration. The production `ChatAgent` manages conversation memory separately.
 
 ### Using Streaming API
 
@@ -428,12 +475,12 @@ import requests
 import json
 
 response = requests.post(
-    'http://localhost:8000/api/ask',
+    'http://localhost:8082/api/ask',
     json={
         "user_id": "user@example.com",
         "org_slug": "my-org",
         "query": "What projects do I have?",
-        "stream": true  # Enable streaming
+        "stream": True  # Enable streaming
     },
     headers={"X-API-Key": "your-api-key"},
     stream=True
@@ -443,7 +490,7 @@ response = requests.post(
 for line in response.iter_lines():
     if line and line.startswith(b'data: '):
         event = json.loads(line[6:].decode('utf-8'))
-        
+
         if event['type'] == 'tool_start':
             print(f"🔧 {event['tool_name']}: {event['description']}")
         elif event['type'] == 'tool_end':
@@ -461,86 +508,96 @@ for line in response.iter_lines():
 - `done`: Stream completion with data sources
 - `error`: Error handling with diagnostics
 
-See [STREAMING.md](STREAMING.md) for complete documentation and [STREAMING_QUICKSTART.md](STREAMING_QUICKSTART.md) for examples.
+The final `done` event contains the collected `data_sources` list.
 
 ## Requirements
 
 - Python 3.10 or higher
-- Google Cloud Platform account (Firestore, Secret Manager, Cloud Storage)
-- Pinecone account for vector database
+- Google Cloud Platform account with Firestore, Secret Manager, Cloud Storage, Vertex AI, and Vector Search access
 - Anthropic API key (Claude models)
-- PostgreSQL for shared user database (optional)
+- PostgreSQL/Cloud SQL for the API and management tools
 
 ## Testing Streaming
 
-To test the streaming API with your local setup:
+To smoke-test the streaming API with your local setup:
 
 ```bash
-# Using the helper script (fetches API key from Secret Manager)
-python3 run_streaming_test.py \
-  --secret-name api-key \
-  --org-slug your-org \
-  --user-id your@email.com \
-  --url http://localhost:8081 \
-  --query "Your question here"
-
-# Or use the test script directly
-python3 test_streaming.py \
-  --api-key your-api-key \
-  --org-slug your-org \
-  --user-id your@email.com \
-  --query "Your question here"
+curl -N http://localhost:8082/api/ask \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: your-api-key' \
+  -d '{
+    "user_id": "user@example.com",
+    "org_slug": "my-org",
+    "session_id": "smoke-test",
+    "query": "What projects do I have?",
+    "stream": true
+  }'
 ```
-
-See [TEST_RESULTS.md](TEST_RESULTS.md) for example test runs and [STREAMING_QUICKSTART.md](STREAMING_QUICKSTART.md) for client implementation examples.
 
 ## Local Development Setup
 
 ### Prerequisites
 - Python 3.10+
 - `gcp_credential_dev.json` in project root (dev environment credentials)
-- Cloud SQL Proxy installed (optional, will auto-start if available)
+- Cloud SQL Auth Proxy for database-backed API operations (startup auto-starts it when installed)
 
 ### Quick Start
 
-1. **Set up environment variables:**
+1. **Create a virtual environment and install dependencies:**
    ```bash
-   source scripts/setup-local.sh
-   # Or manually:
-   export ENVIRONMENT=local
-   export DB_HOST=127.0.0.1
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt -r requirements-dev.txt
+   python -m pip install -e . --no-deps
    ```
 
-2. **Start the application:**
+2. **Configure local services:**
+   ```bash
+   export ENVIRONMENT=local
+   export DB_HOST=127.0.0.1
+   # Optional when leanworks-hub is not running on localhost:3001:
+   export LEANWORKS_HUB_URL=https://dev.leanworks.ai
+   ```
+
+   Put the dev service-account file at `gcp_credential_dev.json`. The API also
+   expects access to Secret Manager and PostgreSQL. When Cloud SQL Proxy is
+   installed, startup attempts to launch it if port 5432 is not already open.
+
+3. **Start the application:**
    ```bash
    python run.py
    ```
 
-### Environment Variables
+The local development server listens on `http://localhost:8082`.
 
-Copy `.env.local.example` to `.env.local` and adjust as needed:
+### Tests
+
+Run the project test suite in its managed virtual environment:
 
 ```bash
-cp .env.local.example .env.local
+./scripts/run_tests.sh
+```
+
+Run only the README/source contract checks:
+
+```bash
+python -m pytest tests/test_readme_drift.py
+python scripts/check_readme_drift.py
 ```
 
 ### Troubleshooting
 
 - **Credentials not found**: Ensure `gcp_credential_dev.json` exists in project root
 - **Database connection fails**: Check Cloud SQL Proxy is running on port 5432
-- **Hub connection fails**: Adjust `LEANWORKS_HUB_URL` if running hub locally
+- **Hub connection fails**: Run leanworks-hub on port 3001 or set `LEANWORKS_HUB_URL`
 
 ## Dependencies Overview
 
 - **LLM**: `anthropic`, `google-genai`, `openai` - Multiple LLM provider support
-- **Vector DB**: `vertex-ai-vector-search` - Semantic search backend
+- **Vector DB**: `google-cloud-vectorsearch` - GCP hybrid search backend
 - **Cloud**: `google-cloud-storage`, `google-cloud-firestore`, `google-cloud-secret-manager`
 - **APIs**: `requests`, `google-api-python-client`, `msal` (Microsoft auth)
 - **Web**: `flask`, `quart`, `gunicorn`, `hypercorn` - API server
 - **Database**: `psycopg2-binary`, `duckdb` - SQL backends
 - **ML**: `tiktoken`, `numpy` - Token counting and math
 - **Testing**: `pytest`, `pytest-asyncio` - Test framework
-
-## License
-
-[Your chosen license]

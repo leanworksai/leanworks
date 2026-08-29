@@ -38,7 +38,7 @@ setup(
     author_email="yanfu@leanworks.ai",
     description="Internal LeanWorks package",
     python_requires=">=3.10",
-    url="https://github.com/LeanWorks-ai/leanworks",
+    url="https://github.com/leanworksai/leanworks",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
