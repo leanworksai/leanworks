@@ -6,12 +6,12 @@ A comprehensive AI agent framework combining intelligent task automation with Re
 
 From GitHub:
 ```bash
-pip install git+https://github.com/LeanWorks-ai/leanworks.git
+pip install git+https://github.com/leanworksai/leanworks.git
 ```
 
 For development:
 ```bash
-git clone https://github.com/LeanWorks-ai/leanworks.git
+git clone https://github.com/leanworksai/leanworks.git
 cd leanworks
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m pip install -e . --no-deps

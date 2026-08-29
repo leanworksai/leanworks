@@ -11,7 +11,7 @@
 
 ## Documentation impact
 
-See the [documentation maintenance policy](https://github.com/LeanWorks-ai/leanworks/blob/main/.github/DOCUMENTATION_MAINTENANCE.md)
+See the [documentation maintenance policy](https://github.com/leanworksai/leanworks/blob/main/.github/DOCUMENTATION_MAINTENANCE.md)
 for ownership, automated-check scope, and review expectations.
 
 Run the documentation guardrails from the repository root:
