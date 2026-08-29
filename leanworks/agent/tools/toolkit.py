@@ -908,7 +908,10 @@ class ToolUse:
             ]
             result = subprocess.run(build_cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
-                logger.warning(f"Failed to build custom image: {result.stderr}")
+                logger.warning(
+                    "Failed to build custom image (stderr_chars=%d)",
+                    len(result.stderr),
+                )
                 return "alpine:latest"
             logger.info(f"Successfully built custom image {image_name}")
             return image_name

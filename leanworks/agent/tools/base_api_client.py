@@ -59,13 +59,21 @@ class BaseAPIClient:
                             logger.info(f"Retrieved API key from Secret Manager using secret name: {secret_name}")
                             break
                     except Exception as e:
-                        logger.debug(f"Failed to get API key from Secret Manager with secret name {secret_name}: {str(e)}")
+                        logger.debug(
+                            "Failed to get API key from Secret Manager "
+                            "(error_type=%s)",
+                            type(e).__name__,
+                        )
                         continue
             except ImportError:
                 # Not in backend context, Secret Manager not available
                 logger.debug("Secret Manager not available (not in backend context)")
             except Exception as e:
-                logger.debug(f"Error attempting to get API key from Secret Manager: {str(e)}")
+                logger.debug(
+                    "Error attempting to get API key from Secret Manager "
+                    "(error_type=%s)",
+                    type(e).__name__,
+                )
         
         logger.info(f"BaseAPIClient initialized: base_url={self.base_url}, org_slug={org_slug}, has_api_key={bool(self.api_key)}, has_bearer_token={bool(self.bearer_token)}")
         
@@ -138,7 +146,10 @@ class BaseAPIClient:
             return None
             
         except requests.HTTPError as e:
-            logger.error(f"HTTP error for {method} {endpoint}: {e.response.status_code} - {e.response.text}")
+            logger.error(
+                "HTTP request failed (method=%s, status=%s)",
+                method, e.response.status_code,
+            )
             raise
         except requests.RequestException as e:
             logger.error(f"Request error for {method} {endpoint}: {str(e)}")
@@ -196,7 +207,7 @@ class BaseAPIClient:
                 return response.json()
             return None
         except requests.HTTPError as e:
-            logger.error(f"HTTP error for POST {endpoint}: {e.response.status_code} - {e.response.text}")
+            logger.error("HTTP POST failed (status=%s)", e.response.status_code)
             raise
         except requests.RequestException as e:
             logger.error(f"Request error for POST {endpoint}: {str(e)}")

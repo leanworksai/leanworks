@@ -224,9 +224,12 @@ class SearchTool:
             try:
                 rewrites = rewrites_task.result()
                 all_queries.extend(rewrites)
-                logger.info(f"Query rewrites for '{query}': {rewrites}")
+                logger.info("Generated %d query rewrites", len(rewrites))
             except Exception as e:
-                logger.error(f"Error getting query rewrites: {str(e)}")
+                logger.error(
+                    "Error getting query rewrites (error_type=%s)",
+                    type(e).__name__,
+                )
 
             # Prepare search tasks based on scope
             search_tasks = []
@@ -282,7 +285,11 @@ class SearchTool:
                 nodes = self._merge_search_results(results_by_source)
             else:
                 nodes = list(results_by_source.values())[0] if results_by_source else type('obj', (object,), {'matches': []})()
-            logger.info(f"Retrieved {len(nodes.matches) if hasattr(nodes, 'matches') else 0} nodes for query: '{query}'")
+            logger.info(
+                "Retrieved nodes (node_count=%d, query_chars=%d)",
+                len(nodes.matches) if hasattr(nodes, 'matches') else 0,
+                len(query),
+            )
             
             # Use async postprocessing with non-blocking reranking and deduplication
             context, data_sources = await self.chat.async_postprocess_nodes(
@@ -292,8 +299,11 @@ class SearchTool:
                 rerank_top_k=RERANK_TOP_K,
                 read_document_ids=self.read_document_ids
             )
-            logger.info(f"Postprocessed to {len(context)} context items for query: '{query}'")
-            logger.info(f"Retrieved data sources: {data_sources}")
+            logger.info(
+                "Postprocessed search results (context_count=%d, query_chars=%d)",
+                len(context), len(query),
+            )
+            logger.info("Retrieved data sources (count=%d)", len(data_sources))
         except Exception as e:
             logger.error(f"Error in async context retrieval: {str(e)}")
             # Return only the error message without full details
@@ -474,7 +484,7 @@ class SearchTool:
             tool_name: Optional tool name filter for tool responses
         """
         try:
-            logger.info(f"Executing search_documents with query: {query}")
+            logger.info("Executing search_documents (query_chars=%d)", len(query))
             logger.info(f"Using shared read_document_ids length: {len(self.read_document_ids)}")
             
             # Check if we're already in an event loop

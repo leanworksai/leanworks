@@ -96,5 +96,8 @@ def setup_lean_routing_endpoints():
             return jsonify({"decisions": decisions})
 
         except Exception as e:
-            logger.error(f"[Lean Route] Error: {e}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
+            logger.error(
+                "[Lean Route] Error (error_type=%s)",
+                type(e).__name__,
+            )
+            return jsonify({"error": "Routing failed"}), 500

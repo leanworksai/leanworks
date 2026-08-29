@@ -142,7 +142,7 @@ Returns:
                         }
 
             result = self._make_request('POST', '/api/tasks', json=kwargs)
-            logger.info(f"create_task successful: {result.get('id')}")
+            logger.info("create_task successful")
             return result
         except Exception as e:
             logger.error(f"create_task failed: {str(e)}")
@@ -539,10 +539,11 @@ Basic Examples:
             result = self._make_request('POST', '/api/query/execute', json=payload)
 
             if result.get('success'):
-                logger.info(f"execute_sql_query successful: {result.get('metadata', {}).get('rowCount', 0)} rows")
+                row_count = result.get('metadata', {}).get('rowCount', 0)
+                logger.info("execute_sql_query successful (row_count=%d)", row_count)
                 return result
             else:
-                logger.error(f"execute_sql_query failed: {result.get('error', {}).get('message')}")
+                logger.error("execute_sql_query failed; response content suppressed")
                 return result
 
         except Exception as e:
@@ -686,7 +687,7 @@ IMPORTANT NOTES:
                     logger.info("get_table_schema successful: retrieved list of all available tables with descriptions")
                     return result
                 else:
-                    logger.error(f"get_table_schema failed to retrieve table list: {result.get('error', {}).get('message')}")
+                    logger.error("get_table_schema failed to retrieve table list")
                     return result
 
             # If table specified, get detailed schema for the table(s)
@@ -731,7 +732,7 @@ IMPORTANT NOTES:
                 logger.info(f"get_table_schema successful for table: {table_desc}")
                 return result
             else:
-                logger.error(f"get_table_schema failed: {result.get('error', {}).get('message')}")
+                logger.error("get_table_schema failed; response content suppressed")
                 return result
 
         except Exception as e:

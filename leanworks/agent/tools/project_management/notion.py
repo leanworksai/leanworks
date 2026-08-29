@@ -55,7 +55,7 @@ class NotionTool:
                         error_msg = f"{error_data['code']}: {error_msg}"
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("Notion API request failed (status=%s)", response.status_code)
                 return {"error": error_msg}
             
             if response.content:
@@ -114,7 +114,10 @@ class NotionTool:
         Returns:
             List of page dictionaries
         """
-        logger.info(f"Executing search_pages with query: {query}, filter: {filter}")
+        logger.info(
+            "Executing Notion search_pages (query_chars=%d, has_filter=%s)",
+            len(query), bool(filter),
+        )
         try:
             payload = {
                 "page_size": min(page_size, 100)
@@ -751,4 +754,3 @@ class NotionTool:
             logger.error(f"Error updating database entry: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-

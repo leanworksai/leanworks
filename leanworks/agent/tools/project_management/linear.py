@@ -59,7 +59,7 @@ class LinearTool:
                         error_msg = error_data.get('message', error_msg)
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("Linear API request failed (status=%s)", response.status_code)
                 return {"error": error_msg}
             
             result = response.json()
@@ -67,7 +67,7 @@ class LinearTool:
             # Check for GraphQL errors in response
             if 'errors' in result:
                 error_msg = result['errors'][0].get('message', 'GraphQL error')
-                logger.error(f"GraphQL error: {error_msg}")
+                logger.error("Linear GraphQL response contained an error")
                 return {"error": error_msg}
             
             return result.get('data', {})
@@ -832,7 +832,7 @@ class LinearTool:
         Returns:
             List of issue dictionaries
         """
-        logger.info(f"Executing search_issues with query: {query}")
+        logger.info("Executing Linear search_issues (query_chars=%d)", len(query))
         try:
             # Use the issues query with filter instead of deprecated issueSearch
             # If query is empty, just list all issues
@@ -1275,7 +1275,7 @@ class LinearTool:
         Returns:
             List of user dictionaries with id, name, email, etc.
         """
-        logger.info(f"Executing search_users with query: {query}")
+        logger.info("Executing Linear search_users (query_chars=%d)", len(query))
         try:
             # Linear doesn't have a direct user search, so we'll list all users and filter
             # This is a limitation but follows the pattern of other tools
@@ -1352,4 +1352,3 @@ class LinearTool:
             logger.error(f"Error searching users: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-

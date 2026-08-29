@@ -407,6 +407,9 @@ class BigQueryTool:
             return result
 
         except Exception as e:
-            logger.error(f"Error executing BigQuery query: {str(e)}")
+            logger.error(
+                "BigQuery query failed (error_type=%s)",
+                type(e).__name__,
+            )
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}

@@ -1,8 +1,15 @@
 # Exclude sensitive files from Docker image
-gcp_credential.json
+gcp_credential*
 *.json
-.env
-.env.local
+.env*
+.specstory/
+.execution_ctx/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Exclude development files
 __pycache__/

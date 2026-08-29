@@ -74,10 +74,16 @@ class WorkdayTool:
             return self._access_token
 
         except requests.HTTPError as e:
-            logger.error(f"Workday token request failed: {e.response.status_code} - {e.response.text}")
+            logger.error(
+                "Workday token request failed (status=%s)",
+                e.response.status_code,
+            )
             raise Exception(f"Failed to get Workday access token: {e.response.status_code}")
         except Exception as e:
-            logger.error(f"Error getting Workday access token: {str(e)}")
+            logger.error(
+                "Error getting Workday access token (error_type=%s)",
+                type(e).__name__,
+            )
             raise
 
     def _ensure_valid_token(self) -> str:
@@ -144,7 +150,10 @@ class WorkdayTool:
                     error_msg = error_data.get('message', error_msg)
             except:
                 error_msg = e.response.text or error_msg
-            logger.error(f"{error_msg} - {e.response.text[:200]}")
+            logger.error(
+                "Workday API request failed (status=%s)",
+                getattr(e.response, "status_code", None),
+            )
             return {"error": error_msg}
         except Exception as e:
             logger.error(f"Error making Workday API request: {str(e)}")
@@ -336,7 +345,10 @@ class WorkdayTool:
         Returns:
             List of matching employee dictionaries
         """
-        logger.info(f"Executing search_employees with query: {query}, limit: {limit}")
+        logger.info(
+            "Executing search_employees (query_chars=%d, limit=%d)",
+            len(query), limit,
+        )
 
         endpoint = f"/ccx/service/{self.tenant_id}/Human_Resources/{self.api_version}/Workers"
 
