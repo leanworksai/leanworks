@@ -324,7 +324,11 @@ class ChatAgent:
                                         actual_message = "\n".join(lines[i+1:]).strip()
                                         break
                             
-                            logger.debug(f"Extracted actual user message from conversation history: {actual_message[:100]}...")
+                            logger.debug(
+                                "Extracted user message from conversation history "
+                                "(chars=%d)",
+                                len(actual_message),
+                            )
                             return actual_message
                     
                     # If no user message found, log warning and return original
@@ -340,7 +344,10 @@ class ChatAgent:
                     if "Write your response message now" in line or "CRITICAL INSTRUCTIONS" in line:
                         remaining = "\n".join(lines[i+1:]).strip()
                         if remaining:
-                            logger.debug(f"Extracted user message from text pattern: {remaining[:100]}...")
+                            logger.debug(
+                                "Extracted user message from text pattern (chars=%d)",
+                                len(remaining),
+                            )
                             return remaining
         
         # No conversation history detected, return as-is
@@ -371,22 +378,28 @@ class ChatAgent:
         # Extract the actual user message from embedded conversation history (if present)
         actual_user_message = self._extract_user_message_from_conversation_history(user_message)
         
-        # Log the user query with context
-        logger.debug(f"User query received - user_id: {self.user_id}, session_id: {self.session_id}, org_slug: {self.org_slug}")
-        logger.debug(f"User query: {actual_user_message}")
+        logger.debug(
+            "User query received (chars=%d, has_user_id=%s, has_session_id=%s, "
+            "has_org_slug=%s)",
+            len(actual_user_message), bool(self.user_id), bool(self.session_id),
+            bool(self.org_slug),
+        )
         
         # Log cited context if provided
         if cited_context:
-            logger.debug(f"Cited context provided: {cited_context}")
+            logger.debug(
+                "Cited context provided (type=%s)",
+                type(cited_context).__name__,
+            )
 
         # Log file references if provided
         if file_references:
-            logger.debug(f"File references: {[f.get('filename', 'unknown') for f in file_references]}")
+            logger.debug("File references provided (count=%d)", len(file_references))
 
         # Load conversation history from messages collection (source of truth for all chat types)
         # This ensures we have the latest context from the channel before processing the new message
         if self.session_id:
-            logger.debug(f"Loading conversation history from messages collection before processing message: {self.session_id}")
+            logger.debug("Loading conversation history before processing message")
             self.conversation.load_conversation_from_messages(
                 chat_id=self.session_id,
                 limit=10,
@@ -399,7 +412,10 @@ class ChatAgent:
         
         # Store the original user query for evaluation (before adding cited context)
         self.original_user_query = actual_user_message
-        logger.debug(f"Stored original user query for evaluation: {self.original_user_query[:200]}...")
+        logger.debug(
+            "Stored original user query for evaluation (chars=%d)",
+            len(self.original_user_query),
+        )
 
         # Log current state of document deduplication
         logger.debug(f"Processing message with {len(self.read_document_ids)} documents already read for deduplication")
@@ -542,8 +558,10 @@ class ChatAgent:
         user_message = actual_user_message
         if cited_context_str:
             user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
-            # Log the final message with cited context
-            logger.debug(f"Final user message with cited context: {user_message}")
+            logger.debug(
+                "Prepared user message with cited context (chars=%d)",
+                len(user_message),
+            )
         
         # Build multimodal message content
         content_blocks = [{"type": "text", "text": user_message}]
@@ -756,12 +774,10 @@ class ChatAgent:
                     for block in response.content:
                         if hasattr(block, 'type') and block.type == "tool_use":
                             tool_name = getattr(block, 'name', 'unknown_tool')
-                            tool_input = getattr(block, 'input', {})
-                            tool_calls.append(f"{tool_name}({tool_input})")
+                            tool_calls.append(tool_name)
                         elif isinstance(block, dict) and block.get('type') == "tool_use":
                             tool_name = block.get('name', 'unknown_tool')
-                            tool_input = block.get('input', {})
-                            tool_calls.append(f"{tool_name}({tool_input})")
+                            tool_calls.append(tool_name)
 
                     if tool_calls:
                         logger.info(f"Tool calls: {', '.join(tool_calls)}")
@@ -1051,18 +1067,15 @@ class ChatAgent:
                 unique_sources.append(source)
                 seen.add(source)
 
-        # Note: Messages are saved to messages collection by the frontend (source of truth)
-        # Only log full response if not streaming (to avoid duplicate output)
-        if not streaming:
-            logger.info(f"Final answer: {response_text}")
-        else:
-            logger.info(f"Final answer: {len(response_text)} characters")
-        logger.debug(f"Data sources used: {unique_sources}")
+        # Messages are saved to the frontend collection. Log only response
+        # shape because model output and source URLs can contain sensitive data.
+        logger.info("Final answer generated (chars=%d)", len(response_text))
+        logger.debug("Data sources used (count=%d)", len(unique_sources))
         logger.debug(f"Session now has {len(self.read_document_ids)} total documents read (deduplicated)")
         
         # Show final summary if streaming is enabled
         if streaming and unique_sources:
-            logger.info(f"Data sources used: {', '.join(unique_sources)}")
+            logger.info("Streaming data sources used (count=%d)", len(unique_sources))
         
         # Log memory stats if using memory manager
         if self.memory_manager:
@@ -1102,11 +1115,15 @@ class ChatAgent:
             # Extract the actual user message from embedded conversation history (if present)
             actual_user_message = self._extract_user_message_from_conversation_history(user_message)
             
-            logger.debug(f"Streaming: User query received - user_id: {self.user_id}, session_id: {self.session_id}")
+            logger.debug(
+                "Streaming user query received (chars=%d, has_user_id=%s, "
+                "has_session_id=%s)",
+                len(actual_user_message), bool(self.user_id), bool(self.session_id),
+            )
             
             # Load conversation history from messages collection
             if self.session_id:
-                logger.debug(f"Streaming: Loading conversation history before processing message: {self.session_id}")
+                logger.debug("Streaming: loading conversation history before processing message")
                 self.conversation.load_conversation_from_messages(
                     chat_id=self.session_id,
                     limit=10,
@@ -1259,8 +1276,10 @@ class ChatAgent:
             user_message = actual_user_message
             if cited_context_str:
                 user_message = f"<cited_context>{cited_context_str}</cited_context>\n{user_message}"
-                # Log the final message with cited context
-                logger.debug(f"Streaming: Final user message with cited context: {user_message}")
+                logger.debug(
+                    "Streaming user message includes cited context (chars=%d)",
+                    len(user_message),
+                )
             
             content_blocks.append({
                 "type": "text",
@@ -1647,8 +1666,11 @@ class ChatAgent:
                         break
                 
                 except Exception as e:
-                    logger.error(f"Streaming: Error in main loop: {str(e)}", exc_info=True)
-                    yield {"type": "error", "error": str(e)}
+                    logger.error(
+                        "Streaming main loop failed (error_type=%s)",
+                        type(e).__name__,
+                    )
+                    yield {"type": "error", "error": "Response generation failed"}
                     break
             
             # Yield done event with data sources
@@ -1660,8 +1682,11 @@ class ChatAgent:
             logger.info(f"Streaming: Completed with {len(self.data_sources)} data sources")
         
         except Exception as e:
-            logger.error(f"Streaming: Error in process_message_stream: {str(e)}", exc_info=True)
-            yield {"type": "error", "error": str(e)}
+            logger.error(
+                "Streaming response failed (error_type=%s)",
+                type(e).__name__,
+            )
+            yield {"type": "error", "error": "Response generation failed"}
     
     def cleanup(self):
         """Clean up resources and shutdown background threads."""
@@ -2285,7 +2310,10 @@ If there's not enough information to make meaningful updates, return the current
                 logger.warning("Missing original user query or response text for evaluation")
                 return {"score": 5, "explanation": "Evaluation skipped due to missing inputs"}
             
-            logger.debug(f"Using stored original user query for evaluation: {self.original_user_query}")
+            logger.debug(
+                "Using stored original user query for evaluation (chars=%d)",
+                len(self.original_user_query),
+            )
             
             # Create separate evaluation conversation (does not pollute main conversation)
             eval_messages = []

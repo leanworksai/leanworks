@@ -63,7 +63,10 @@ class DockerBashBackend(BashSessionBackend):
             result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=10)
             
             if result.returncode != 0:
-                logger.error(f"Failed to create Docker container: {result.stderr}")
+                logger.error(
+                    "Failed to create Docker container (stderr_chars=%d)",
+                    len(result.stderr),
+                )
                 raise Exception(f"Docker create failed: {result.stderr}")
             
             container_id = result.stdout.strip()
@@ -143,13 +146,14 @@ class DockerBashBackend(BashSessionBackend):
                 timeout=timeout
             )
             
-            if result.returncode != 0:
-                logger.info(f"Bash command failed: return_code={result.returncode}")
+            return_code = result.returncode
+            if return_code != 0:
+                logger.info("Bash command failed (return_code=%d)", return_code)
             
             return {
                 "output": result.stdout,
                 "error": result.stderr,
-                "return_code": result.returncode
+                "return_code": return_code
             }
         
         except subprocess.TimeoutExpired:

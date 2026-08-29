@@ -121,7 +121,7 @@ class AnthropicFilesService:
                 "created_at": result.created_at.isoformat() if hasattr(result.created_at, 'isoformat') else str(result.created_at)
             }
             
-            logger.info(f"Successfully uploaded file to Claude Files API: {filename} -> {result.id}")
+            logger.info("Successfully uploaded file to Claude Files API")
             return file_info
             
         except APIError as e:

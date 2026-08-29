@@ -35,7 +35,10 @@ class QueryRewriter:
         Returns:
             List of rewritten queries
         """
-        logger.info(f"Generating {num_rewrites} rewrites for query: '{query}'")
+        logger.info(
+            "Generating %d query rewrites (query_chars=%d)",
+            num_rewrites, len(query),
+        )
 
         system_prompt = QUERY_REWRITE_MODEL_SYSTEM_PROMPT + "\n\nReturn your response as a JSON object with a 'rewrites' key containing an array of rewritten queries."
         user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
@@ -84,7 +87,7 @@ class QueryRewriter:
                 )
                 result = response.choices[0].message.content
 
-            logger.debug(f"MQR response: {result}")
+            logger.debug("MQR response received (chars=%d)", len(str(result)))
 
             # Parse JSON response
             try:
@@ -102,7 +105,10 @@ class QueryRewriter:
                 return [query]
 
         except Exception as e:
-            logger.error(f"Error generating query rewrites: {str(e)}")
+            logger.error(
+                "Error generating query rewrites (error_type=%s)",
+                type(e).__name__,
+            )
             # Return original query if rewriting fails
             return [query]
             
@@ -118,7 +124,10 @@ class QueryRewriter:
         Returns:
             List of rewritten queries
         """
-        logger.info(f"Asynchronously generating {num_rewrites} rewrites for query: '{query}'")
+        logger.info(
+            "Asynchronously generating %d query rewrites (query_chars=%d)",
+            num_rewrites, len(query),
+        )
 
         system_prompt = QUERY_REWRITE_MODEL_SYSTEM_PROMPT + "\n\nReturn your response as a JSON object with a 'rewrites' key containing an array of rewritten queries."
         user_prompt = f"Original Query: {query}\nNumber of rewrites: {num_rewrites}"
@@ -174,7 +183,7 @@ class QueryRewriter:
                 )
                 result = response.choices[0].message.content
 
-            logger.debug(f"MQR response: {result}")
+            logger.debug("MQR response received (chars=%d)", len(str(result)))
 
             # Parse JSON response with same logic as sync version
             try:
@@ -192,7 +201,10 @@ class QueryRewriter:
                 return [query]
 
         except Exception as e:
-            logger.error(f"Error generating query rewrites: {str(e)}")
+            logger.error(
+                "Error generating query rewrites (error_type=%s)",
+                type(e).__name__,
+            )
             # Return original query if rewriting fails
             return [query]
         

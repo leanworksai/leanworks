@@ -127,8 +127,8 @@ def _ensure_cloud_sql_proxy_running() -> bool:
             f"--credentials-file={credentials_file}"
         ]
         
-        logger.info(f"   Command: {' '.join(cmd)}")
-        logger.info(f"   Connection: {connection_name}")
+        logger.info("Starting Cloud SQL proxy")
+        logger.info("   Connection configured: %s", bool(connection_name))
         logger.info(f"   Port: {db_port}")
         
         _cloud_sql_proxy_process = subprocess.Popen(
@@ -157,7 +157,7 @@ def _ensure_cloud_sql_proxy_running() -> bool:
                 stdout, stderr = _cloud_sql_proxy_process.communicate()
                 logger.error(f"❌ Cloud SQL proxy process exited with code {_cloud_sql_proxy_process.returncode}")
                 if stderr:
-                    logger.error(f"   Error output: {stderr.decode('utf-8', errors='ignore')}")
+                    logger.error("   Proxy error output suppressed (bytes=%d)", len(stderr))
                 _cloud_sql_proxy_process = None
                 return False
             
@@ -252,7 +252,11 @@ def get_postgres_password() -> str:
         logger.info("✅ PostgreSQL password fetched from Secret Manager")
         return _cached_password
     except Exception as e:
-        logger.error(f"❌ Failed to fetch password from Secret Manager: {str(e)}")
+        logger.error(
+            "Failed to fetch database password from Secret Manager "
+            "(error_type=%s)",
+            type(e).__name__,
+        )
         return os.environ.get("DB_PASSWORD", "")
 
 
@@ -497,14 +501,18 @@ def query_org(org_slug: str, query: str, params: Optional[tuple] = None) -> list
                         pass
                     conn = None
                 continue
-            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
-            logger.error(f"Query: {query}")
-            logger.error(f"Params: {params}")
+            logger.error(
+                "Org database query failed (org_present=%s, query_chars=%d, "
+                "param_count=%d, error_type=%s)",
+                bool(org_slug), len(query), len(params) if params else 0, type(e).__name__,
+            )
             raise
         except Exception as e:
-            logger.error(f"Org database query error for slug {org_slug}: {str(e)}")
-            logger.error(f"Query: {query}")
-            logger.error(f"Params: {params}")
+            logger.error(
+                "Org database query failed (org_present=%s, query_chars=%d, "
+                "param_count=%d, error_type=%s)",
+                bool(org_slug), len(query), len(params) if params else 0, type(e).__name__,
+            )
             raise
         finally:
             if conn and org_pool:
@@ -576,9 +584,11 @@ def execute_org(org_slug: str, query: str, params: Optional[tuple] = None) -> No
     except Exception as e:
         if conn:
             conn.rollback()  # Rollback on error
-        logger.error(f"Org database execute error for slug {org_slug}: {str(e)}")
-        logger.error(f"Query: {query}")
-        logger.error(f"Params: {params}")
+        logger.error(
+            "Org database execute failed (org_present=%s, query_chars=%d, "
+            "param_count=%d, error_type=%s)",
+            bool(org_slug), len(query), len(params) if params else 0, type(e).__name__,
+        )
         raise
     finally:
         if conn and org_pool:
@@ -710,9 +720,11 @@ def query_shared_one(query: str, params: Optional[tuple] = None) -> Optional[Dic
         cursor.close()
         return dict(results[0]) if results else None
     except Exception as e:
-        logger.error(f"Shared database query error: {str(e)}")
-        logger.error(f"Query: {query}")
-        logger.error(f"Params: {params}")
+        logger.error(
+            "Shared database query failed (query_chars=%d, param_count=%d, "
+            "error_type=%s)",
+            len(query), len(params) if params else 0, type(e).__name__,
+        )
         raise
     finally:
         if conn and shared_pool:

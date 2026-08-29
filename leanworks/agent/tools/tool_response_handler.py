@@ -291,11 +291,11 @@ class ClientToolResponseHandler(ToolResponseHandler):
                 for content_block in tool_result["content"]:
                     if content_block.get("type") == "tool_result":
                         result_content = content_block.get("content", "")
-                        if result_content and not result_content.startswith("Error"):
-                            result_preview = result_content[:200] + "..." if len(result_content) > 200 else result_content
-                            logger.info(f"Tool result: {result_preview}")
-                        elif result_content.startswith("Error"):
-                            logger.warning(f"Tool error: {result_content}")
+                        if result_content:
+                            logger.info(
+                                "Tool result received (is_error=%s, chars=%d)",
+                                bool(result_content.startswith("Error")), len(result_content),
+                            )
     
     def _show_tool_usage(self, response):
         """Display tool usage information"""
@@ -305,13 +305,7 @@ class ClientToolResponseHandler(ToolResponseHandler):
                 tool_input = getattr(block, 'input', {})
                 logger.info(f"Using tool: {tool_name}")
                 if tool_input:
-                    key_params = []
-                    for key, value in tool_input.items():
-                        if isinstance(value, str) and len(value) > 100:
-                            key_params.append(f"{key}: {value[:50]}...")
-                        else:
-                            key_params.append(f"{key}: {value}")
-                    logger.debug(f"Tool parameters: {', '.join(key_params)}")
+                    logger.debug("Tool parameters provided (count=%d)", len(tool_input))
 
 class TextOnlyResponseHandler(ToolResponseHandler):
     """Handles text-only responses (no tool calls)"""
@@ -384,4 +378,3 @@ class ToolResponseHandlerFactory:
                 logger.debug(f"Selected handler: {handler.__class__.__name__}")
                 return handler
         raise ValueError("No handler found for response")
-

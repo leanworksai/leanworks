@@ -1,7 +1,20 @@
+# Credentials and generated context
 gcp_credential*
+.env
+.env.*
+!.env.example
+!.env.*.example
+.specstory/
+.execution_ctx/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
 .venv
 test.ipynb
-.env
 leanworks.egg-info/
 .pytest_cache/
 
@@ -55,7 +68,6 @@ coverage.xml
 .python-version
 
 # Environments
-.env
 .venv
 env/
 venv/

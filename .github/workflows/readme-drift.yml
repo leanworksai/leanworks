@@ -1,0 +1,36 @@
+name: README drift
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readme-drift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-readme:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: python -m pip install "pytest>=7.0,<10.0" "pytest-asyncio>=0.23.0,<2.0"
+
+      - name: Test README drift checker
+        run: python -m pytest tests/test_readme_drift.py
+
+      - name: Check README against source
+        run: python scripts/check_readme_drift.py

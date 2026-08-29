@@ -408,7 +408,7 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
         Returns:
             Dictionary with 'content' (the answer) and 'data_sources' (list of unique links)
         """
-        logger.info(f"Generating response for query: '{query}' using model: {model}")
+        logger.info("Generating response (query_chars=%d, model=%s)", len(query), model)
 
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -510,10 +510,15 @@ class Chat(FilterExtractor, MemoryManager, QueryRewriter):
                 )
                 answer = response.choices[0].message.content
             
-            # Log a preview of the model's response
-            logger.info(f"Model {model} response: {answer}")
+            logger.info(
+                "Model response generated (model=%s, chars=%d)",
+                model, len(answer),
+            )
         except Exception as e:
-            logger.error(f"Error generating model {model} response: {str(e)}")
+            logger.error(
+                "Error generating model response (model=%s, error_type=%s)",
+                model, type(e).__name__,
+            )
             answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled
@@ -720,7 +725,10 @@ class AsyncChat(Chat):
         Returns:
             Dictionary with 'content' (the answer) and 'data_sources' (list of unique links)
         """
-        logger.info(f"Asynchronously generating response for query: '{query}' using model: {model}")
+        logger.info(
+            "Asynchronously generating response (query_chars=%d, model=%s)",
+            len(query), model,
+        )
 
         # Get today's date in ISO UTC format
         today_date = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -766,15 +774,20 @@ class AsyncChat(Chat):
             try:
                 rewrites = rewrites_task.result()
                 all_queries.extend(rewrites)
-                logger.info(f"Generated {len(rewrites)} query rewrites: {rewrites}")
+                logger.info("Generated %d query rewrites", len(rewrites))
             except Exception as e:
-                logger.error(f"Error getting query rewrites: {str(e)}")
+                logger.error(
+                    "Error getting query rewrites (error_type=%s)",
+                    type(e).__name__,
+                )
                 
         # Note: Time filters disabled as timestamp fields are no longer used in context structure
         filters = None
                 
-        # Log to make it clear what queries are being used
-        logger.info(f"Using queries for retrieval: {all_queries} with filters: {filters}")
+        logger.info(
+            "Using queries for retrieval (query_count=%d, filters_present=%s)",
+            len(all_queries), bool(filters),
+        )
         
         # Retrieve nodes (blocking operation, run in executor)
         loop = asyncio.get_event_loop()
@@ -882,13 +895,18 @@ class AsyncChat(Chat):
                 response = await asyncio.wait_for(response_future, timeout=90)
                 answer = response.choices[0].message.content
             
-            # Log a preview of the model's response
-            logger.info(f"Model {model} response: {answer}")
+            logger.info(
+                "Model response generated (model=%s, chars=%d)",
+                model, len(answer),
+            )
         except asyncio.TimeoutError:
             logger.error(f"Model {model} response generation timed out after 90 seconds")
             answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         except Exception as e:
-            logger.error(f"Error generating model {model} response: {str(e)}")
+            logger.error(
+                "Error generating model response (model=%s, error_type=%s)",
+                model, type(e).__name__,
+            )
             answer = "I apologize, but I'm currently experiencing technical difficulties and couldn't generate a response. Please try again later."
         
         # Store in memory if enabled

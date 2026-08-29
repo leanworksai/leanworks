@@ -419,7 +419,10 @@ class MemoryManager:
                     logger.info("No existing user profile found, starting fresh")
                     
         except Exception as e:
-            logger.error(f"Error loading memory state: {str(e)}", exc_info=True)
+            logger.error(
+                "Error loading memory state (error_type=%s)",
+                type(e).__name__,
+            )
             # Start with empty state on error, but preserve any already loaded data
             if not hasattr(self, 'running_summary') or self.running_summary == "":
                 self.running_summary = ""
@@ -471,7 +474,10 @@ class MemoryManager:
                 logger.info(f"Saved session memory state: {len(self.conversation_turns)} turns, summary length: {len(self.running_summary)}")
                 
         except Exception as e:
-            logger.error(f"Error saving memory state: {str(e)}", exc_info=True)
+            logger.error(
+                "Error saving memory state (error_type=%s)",
+                type(e).__name__,
+            )
     
     def add_turn(self, user_message: Dict[str, Any], assistant_message: Dict[str, Any] = None):
         """

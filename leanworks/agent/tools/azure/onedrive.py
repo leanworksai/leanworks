@@ -58,7 +58,10 @@ class OneDriveTool:
                 logger.info("OneDrive authentication successful")
                 return True
             else:
-                logger.error(f"Failed to acquire token: {result.get('error_description', 'Unknown error')}")
+                logger.error(
+                    "Failed to acquire OneDrive token (error_present=%s)",
+                    bool(result.get('error')),
+                )
                 return False
 
         except Exception as e:
@@ -240,7 +243,10 @@ class OneDriveTool:
         Returns:
             List of file/folder dictionaries, or error dictionary
         """
-        logger.info(f"Searching files with query: '{query}', max_results: {max_results}")
+        logger.info(
+            "Searching OneDrive files (query_chars=%d, max_results=%d)",
+            len(query), max_results,
+        )
 
         try:
             if not self.access_token and not self._authenticate():

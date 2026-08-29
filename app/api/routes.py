@@ -24,6 +24,7 @@ from app.services.client import (
 )
 from app.services.database import query_org_one, get_domain_from_email
 from app.utils.cache import clear_cache
+from app.utils.safe_logging import build_request_log_metadata, build_response_log_metadata
 from app.api.plans_ai import setup_plans_ai_endpoints
 from app.api.lean_routing import setup_lean_routing_endpoints
 from leanworks.setting import MAX_IMAGES_PER_REQUEST, MAX_IMAGE_SIZE_MB, VISION_SUPPORTED_IMAGE_TYPES
@@ -154,8 +155,11 @@ async def stream_ask_response(user_id, org_slug, session_id, query, cited_contex
             yield f"data: {json.dumps(event)}\n\n"
         
     except Exception as e:
-        logger.error(f"Error in stream_ask_response: {str(e)}", exc_info=True)
-        error_event = {"type": "error", "error": str(e)}
+        logger.error(
+            "Error in stream_ask_response (error_type=%s)",
+            type(e).__name__,
+        )
+        error_event = {"type": "error", "error": "Unable to stream response"}
         yield f"data: {json.dumps(error_event)}\n\n"
 
 
@@ -229,15 +233,20 @@ def get_project_details_from_postgres(user_email: str, project_id: str):
     return None
 
 
-async def async_log_interaction(storage_client, payload, response, client_domain: str):
+async def async_log_interaction(
+    storage_client,
+    request_metadata,
+    response_metadata,
+    client_domain: str,
+):
     """
     Asynchronously log user interactions with the API to Google Cloud Storage.
     Logs are partitioned by date with all logs from the same date appended to the same file.
     
     Args:
         storage_client: Initialized CloudStorage client
-        payload (dict): The complete request payload
-        response (dict): The RAG response object
+        request_metadata (dict): Content-free request metadata
+        response_metadata (dict): Content-free response metadata
         client_domain (str): The client domain for organizing logs
     """
     try:
@@ -246,8 +255,8 @@ async def async_log_interaction(storage_client, payload, response, client_domain
         
         # Create log entry
         log_entry = {
-            "payload": payload,
-            "response": response,
+            "request_metadata": request_metadata,
+            "response_metadata": response_metadata,
             "timestamp": timestamp.isoformat()
         }
         
@@ -278,7 +287,7 @@ async def async_log_interaction(storage_client, payload, response, client_domain
                 json.dumps(existing_logs, indent=2),
                 log_filename
             )
-            logger.info(f"Successfully logged interaction to {log_filename}")
+            logger.info("Successfully logged content-free interaction metadata")
         except Exception as e:
             logger.error(f"Failed to upload logs to GCS: {str(e)}")
     except Exception as e:
@@ -331,7 +340,7 @@ async def ask():
         if images:
             is_valid, error_msg, vision_images = validate_vision_images(images)
             if not is_valid:
-                logger.warning(f"Image validation failed: {error_msg}")
+                logger.warning("Image validation failed; details returned to requester only")
                 return {"error": error_msg, "code": "INVALID_IMAGES"}, 400
             logger.info(f"Validated {len(vision_images)} images for vision request")
         else:
@@ -348,20 +357,22 @@ async def ask():
         else:
             tools = None
         
-        # Log API payload
-        payload = {
-            "user_id": user_id,
-            "org_slug": org_slug,
-            "session_id": session_id,
-            "query": query,
-            "cited_context": cited_context,
-            "tools": tools
-        }
-        if vision_images:
-            payload["images"] = [{"type": img.get("type"), "media_type": img.get("media_type")} if img.get("type") == "base64" else {"type": img.get("type"), "url": img.get("url")} for img in vision_images]
-        logger.info(f"Ask API payload: {json.dumps(payload, default=str)}")
-            
-        logger.info(f"Request from user_id: {user_id}, org_slug: {org_slug}, session_id: {session_id}")
+        # Log request shape only. Request contents may contain credentials or
+        # private customer data and must never be written to application logs.
+        request_log_metadata = build_request_log_metadata(
+            user_id=user_id,
+            org_slug=org_slug,
+            session_id=session_id,
+            query=query,
+            cited_context=cited_context,
+            tools=tools,
+            images=vision_images,
+        )
+        logger.info(
+            "Ask API request metadata: %s",
+            json.dumps(request_log_metadata, sort_keys=True),
+        )
+
         if vision_images:
             logger.info(f"Processing {len(vision_images)} images for vision analysis")
         
@@ -416,14 +427,16 @@ async def ask():
         if filtered_tools is None:
             logger.info("Ask API - Tools being used: Internal tools only (no org integrations connected)")
         else:
-            logger.info(f"Ask API - Tools being used: Internal tools + org integrations: {json.dumps(filtered_tools, default=str)}")
-        print(f"Filtered tools: {filtered_tools}")
+            logger.info(
+                "Ask API - Internal tools plus org integrations (count=%d)",
+                len(filtered_tools),
+            )
         
         # Web app now sends HTML positions directly - no conversion needed
         
         # Check if streaming is requested
         if stream_enabled:
-            logger.info(f"Streaming mode enabled for request from user_id: {user_id}")
+            logger.info("Streaming mode enabled for request")
             # Return SSE streaming response
             return Response(
                 stream_ask_response(user_id, org_slug, session_id, query, cited_context, vision_images,
@@ -449,7 +462,7 @@ async def ask():
         )
         
         # Generate response
-        logger.info(f"Processing query: {query[:100]}{'...' if len(query) > 100 else ''}")
+        logger.info("Processing query (chars=%d)", len(query))
         
         # Performance optimization: Process message with timing
         processing_start_time = time.time()
@@ -471,19 +484,14 @@ async def ask():
             if client_name:
                 loop = asyncio.get_event_loop()
                 storage_client = await loop.run_in_executor(None, get_cached_storage_client, client_name)
-                # Prepare payload for logging
-                payload = {
-                    "user_id": user_id,
-                    "org_slug": org_slug,
-                    "session_id": session_id,
-                    "query": query,
-                    "cited_context": cited_context,
-                    "tools": tools
-                }
+                response_log_metadata = build_response_log_metadata(
+                    response,
+                    vision_images,
+                )
                 asyncio.create_task(async_log_interaction(
                     storage_client=storage_client,
-                    payload=payload,
-                    response=response,
+                    request_metadata=request_log_metadata,
+                    response_metadata=response_log_metadata,
                     client_domain=client_name
                 ))
         except Exception as e:
@@ -492,20 +500,20 @@ async def ask():
         total_time = time.time() - request_start_time
         logger.info(f"Total request processing time: {total_time:.3f}s")
         
-        # Log final response with image info
-        response_log = {
-            "content": response.get("content", "")[:500] + "..." if len(response.get("content", "")) > 500 else response.get("content", "")
-        }
-        if vision_images:
-            response_log["images_count"] = len(vision_images)
-            response_log["images_types"] = [img.get("type") for img in vision_images]
-        logger.info(f"Ask API final response: {json.dumps(response_log, default=str)}")
+        response_log_metadata = build_response_log_metadata(response, vision_images)
+        logger.info(
+            "Ask API response metadata: %s",
+            json.dumps(response_log_metadata, sort_keys=True),
+        )
         
         logger.info("Successfully generated and returned response")
         return response
     except Exception as e:
-        error_msg = f"Error processing request: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        error_msg = "Error processing request"
+        logger.error(
+            "Error processing request (error_type=%s)",
+            type(e).__name__,
+        )
         return {"error": error_msg}, 500
 
 
@@ -680,7 +688,7 @@ Return ONLY valid JSON."""
                     task_data = json.loads(response_content)
         except json.JSONDecodeError as e:
             logger.warning(f"Could not parse JSON from response: {str(e)}")
-            logger.warning(f"Response content: {response_content[:500]}")
+            logger.warning("Unparseable response content (chars=%d)", len(response_content))
             # Fallback: create basic task structure from response
             task_data = {
                 "title": task_name,
@@ -789,8 +797,11 @@ Return ONLY valid JSON."""
         return {"task": task}, 200
         
     except Exception as e:
-        error_msg = f"Error generating task: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        error_msg = "Error generating task"
+        logger.error(
+            "Error generating task (error_type=%s)",
+            type(e).__name__,
+        )
         return {"error": error_msg}, 500
 
 
@@ -1264,8 +1275,11 @@ Generate a concise but comprehensive summary:"""
         }, 200
         
     except Exception as e:
-        error_msg = f"Error generating doc summary: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        error_msg = "Error generating doc summary"
+        logger.error(
+            "Error generating doc summary (error_type=%s)",
+            type(e).__name__,
+        )
         return {"error": error_msg}, 500
 
 
@@ -1369,12 +1383,10 @@ async def generate_message_response():
         # Extract cited_context from request if provided
         cited_context = data.get("cited_context") if "cited_context" in data else None
         if cited_context:
-            # Log cited_context appropriately (handle both string and dict formats)
-            if isinstance(cited_context, dict):
-                logger.info(f"Cited context received in request (structured): {json.dumps(cited_context, default=str)[:200]}{'...' if len(json.dumps(cited_context, default=str)) > 200 else ''}")
-            else:
-                cited_str = str(cited_context)
-                logger.info(f"Cited context received in request: {cited_str[:200]}{'...' if len(cited_str) > 200 else ''}")
+            logger.info(
+                "Cited context received; contents redacted from logs (type=%s)",
+                type(cited_context).__name__,
+            )
         
         # Web app now sends HTML positions directly - no conversion needed
         
@@ -1411,8 +1423,11 @@ async def generate_message_response():
         }, 200
         
     except Exception as e:
-        error_msg = f"Error generating message response: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        error_msg = "Error generating message response"
+        logger.error(
+            "Error generating message response (error_type=%s)",
+            type(e).__name__,
+        )
         return {"error": error_msg}, 500
 
 
@@ -1435,4 +1450,3 @@ setup_plans_ai_endpoints(app)
 # ============================================================================
 
 setup_lean_routing_endpoints()
-

@@ -245,10 +245,10 @@ def parse_routing_response(text: str, candidates: list[dict]) -> list[dict]:
             try:
                 decisions = json.loads(match.group())
             except json.JSONDecodeError:
-                logger.error(f"Failed to parse routing response: {text[:500]}")
+                logger.error("Failed to parse routing response (chars=%d)", len(text))
                 return []
         else:
-            logger.error(f"No JSON array found in routing response: {text[:500]}")
+            logger.error("No JSON array found in routing response (chars=%d)", len(text))
             return []
 
     if not isinstance(decisions, list):

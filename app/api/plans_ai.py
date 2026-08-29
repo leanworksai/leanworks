@@ -112,8 +112,11 @@ async def stream_ai_response(user_id, org_slug, session_id, query, firestore_cli
             yield f"data: {json.dumps(event)}\n\n"
         
     except Exception as e:
-        logger.error(f"Error in stream_ai_response: {str(e)}", exc_info=True)
-        error_event = {"type": "error", "error": str(e)}
+        logger.error(
+            "Error in stream_ai_response (error_type=%s)",
+            type(e).__name__,
+        )
+        error_event = {"type": "error", "error": "Unable to stream response"}
         yield f"data: {json.dumps(error_event)}\n\n"
 
 
@@ -317,8 +320,11 @@ Return a JSON array with exactly 3 strategy objects. Use only valid JSON; no mar
             return {"strategies": strategies}, 200
             
         except Exception as e:
-            error_msg = f"Error generating resource plan: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            error_msg = "Error generating resource plan"
+            logger.error(
+                "Error generating resource plan (error_type=%s)",
+                type(e).__name__,
+            )
             return {"error": error_msg}, 500
 
     @app.route('/api/plans/generate-insights', methods=['POST'])
@@ -501,6 +507,9 @@ Return ONLY valid JSON."""
             return insights, 200
             
         except Exception as e:
-            error_msg = f"Error generating insights: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            error_msg = "Error generating insights"
+            logger.error(
+                "Error generating insights (error_type=%s)",
+                type(e).__name__,
+            )
             return {"error": error_msg}, 500

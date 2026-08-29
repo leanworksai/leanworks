@@ -1,0 +1,11 @@
+title = "Leanworks credential scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation-only API key placeholders"
+regexTarget = "match"
+regexes = [
+  '''(?i)X-API-Key:\s*your-api-key''',
+]
