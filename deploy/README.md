@@ -110,9 +110,14 @@ The application will:
 - Verify the credential file is mounted:
   - Prod: `kubectl exec <pod-name> -n <namespace> -- ls -la /app/gcp_credential.json`
   - Dev: `kubectl exec <pod-name> -n <namespace> -- ls -la /app/gcp_credential_dev.json`
-- Check file permissions:
-  - Prod: `kubectl exec <pod-name> -n <namespace> -- cat /app/gcp_credential.json | head -5`
-  - Dev: `kubectl exec <pod-name> -n <namespace> -- cat /app/gcp_credential_dev.json | head -5`
+- Verify the credential file is readable without displaying its contents:
+  - Prod: `kubectl exec <pod-name> -n <namespace> -- test -r /app/gcp_credential.json`
+  - Dev: `kubectl exec <pod-name> -n <namespace> -- test -r /app/gcp_credential_dev.json`
+- Inspect file metadata only when troubleshooting permissions:
+  - Prod: `kubectl exec <pod-name> -n <namespace> -- stat -c '%a %U:%G %n' /app/gcp_credential.json`
+  - Dev: `kubectl exec <pod-name> -n <namespace> -- stat -c '%a %U:%G %n' /app/gcp_credential_dev.json`
+
+Never print, decode, or copy Kubernetes Secret values into terminals, tickets, or CI logs.
 
 ## Environment Differences
 

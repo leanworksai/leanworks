@@ -214,7 +214,11 @@ class GoogleDriveTool:
         Returns:
             List of file/folder dictionaries, or error dictionary
         """
-        logger.info(f"Searching files with query: '{query}', folder: {folder_id}, max_results: {max_results}, file_type: {file_type}")
+        logger.info(
+            "Searching Drive files (query_chars=%d, has_folder_id=%s, "
+            "max_results=%d, has_file_type=%s)",
+            len(query), bool(folder_id), max_results, bool(file_type),
+        )
 
         try:
             if not self.service and not self._authenticate():

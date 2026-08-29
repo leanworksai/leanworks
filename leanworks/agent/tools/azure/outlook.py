@@ -47,7 +47,10 @@ class OutlookTool:
                 self.access_token = result["access_token"]
                 return True
             else:
-                logger.error(f"Failed to acquire token: {result.get('error_description', 'Unknown error')}")
+                logger.error(
+                    "Failed to acquire Outlook token (error_present=%s)",
+                    bool(result.get('error')),
+                )
                 return False
                 
         except Exception as e:
@@ -134,7 +137,7 @@ class OutlookTool:
             response = requests.get(graph_url, headers=headers, params=params)
             
             if response.status_code != 200:
-                logger.error(f"Graph API error: {response.status_code} - {response.text}")
+                logger.error("Graph API request failed (status=%s)", response.status_code)
                 # Return only the error message without full details
                 return {"error": f"Graph API error: {response.status_code}"}
             

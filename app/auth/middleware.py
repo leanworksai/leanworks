@@ -60,11 +60,17 @@ async def verify_bearer_token(token: str) -> Optional[Dict]:
                             }
                             return decoded_token
                 except Exception as custom_token_error:
-                    logger.debug(f"Custom token handling failed: {str(custom_token_error)}")
+                    logger.debug(
+                        "Custom token handling failed (error_type=%s)",
+                        type(custom_token_error).__name__,
+                    )
                     return None
             return None
     except Exception as e:
-        logger.debug(f"Bearer token verification failed: {str(e)}")
+        logger.debug(
+            "Bearer token verification failed (error_type=%s)",
+            type(e).__name__,
+        )
         return None
 
 
@@ -97,7 +103,10 @@ def require_api_key(func):
                     user_email = decoded_token['email'].lower()
                     logger.info(f"Bearer token authentication successful for user: {user_email}")
             except Exception as e:
-                logger.debug(f"Bearer token authentication failed: {str(e)}")
+                logger.debug(
+                    "Bearer token authentication failed (error_type=%s)",
+                    type(e).__name__,
+                )
         
         # If Bearer token auth failed, try API key authentication
         if not authenticated:
@@ -177,4 +186,3 @@ def require_api_key(func):
         
         return await func(*args, **kwargs)
     return wrapper
-

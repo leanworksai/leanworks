@@ -59,7 +59,7 @@ class AtlassianTool:
                     error_msg = error_data.get('errorMessages', [error_msg])[0]
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("Atlassian API request failed (status=%s)", response.status_code)
                 return {"error": error_msg}
             
             if response.content:
@@ -748,7 +748,7 @@ class AtlassianTool:
         Returns:
             List of user dictionaries with accountId, displayName, emailAddress, etc.
         """
-        logger.info(f"Executing search_users with query: {query}")
+        logger.info("Executing Atlassian search_users (query_chars=%d)", len(query))
         try:
             if not query:
                 return []
@@ -767,7 +767,7 @@ class AtlassianTool:
             )
             
             if is_likely_account_id:
-                logger.info(f"Query looks like accountId, trying GET /rest/api/2/user?accountId={query}")
+                logger.info("Trying exact Atlassian accountId lookup")
                 user_result = self._make_request('GET', '/user', params={'accountId': query})
                 
                 if 'error' not in user_result and user_result.get('accountId'):
@@ -783,7 +783,7 @@ class AtlassianTool:
             
             # Try username if it doesn't look like an accountId
             if not is_likely_account_id and not '@' in query:
-                logger.info(f"Trying GET /rest/api/2/user?username={query}")
+                logger.info("Trying exact Atlassian username lookup")
                 user_result = self._make_request('GET', '/user', params={'username': query})
                 
                 if 'error' not in user_result and user_result.get('accountId'):
@@ -798,7 +798,7 @@ class AtlassianTool:
                     return [formatted_user]
             
             # Use GET /rest/api/2/users to list users and filter client-side
-            logger.info(f"Using GET /rest/api/2/users to list and filter users for query: {query}")
+            logger.info("Listing Atlassian users for local query filtering")
             all_matches = []
             max_iterations = 10  # Limit to 10 iterations (up to 1000 users) for performance
             max_results_param = 100  # Maximum per page for GET /rest/api/2/users
@@ -1056,4 +1056,3 @@ class AtlassianTool:
             "alternatives": [],
             "message": f"No Jira users found matching '{given_identifier}'. Please check the spelling or try a different identifier."
         }
-

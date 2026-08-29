@@ -280,15 +280,17 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
-                        # Log tool call with parameters
-                        logger.info(f"Tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)}")
+                        logger.info(
+                            "Tool call: %s (parameter_count=%d)",
+                            tool_name, len(tool_input),
+                        )
 
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
 
-                        # Log tool call result preview
+                        # Log result shape only; tool output may contain secrets.
                         result_preview = self._get_result_preview(result)
-                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        logger.info("Tool call result for %s: %s", tool_name, result_preview)
 
                         # If tool returns an error object, surface just the error message
                         if isinstance(result, dict) and "error" in result:
@@ -351,9 +353,11 @@ class ConversationManager:
         for tr in tool_results:
             content = tr.get("content", "")
             content_str = content if isinstance(content, str) else str(content)
-            preview = self._truncate_preview(content_str, max_length=500)
             is_error = tr.get("is_error", False)
-            logger.info(f"Tool result preview (is_error={is_error}): {preview}")
+            logger.info(
+                "Tool result produced (is_error=%s, chars=%d)",
+                is_error, len(content_str),
+            )
         return tool_results
 
     def parse_and_format_tool_results_with_sources(self, response, function_map, data_sources, rag_storage=None):
@@ -394,7 +398,10 @@ class ConversationManager:
                     # Server tools are executed by Anthropic's servers automatically
                     # Results are already included in the response - we don't need to process them
                     # Just track the data source and skip adding tool_result
-                    logger.info(f"Server tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)} - results already in response from Anthropic")
+                    logger.info(
+                        "Server tool call: %s (parameter_count=%d); result is in model response",
+                        tool_name, len(tool_input),
+                    )
                     # Track data source for web_search
                     if tool_name == "web_search":
                         data_sources.append("Web search results")
@@ -405,15 +412,17 @@ class ConversationManager:
                 # Execute the tool function if it exists in our function map
                 if tool_name in function_map:
                     try:
-                        # Log client-side tool call at INFO level
-                        logger.info(f"Client tool call: {tool_name} with parameters: {json.dumps(tool_input, default=str)}")
+                        logger.info(
+                            "Client tool call: %s (parameter_count=%d)",
+                            tool_name, len(tool_input),
+                        )
 
                         # Call the function with the provided input
                         result = function_map[tool_name](**tool_input)
 
-                        # Log tool call result preview
+                        # Log result shape only; tool output may contain secrets.
                         result_preview = self._get_result_preview(result)
-                        logger.info(f"Tool call result for {tool_name}: {result_preview}")
+                        logger.info("Tool call result for %s: %s", tool_name, result_preview)
 
                         # Check if response is large and needs special handling
                         from leanworks.agent.utils.large_response_handler import LargeResponseHandler
@@ -455,7 +464,11 @@ class ConversationManager:
                                 result, tool_name, tool_input, tool_use_id, data_sources, 
                                 file_extension=file_extension, doc_ids=doc_ids
                             )
-                            logger.info(f"Large response storage completed for {tool_name}. Final result content: {formatted_result.get('content', '')[:200]}...")
+                            stored_content = formatted_result.get('content', '')
+                            logger.info(
+                                "Large response storage completed for %s (content_chars=%d)",
+                                tool_name, len(str(stored_content)),
+                            )
                             tool_results.append(formatted_result)
                             continue
                         else:
@@ -592,9 +605,11 @@ class ConversationManager:
         for tr in tool_results:
             content = tr.get("content", "")
             content_str = content if isinstance(content, str) else str(content)
-            preview = self._truncate_preview(content_str, max_length=500)
             is_error = tr.get("is_error", False)
-            logger.info(f"Tool result preview (is_error={is_error}): {preview}")
+            logger.info(
+                "Tool result produced (is_error=%s, chars=%d)",
+                is_error, len(content_str),
+            )
         return tool_results
 
     def _ensure_docker_container_initialized(self) -> bool:
@@ -639,7 +654,10 @@ class ConversationManager:
             result = self.tool_use.bash("echo 'Docker initialized'")
             
             if "Error" in result or not result:
-                logger.error(f"Failed to initialize Docker container: {result}")
+                logger.error(
+                    "Failed to initialize Docker container (result_chars=%d)",
+                    len(result) if result else 0,
+                )
                 return False
             
             logger.debug("Docker container initialized successfully")
@@ -1420,36 +1438,25 @@ Preview (first {preview_length} chars):
 
     def _get_result_preview(self, result):
         """
-        Generate a preview of the tool call result for logging purposes.
+        Generate content-free result metadata for logging purposes.
         
         Args:
             result: The result from a tool call
             
         Returns:
-            str: A preview string of the result
+            str: A summary containing only type and size
         """
         try:
             if isinstance(result, list):
-                if len(result) == 0:
-                    return "Empty list"
-                elif len(result) == 1:
-                    return f"List with 1 item: {self._truncate_preview(str(result[0]))}"
-                else:
-                    return f"List with {len(result)} items: {self._truncate_preview(str(result[0]))} ..."
+                return f"List with {len(result)} items"
             elif isinstance(result, dict):
-                if len(result) == 0:
-                    return "Empty dict"
-                else:
-                    # Get first key-value pair for preview
-                    first_key = next(iter(result))
-                    first_value = self._truncate_preview(str(result[first_key]))
-                    return f"Dict with {len(result)} keys: {first_key}={first_value} ..."
+                return f"Dict with {len(result)} keys"
             elif isinstance(result, str):
-                return self._truncate_preview(result)
+                return f"String with {len(result)} chars"
             else:
-                return self._truncate_preview(str(result))
+                return f"Result type {type(result).__name__}"
         except Exception as e:
-            return f"Error generating preview: {str(e)}"
+            return f"Result metadata unavailable ({type(e).__name__})"
     
     def _truncate_preview(self, text, max_length=200):
         """

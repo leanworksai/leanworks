@@ -2,10 +2,9 @@
 Helper utilities for the agent module.
 """
 import json
-import sys
 import time
 import logging
-from typing import Optional
+from typing import Optional, TextIO
 from leanworks.utils.env import resolve_credential_path, get_project_id
 
 logger = logging.getLogger(__name__)
@@ -50,15 +49,26 @@ class AgentHelpers:
             raise
     
     @staticmethod
-    def stream_text(text: str, delay: float = 0.02) -> None:
-        """Stream text output with a typewriter effect.
+    def stream_text(
+        text: str,
+        delay: float = 0.02,
+        stream: Optional[TextIO] = None,
+    ) -> None:
+        """Stream text to an explicitly provided output sink.
         
         Args:
             text: Text to stream
             delay: Delay between characters in seconds
+            stream: Explicit output sink. When omitted, content is suppressed so
+                model output cannot be copied into server or container logs.
         """
+        if stream is None:
+            logger.debug("Text streaming suppressed (chars=%d)", len(text))
+            return
+
         for char in text:
-            sys.stdout.write(char)
-            sys.stdout.flush()
+            stream.write(char)
+            stream.flush()
             time.sleep(delay)
-        print()  # Add newline at the end
+        stream.write("\n")
+        stream.flush()

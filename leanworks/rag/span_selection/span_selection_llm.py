@@ -117,7 +117,10 @@ class LLMSpanSelector(BaseSpanSelector):
             logger.warning("No documents provided for span selection")
             return []
         
-        logger.info(f"Selecting spans from {len(documents)} documents for query: '{query}'")
+        logger.info(
+            "Selecting spans (document_count=%d, query_chars=%d)",
+            len(documents), len(query),
+        )
         
         # If no LLM reranker available, fall back to BM25-only approach
         if not self.llm_reranker:

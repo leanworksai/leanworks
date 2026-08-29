@@ -93,13 +93,13 @@ class SessionManagerBackend(BashSessionBackend):
             response.raise_for_status()
             
             result = response.json()
-            
-            logger.debug(f"Command executed in session {session.session_id}: return_code={result.get('return_code')}")
+            return_code = result.get("return_code", 0)
+            logger.debug("Command executed in session (return_code=%d)", return_code)
             
             return {
                 "output": result.get("output", ""),
                 "error": result.get("error", ""),
-                "return_code": result.get("return_code", 0)
+                "return_code": return_code
             }
         
         except httpx.TimeoutException:

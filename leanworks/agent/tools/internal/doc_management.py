@@ -271,7 +271,7 @@ class DocManagementTool(BaseAPIClient):
             # Call API to create document
             result = self._make_request('POST', '/api/docs', json=request_body)
             
-            logger.debug(f"Document created via API: id={result.get('id')}, title={title}")
+            logger.debug("Document created via API")
             
             # Return HTML content to agent (not TipTap JSON)
             return {
@@ -3699,7 +3699,7 @@ After all {len(sections)} sections are drafted:
                 "has_selected_text": doc.get("metadata", {}).get("has_selected_text", False)
             })
 
-        logger.debug(f"Found {len(result)} cited documents: {[d['doc_id'] for d in result if d['doc_id']]}")
+        logger.debug("Found %d cited documents", len(result))
         return result
 
     def __del__(self):

@@ -89,7 +89,7 @@ class GitHubTool:
                     error_msg = error_data.get('message', error_msg)
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("GitHub API request failed (status=%s)", response.status_code)
                 raise Exception(error_msg)
             
             token_data = response.json()
@@ -151,7 +151,7 @@ class GitHubTool:
                             error_msg += f" - {errors[0].get('message', '')}"
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("GitHub API request failed (status=%s)", response.status_code)
                 return {"error": error_msg}
             
             if response.content:
@@ -384,7 +384,7 @@ class GitHubTool:
         Returns:
             List of issue dictionaries
         """
-        logger.info(f"Executing search_issues with query: {query}")
+        logger.info("Executing GitHub search_issues (query_chars=%d)", len(query))
         try:
             params = {
                 'q': query,
@@ -1551,7 +1551,7 @@ class GitHubTool:
         Returns:
             List of user dictionaries with login, id, avatar_url, etc.
         """
-        logger.info(f"Executing search_users with query: {query}")
+        logger.info("Executing GitHub search_users (query_chars=%d)", len(query))
         try:
             if not query:
                 return []
@@ -1572,7 +1572,7 @@ class GitHubTool:
             
             # First, try to get the user directly if it looks like an exact username
             if is_likely_username:
-                logger.info(f"Query looks like exact username, trying GET /users/{query}")
+                logger.info("Trying exact GitHub username lookup")
                 user_result = self._make_request('GET', f'/users/{query}')
                 
                 if 'error' not in user_result and user_result.get('login'):
@@ -1589,7 +1589,7 @@ class GitHubTool:
                 # If exact match failed, continue to list and filter
             
             # Use GET /users to list users and filter client-side
-            logger.info(f"Using GET /users to list and filter users for query: {query}")
+            logger.info("Listing GitHub users for local query filtering")
             all_matches = []
             max_iterations = 10  # Limit to 10 iterations (up to 1000 users) for performance
             per_page_param = 100  # Maximum per page for GET /users
@@ -1850,4 +1850,3 @@ class GitHubTool:
             "alternatives": [],
             "message": f"No GitHub users found matching '{given_identifier}'. Please check the spelling or try a different identifier."
         }
-

@@ -1,0 +1,21 @@
+# Files excluded from Cloud Build source uploads.
+.gcloudignore
+.git
+.git/**
+.gitignore
+
+# Keep Cloud Build exclusions aligned with local Git exclusions.
+#!include:.gitignore
+
+# Defense in depth for credentials and generated/private artifacts.
+.env*
+gcp_credential*
+.specstory/
+.execution_ctx/
+output/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore

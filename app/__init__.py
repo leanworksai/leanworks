@@ -15,12 +15,15 @@ from leanworks.utils.env import get_firestore_database_name, resolve_credential_
 # Write to stdout instead of stderr so GKE doesn't treat all logs as errors
 # GKE/Cloud Logging interprets stderr as errors regardless of log level
 import sys
+from app.utils.safe_logging import install_sensitive_data_filter
+
 # Configure logging to write to stdout only (for GKE compatibility)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     stream=sys.stdout
 )
+install_sensitive_data_filter()
 logger = logging.getLogger(__name__)
 
 # Configure logging based on environment

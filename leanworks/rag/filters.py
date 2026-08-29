@@ -119,7 +119,10 @@ class FilterExtractor:
                     "end_timestamp": end_timestamp
                 }
         except Exception as e:
-            print(f"Error extracting time filters: {e}")
+            logger.warning(
+                "Error extracting time filters (error_type=%s)",
+                type(e).__name__,
+            )
             # Return 0 for start_timestamp and current_timestamp for end_timestamp if parsing fails
             time_filters = {
                 "start_timestamp": 0,
@@ -150,7 +153,7 @@ class FilterExtractor:
         Returns:
             Dictionary with time filters
         """
-        logger.info(f"Asynchronously extracting time filters from query: '{query}'")
+        logger.info("Asynchronously extracting time filters (query_chars=%d)", len(query))
         loop = asyncio.get_event_loop()
         
         try:
@@ -159,7 +162,7 @@ class FilterExtractor:
                 None, 
                 lambda: self.extract_time_filters(query, self.model_client)
             )
-            logger.info(f"Extracted time filters: {filters}")
+            logger.info("Extracted time filters (count=%d)", len(filters))
             return filters
         except Exception as e:
             logger.error(f"Error extracting time filters: {str(e)}")

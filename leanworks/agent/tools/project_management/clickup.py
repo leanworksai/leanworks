@@ -54,7 +54,7 @@ class ClickUpTool:
                         error_msg = error_msg.get('message', str(error_msg))
                 except:
                     error_msg = response.text or error_msg
-                logger.error(f"{error_msg} - {response.text[:200]}")
+                logger.error("ClickUp API request failed (status=%s)", response.status_code)
                 return {"error": error_msg}
             
             if response.content:
@@ -649,4 +649,3 @@ class ClickUpTool:
             logger.error(f"Error listing lists: {str(e)}")
             error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
             return {"error": error_msg}
-
