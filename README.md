@@ -1,5 +1,7 @@
 # LeanWorks
 
+[![Watch the LeanWorks product demo](https://img.youtube.com/vi/R19LnjhraIM/hqdefault.jpg)](https://youtu.be/R19LnjhraIM)
+
 A comprehensive AI agent framework combining intelligent task automation with Retrieval Augmented Generation (RAG) capabilities. LeanWorks provides a clean, API-based architecture that bridges AI agents with enterprise tools and knowledge management systems.
 
 ## Installation
